@@ -8,8 +8,11 @@ pydantic>=2.7
 scipy>=1.11
 scikit-learn>=1.4
 
-# --- models (GPU) ---
-# torch: ставится отдельно под свою CUDA, см. README
+# --- models ---
+# Всё открытое и бесплатное. Бустинги считают на CPU и этого достаточно.
+# torch нужен только для нейросетевых моделей: ставится отдельно
+#   CPU:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   CUDA: см. pytorch.org (только при наличии NVIDIA)
 catboost>=1.2.5
 lightgbm>=4.3
 
