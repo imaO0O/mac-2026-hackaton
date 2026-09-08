@@ -1,0 +1,26 @@
+# --- core ---
+pandas==2.2.3
+numpy>=1.26,<2.1
+pyarrow>=15.0
+openpyxl>=3.1
+pyyaml>=6.0
+pydantic>=2.7
+scipy>=1.11
+scikit-learn>=1.4
+
+# --- models (GPU) ---
+# torch: ставится отдельно под свою CUDA, см. README
+catboost>=1.2.5
+lightgbm>=4.3
+
+# --- explainability / analysis ---
+shap>=0.45
+statsmodels>=0.14
+
+# --- app / demo ---
+streamlit>=1.35
+plotly>=5.22
+
+# --- dev ---
+pytest>=8.0
+ruff>=0.4

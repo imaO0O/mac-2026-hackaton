@@ -1,0 +1,127 @@
+# Единая конфигурация проекта. Всё, что является ДОПУЩЕНИЕМ (не подтверждено
+# выданными материалами), помечено ключом assumption: true — этого требует ТЗ.
+
+paths:
+  # Папка с исходной выдачей (xlsx, pdf, data.rar). Переопределяется NEFTE_SOURCE_DIR.
+  source_dir: "C:/Users/USER/OneDrive/Desktop/oil"
+  # Локальный кэш (распакованные csv + parquet). Переопределяется NEFTE_DATA_DIR.
+  # Держим ВНЕ OneDrive: ~340 МБ csv не нужно синхронизировать.
+  data_dir: "C:/Users/USER/nefte_data"
+  files:
+    avt_csv: "raw/avt_tags.csv"
+    ht_csv: "raw/242000_tags.csv"
+    archive: "data.rar"
+    lims_xlsx: "ЛИМСы 01.01.2023 - н.в_ (2).xlsx"
+    pak_xlsx: "Выгрузка ПАК 01.01.2023 - н.в_.xlsx"
+    tags_xlsx: "Теги_хакатон.xlsx"
+
+telemetry:
+  freq: "10min"
+  start: "2023-01-01 00:00:00"
+  end: "2026-08-07 00:00:00"
+  # Значения-заглушки «плохого качества» в телеметрии (см. docs/DATA_NOTES.md).
+  sentinel_values: [307.0, 313.0]
+  # Теги, у которых 307 — легитимное значение, проверить перед использованием: нет таких.
+  dead_tags: ["D10"]          # АВТ: плотность нефти, 189207/189217 = 307 → сигнала нет
+  suspect_tags: ["F26", "F5", "P44", "P52"]   # >60% отрицательных значений или длинные полки
+  # Порог «замороженного» сигнала: N одинаковых значений подряд (10-мин отсчёты)
+  frozen_min_samples: 18       # 3 часа
+
+quality:
+  # Целевой показатель товарного ДТ
+  target:
+    name: "product_sulfur_mgkg"
+    lims_source: "Гидроочистка|2|Mg.Sulfur"
+    pak_source: "24-2000:Mg.Sulfur"
+  # Приоритет источников: ЛИМС → ПАК → ВАК (жёстко задано ТЗ)
+  source_priority: ["lims", "pak", "vak"]
+  # Возраст анализа, после которого значение считается устаревшим
+  staleness_hours:
+    lims: 24
+    pak: 1
+  # Порог обрезки лабораторных выбросов (мг/кг). Всё выше — карантин, не факт.
+  lims_sulfur_outlier_above: 50.0
+
+spec:
+  # Жёсткие ограничения. Источник указан у каждого.
+  product_sulfur_mgkg:
+    max: 10.0
+    source: "ТЗ, п.4 «Минимальные жёсткие проверки»"
+    assumption: false
+  blend_fractions_sum:
+    value: 1.0
+    tolerance: 1.0e-6
+    source: "ТЗ, п.4"
+    assumption: false
+  flash_point_c:
+    min: 55.0
+    source: "EN 590 / ГОСТ 32511 — в пакете спецификация не выдана"
+    assumption: true
+  t95_c:
+    max: 360.0
+    source: "EN 590"
+    assumption: true
+  density_15c_kgm3:
+    min: 820.0
+    max: 845.0
+    source: "EN 590"
+    assumption: true
+  cfpp_c:
+    max: -5.0
+    source: "сорт F (зимний), сезонность не выдана"
+    assumption: true
+
+limits:
+  # Рабочие диапазоны управляющих воздействий НЕ выданы в пакете.
+  # Используем консервативный модельный диапазон = [p05, p95] истории,
+  # плюс ограничение на скорость изменения за один цикл. Это ДОПУЩЕНИЕ.
+  mode: "historical_quantile"
+  quantiles: [0.05, 0.95]
+  assumption: true
+  max_step_per_cycle:      # максимальное изменение за один цикл рекомендации
+    temperature_c: 2.0
+    pressure_mpa: 0.05
+    flow_rel: 0.03         # 3% от текущего значения
+  assumption_note: "Промышленные уставки не выданы; исторический min/max не выдаётся за предел."
+
+controls:
+  # Кандидатные управляющие воздействия (обоснование — docs/DATA_NOTES.md, схемы АВТ).
+  avt:
+    - {tag: "T55", name: "Температура на выходе печи П-3", scheme: "avt_furnace_outlet_temp_c", unit: "°C"}
+    - {tag: "T1",  name: "Температура верха К-1",          scheme: "avt_column_top_temp_c",     unit: "°C"}
+    - {tag: "T20", name: "Температура верха К-2",          scheme: "avt_column_top_temp_c",     unit: "°C"}
+    - {tag: "P22", name: "Давление верха К-2",             scheme: "avt_column_pressure_mpa_abs", unit: "кгс/см2"}
+    - {tag: "F29", name: "Расход пара в К-2",              scheme: "steam_t",                   unit: "т/ч"}
+    - {tag: "F30", name: "Расход фр.290-350 с установки",  scheme: "avt_diesel_flow_tph",       unit: "т/ч"}
+    - {tag: "F32", name: "Расход фр.240-290 с установки",  scheme: "avt_diesel_flow_tph",       unit: "т/ч"}
+  ht:
+    - {tag: "T5",  name: "Р-201: температура ГСС на выходе", unit: "°C"}
+    - {tag: "T11", name: "Реакторный блок: температура",     unit: "°C", note: "буква имени НЕ соответствует смыслу"}
+    - {tag: "F26", name: "Расход сырья на установку (объёмный)", scheme: "ht_feed_flow_m3h", unit: "м3/ч"}
+    - {tag: "P13", name: "Давление в реакторном блоке",      scheme: "ht_pressure_mpa", unit: "МПа"}
+    - {tag: "F15", name: "Расход квенча в Р-202",            unit: "нм3/ч"}
+    - {tag: "P24", name: "Расход свежего ВСГ с КЦА",         unit: "тыс.нм3/ч", note: "газ/сырьё"}
+
+split:
+  # Только по времени. Перемешивание строк запрещено ТЗ.
+  train: ["2023-01-01", "2025-06-30"]
+  val:   ["2025-07-01", "2025-12-31"]
+  test:  ["2026-01-01", "2026-08-07"]
+  # Зазор между train и val/test, чтобы лаги не «протекали» через границу
+  embargo_hours: 48
+
+demo_windows:
+  stable:      ["2025-11-01", "2025-12-15"]
+  quality_risk: ["2026-06-01", "2026-06-30"]
+  bad_data_frozen_pak: ["2026-04-14", "2026-04-28"]
+  bad_data_lims_outlier: ["2024-04-22", "2024-04-25"]
+
+optimization:
+  objective_weights:      # используются только ПОСЛЕ отсева недопустимых вариантов
+    quality_margin: 0.45
+    throughput: 0.25
+    energy_proxy: 0.15
+    severity: 0.15
+  pareto: true
+  n_candidates: 200
+  random_seed: 42
