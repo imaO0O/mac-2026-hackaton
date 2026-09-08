@@ -17,10 +17,9 @@ env/
 .pytest_cache/
 .ruff_cache/
 
-# models / artifacts
-models/*.pt
-models/*.cbm
-models/*.pkl
+# models / artifacts (обученные модели не храним в git, они воспроизводятся
+# командой scripts/train_quality.py)
+/models/
 mlruns/
 reports/runs/*
 !reports/runs/.gitkeep

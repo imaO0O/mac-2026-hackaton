@@ -16,8 +16,15 @@ from nefte.config import load_config
 
 
 def asof_features(index: pd.DatetimeIndex, series: pd.Series, name: str,
-                  max_age_hours: float | None = None) -> pd.DataFrame:
+                  max_age_hours: float | None = None,
+                  allow_exact_matches: bool = True) -> pd.DataFrame:
     """Последнее известное значение ``series`` на каждый момент ``index`` + его возраст.
+
+    Parameters
+    ----------
+    allow_exact_matches : если False, значение, измеренное РОВНО в момент t, не
+        используется. Это критично, когда ``series`` — тот же показатель, что и
+        целевая переменная: иначе модель «предсказывает» анализ, зная его.
 
     Returns
     -------
@@ -32,7 +39,8 @@ def asof_features(index: pd.DatetimeIndex, series: pd.Series, name: str,
     right.columns = ["ts", "value"]
 
     merged = pd.merge_asof(left, right.assign(src_ts=right["ts"]), on="ts",
-                           direction="backward")
+                           direction="backward",
+                           allow_exact_matches=allow_exact_matches)
     # возраст = t - время последнего фактического измерения
     age_h = (merged["ts"] - merged["src_ts"]).dt.total_seconds() / 3600.0
 

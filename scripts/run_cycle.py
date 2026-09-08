@@ -20,7 +20,14 @@ from nefte.agents.optimizer import OptimizerAgent, linear_surrogate  # noqa: E40
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
 from nefte.agents.quality import QualityAgent  # noqa: E402
 from nefte.agents.reliability import ReliabilityAgent, SeverityNorms  # noqa: E402
-from nefte.config import load_config  # noqa: E402
+from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.models.dataset import build_feature_matrix  # noqa: E402
+from nefte.models.quality_model import (  # noqa: E402
+    MODELS_DIR,
+    SulfurModel,
+    controllable_features,
+    make_model_surrogate,
+)
 from nefte.pipeline import StateBuilder  # noqa: E402
 
 # Кандидатные управляющие воздействия для базового прогона (см. configs/config.yaml).
@@ -31,6 +38,22 @@ CONTROL_TAGS = ["T5", "T11", "F26", "P13"]
 SENSITIVITIES = {"T5": -0.15, "T11": -0.15, "F26": 0.01, "P13": -0.5}
 
 
+def load_quality_model(horizon: float | None = None) -> SulfurModel | None:
+    """Обученная модель, если она есть. Иначе система работает на персистенции.
+
+    По умолчанию берём nowcast (h=0): виртуальный анализатор приводит показания
+    ПАК к лабораторной шкале и работает заметно точнее прогноза на 2 часа.
+    """
+    candidates = ([SulfurModel.default_path(horizon)] if horizon is not None
+                  else [SulfurModel.default_path(0), SulfurModel.default_path(2)])
+    for path in candidates:
+        if (path / "meta.json").exists():
+            model = SulfurModel.load(path)
+            model.attach(build_feature_matrix())
+            return model
+    return None
+
+
 def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
     norms = SeverityNorms.fit(
         pd.concat([sb.ht[["T5", "T6", "T11", "W10"]], sb.avt[["T55"]]], axis=1)
@@ -38,8 +61,21 @@ def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
         columns=["wabt", "W10", "T55"],
     )
     bounds = sb.model_bounds(CONTROL_TAGS, unit="ht")
-    optimizer = OptimizerAgent(bounds=bounds, surrogate=linear_surrogate(SENSITIVITIES), cfg=cfg)
-    return Orchestrator(QualityAgent(cfg=cfg), ReliabilityAgent(norms), optimizer, cfg=cfg)
+
+    model = load_quality_model()
+    if model is not None:
+        seen = controllable_features(model, CONTROL_TAGS)
+        print(f"[модель] sulfur: {len(model.features)} признаков, порог тревоги "
+              f"{model.alarm_threshold:.2f}, управляющие теги в модели: {seen or 'нет'}")
+        surrogate = make_model_surrogate(model)
+    else:
+        print("[модель] обученной модели нет — персистенция и линейная заглушка "
+              "(запустите scripts/train_quality.py)")
+        surrogate = linear_surrogate(SENSITIVITIES)
+
+    optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg)
+    return Orchestrator(QualityAgent(model=model, cfg=cfg), ReliabilityAgent(norms),
+                        optimizer, cfg=cfg)
 
 
 def main() -> int:

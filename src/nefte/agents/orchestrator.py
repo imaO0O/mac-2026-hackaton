@@ -25,14 +25,16 @@ class Orchestrator:
 
     def __init__(self, quality: QualityAgent, reliability: ReliabilityAgent,
                  optimizer: OptimizerAgent, cfg: dict | None = None,
-                 min_confidence: float = 0.35, act_risk_threshold: float = 0.2,
+                 min_confidence: float = 0.35, act_risk_threshold: float | None = None,
                  log_runs: bool = True):
         self.quality = quality
         self.reliability = reliability
         self.optimizer = optimizer
         self.cfg = cfg or load_config()
         self.min_confidence = min_confidence
-        self.act_risk_threshold = act_risk_threshold
+        # порог, начиная с которого вмешиваемся: берём подобранный вместе с моделью
+        self.act_risk_threshold = (act_risk_threshold if act_risk_threshold is not None
+                                   else getattr(quality, "alarm_threshold", 0.2))
         self.log_runs = log_runs
 
     # ------------------------------------------------------------------ #
@@ -85,7 +87,10 @@ class Orchestrator:
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
-                problem=f"Режим устойчив, риск выхода за спецификацию {risk:.0%}",
+                problem=("Режим устойчив, риск выхода за спецификацию "
+                         f"{risk:.0%}" if risk < self.act_risk_threshold / 2 else
+                         f"Риск {risk:.0%} — ниже порога вмешательства "
+                         f"{self.act_risk_threshold:.0%}, режим держим под наблюдением"),
                 action=hold, confidence=q.confidence,
                 expected_effect={"сера, мг/кг": round(pred, 2) if pred else "н/д"},
                 checked_constraints=self._constraint_log(),

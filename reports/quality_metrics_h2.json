@@ -1,0 +1,140 @@
+{
+  "horizon_hours": 2.0,
+  "n_features": 13,
+  "sigma_scale": 1.024069192173557,
+  "alarm_threshold": 0.2314,
+  "splits": {
+    "train": {
+      "model": {
+        "risk_source": "interval",
+        "alarm_reliable": true,
+        "n": 983,
+        "MAE": 1.4926917725416797,
+        "RMSE": 2.2900223579556,
+        "bias": 0.009513018180944672,
+        "coverage_80": 0.7639877924720244,
+        "n_over_limit": 148,
+        "alarm_threshold": 0.2314,
+        "precision@0.2": 0.11650485436893204,
+        "recall@0.2": 0.08108108108108109,
+        "precision@0.5": null,
+        "recall@0.5": 0.0,
+        "precision@0.23": 0.10714285714285714,
+        "recall@0.23": 0.04054054054054054,
+        "roc_auc": 0.43241624858391337,
+        "pr_auc": 0.13755085165157319,
+        "base_rate": 0.150559511698881,
+        "spec_precision": 0.10714285714285714,
+        "spec_recall": 0.04054054054054054
+      },
+      "baseline_pak": {
+        "n": 983,
+        "MAE": 1.6362453239419452,
+        "RMSE": 2.5671496779844505,
+        "bias": 0.1519311432511615,
+        "coverage_80": null,
+        "n_over_limit": 148,
+        "spec_precision": 0.27972027972027974,
+        "spec_recall": 0.2702702702702703
+      },
+      "baseline_lims_prev": {
+        "n": 982,
+        "MAE": 1.8490834940232472,
+        "RMSE": 2.9409981929140927,
+        "bias": -0.0287169043255435,
+        "coverage_80": null,
+        "n_over_limit": 148,
+        "spec_precision": 0.2620689655172414,
+        "spec_recall": 0.25675675675675674
+      }
+    },
+    "val": {
+      "model": {
+        "risk_source": "interval",
+        "alarm_reliable": true,
+        "n": 221,
+        "MAE": 1.5622616640101328,
+        "RMSE": 3.5130378155345463,
+        "bias": -0.7039694455046386,
+        "coverage_80": 0.8009049773755657,
+        "n_over_limit": 43,
+        "alarm_threshold": 0.2314,
+        "precision@0.2": 0.16666666666666666,
+        "recall@0.2": 0.046511627906976744,
+        "precision@0.5": null,
+        "recall@0.5": 0.0,
+        "precision@0.23": 0.3333333333333333,
+        "recall@0.23": 0.023255813953488372,
+        "roc_auc": 0.4737392213221845,
+        "pr_auc": 0.20224527849527604,
+        "base_rate": 0.19457013574660634,
+        "spec_precision": 0.3333333333333333,
+        "spec_recall": 0.023255813953488372
+      },
+      "baseline_pak": {
+        "n": 221,
+        "MAE": 2.0547720851941347,
+        "RMSE": 3.6869588528961845,
+        "bias": -1.3100474835520957,
+        "coverage_80": null,
+        "n_over_limit": 43,
+        "spec_precision": 0.2,
+        "spec_recall": 0.046511627906976744
+      },
+      "baseline_lims_prev": {
+        "n": 221,
+        "MAE": 2.0058822933904725,
+        "RMSE": 4.270126664235927,
+        "bias": -0.18506788452286527,
+        "coverage_80": null,
+        "n_over_limit": 43,
+        "spec_precision": 0.21951219512195122,
+        "spec_recall": 0.20930232558139536
+      }
+    },
+    "test": {
+      "model": {
+        "risk_source": "interval",
+        "alarm_reliable": true,
+        "n": 249,
+        "MAE": 1.6429793417452447,
+        "RMSE": 2.4355378307585385,
+        "bias": 0.0957676948627662,
+        "coverage_80": 0.751004016064257,
+        "n_over_limit": 36,
+        "alarm_threshold": 0.2314,
+        "precision@0.2": 0.038461538461538464,
+        "recall@0.2": 0.027777777777777776,
+        "precision@0.5": null,
+        "recall@0.5": 0.0,
+        "precision@0.23": 0.0,
+        "recall@0.23": 0.0,
+        "roc_auc": 0.4750912884715701,
+        "pr_auc": 0.13204985487734636,
+        "base_rate": 0.14457831325301204,
+        "spec_precision": 0.0,
+        "spec_recall": 0.0
+      },
+      "baseline_pak": {
+        "n": 249,
+        "MAE": 1.9300809254548157,
+        "RMSE": 2.7414063606187202,
+        "bias": -0.29547824692654323,
+        "coverage_80": null,
+        "n_over_limit": 36,
+        "spec_precision": 0.24242424242424243,
+        "spec_recall": 0.2222222222222222
+      },
+      "baseline_lims_prev": {
+        "n": 249,
+        "MAE": 1.8124497943972966,
+        "RMSE": 2.5945029891323936,
+        "bias": -0.0333333283543108,
+        "coverage_80": null,
+        "n_over_limit": 36,
+        "spec_precision": 0.17647058823529413,
+        "spec_recall": 0.16666666666666666
+      }
+    }
+  }
+}

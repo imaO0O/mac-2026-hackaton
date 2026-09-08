@@ -62,8 +62,11 @@ class QualityAgent:
     def __init__(self, model=None, cfg: dict | None = None, horizon_hours: float = 2.0):
         self.model = model            # обученная модель (участник 1); None → персистенция
         self.cfg = cfg or load_config()
-        self.horizon_hours = horizon_hours
+        self.horizon_hours = getattr(model, "horizon_hours", horizon_hours)
         self.limit = self.cfg["spec"]["product_sulfur_mgkg"]["max"]
+        # порог тревоги подобран на валидации вместе с моделью; без модели —
+        # консервативное значение по умолчанию
+        self.alarm_threshold = float(getattr(model, "alarm_threshold", 0.2))
 
     def predict(self, state: ProcessState, current: Measurement) -> tuple[float, float]:
         """Прогноз серы на горизонте и σ. Возвращает ``(mean, sigma)``."""
@@ -94,7 +97,13 @@ class QualityAgent:
             return QualityAssessment(ts=state.ts, confidence=0.0, notes=notes,
                                      horizon_hours=self.horizon_hours)
 
-        risk = spec_risk_normal(mean, sigma, self.limit)
+        # если у модели есть отдельный классификатор превышения — доверяем ему:
+        # редкие события он оценивает лучше, чем нормальное приближение по σ
+        risk = None
+        if self.model is not None and hasattr(self.model, "risk_for_state"):
+            risk = self.model.risk_for_state(state)
+        if risk is None:
+            risk = spec_risk_normal(mean, sigma, self.limit)
         confidence = max(0.05, min(0.95, 1.0 / (1.0 + sigma / BASELINE_SIGMA_MGKG - 1.0)))
         if not state.data_quality.usable:
             confidence *= 0.5
