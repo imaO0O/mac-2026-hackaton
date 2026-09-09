@@ -107,18 +107,8 @@ def history_features(ht: pd.DataFrame, steps_per_hour: int = 6) -> pd.DataFrame:
     if FEED not in ht.columns:
         return out
 
-    feed = ht[FEED]
-    down = feed < feed.median() * 0.2
-    # останов засчитываем, только если провал держится дольше шести часов
-    block = (down != down.shift()).cumsum()
-    long_enough = down.groupby(block).transform("size") >= 6 * steps_per_hour
-    shutdown = down & long_enough
-
-    since = pd.Series(np.nan, index=ht.index, dtype="float64")
-    marks = ht.index.to_series().where(shutdown).ffill()
-    since = (ht.index.to_series() - marks).dt.total_seconds() / 3600
-    out["reg_run_hours"] = since.fillna(
-        (ht.index.to_series() - ht.index[0]).dt.total_seconds() / 3600)
+    out["reg_run_hours"] = hours_since_outage(ht[FEED], min_outage_hours=6,
+                                              steps_per_hour=steps_per_hour)
 
     temps = [t for t in REACTOR_TEMPS if t in ht.columns]
     if temps:
@@ -127,6 +117,31 @@ def history_features(ht: pd.DataFrame, steps_per_hour: int = 6) -> pd.DataFrame:
         out["reg_wabt_dev30"] = wabt - wabt.rolling(window, min_periods=window // 4).median()
         out["reg_wabt_slope7"] = wabt - wabt.shift(7 * 24 * steps_per_hour)
     return out
+
+
+def outage_mask(feed: pd.Series, min_outage_hours: float = 6.0,
+                steps_per_hour: int = 6, level: float = 0.2) -> pd.Series:
+    """Маска останова: расход сырья ниже ``level`` от медианы дольше заданного срока.
+
+    Считать нужно по СЫРОМУ сигналу. Детектор достоверности справедливо убирает
+    замороженный на нуле расход как «не живое измерение», но именно этот
+    замороженный ноль и есть факт останова: на очищенных данных из десяти
+    остановов виден один.
+    """
+    down = feed < feed.median() * level
+    block = (down != down.shift()).cumsum()
+    long_enough = down.groupby(block).transform("size") >= min_outage_hours * steps_per_hour
+    return down & long_enough
+
+
+def hours_since_outage(feed: pd.Series, min_outage_hours: float = 6.0,
+                       steps_per_hour: int = 6) -> pd.Series:
+    """Часы с последнего останова заданной длительности."""
+    shutdown = outage_mask(feed, min_outage_hours, steps_per_hour)
+    index = feed.index.to_series()
+    marks = index.where(shutdown).ffill()
+    since = (index - marks).dt.total_seconds() / 3600
+    return since.fillna((index - feed.index[0]).dt.total_seconds() / 3600)
 
 
 def regime_features(ht: pd.DataFrame, with_history: bool = True,

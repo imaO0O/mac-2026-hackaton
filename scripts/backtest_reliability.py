@@ -25,7 +25,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
+from nefte.agents.reliability import ReliabilityAgent
+from nefte.models.regime import FEED, RECYCLE_GAS  # noqa: E402
+from nefte.data.loaders import load_telemetry  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
 from nefte.data.loaders import lims_series, load_pak  # noqa: E402
@@ -60,6 +62,89 @@ def severity_series(agent: ReliabilityAgent, avt: pd.DataFrame, ht: pd.DataFrame
     severity = (factors.fillna(0).mul(weights, axis=1).sum(axis=1) / total.replace(0, np.nan))
     factors["severity"] = severity.clip(0, 1)
     return factors
+
+
+def explain_health_by_downtime(agent, health: pd.DataFrame) -> dict:
+    """Какая часть «отказов анализатора» объясняется остановом установки.
+
+    Зависший поточный анализатор — не всегда неисправность: если через него
+    ничего не течёт, он держит последнее значение. Разделять эти случаи важно,
+    иначе исправный прибор попадёт в список отказавших.
+    """
+    if agent.down_series is None or health.empty:
+        return {}
+    rows = []
+    for _, ep in health.iterrows():
+        window = agent.down_series.loc[ep["start"]:ep["end"]]
+        share = float(window.mean()) if len(window) else 0.0
+        rows.append({"start": str(ep["start"])[:16], "hours": round(float(ep["hours"]), 1),
+                     "value": round(float(ep["value"]), 2),
+                     "downtime_share_%": round(share * 100, 0)})
+    frame = pd.DataFrame(rows)
+    total = float(frame["hours"].sum())
+    explained = float((frame["hours"] * frame["downtime_share_%"] / 100).sum())
+    return {
+        "total_hours": round(total, 0),
+        "explained_by_downtime_hours": round(explained, 0),
+        "explained_%": round(explained / total * 100, 0) if total else 0,
+        "episodes": frame.sort_values("hours", ascending=False).head(5).to_dict("records"),
+    }
+
+
+def describe_campaigns(agent) -> dict:
+    """Сколько циклов между остановами удалось восстановить и какой они длины."""
+    if agent.run_hours is None:
+        return {}
+    run = agent.run_hours.dropna()
+    # новый цикл начинается там, где счётчик наработки сбрасывается
+    resets = run.diff() < 0
+    lengths = []
+    current_start = run.index[0]
+    for ts in run.index[resets.to_numpy()]:
+        lengths.append((ts - current_start).total_seconds() / 86400)
+        current_start = ts
+    lengths.append((run.index[-1] - current_start).total_seconds() / 86400)
+    lengths = [x for x in lengths if x > 0]
+    if not lengths:
+        return {}
+    series = pd.Series(lengths)
+    return {"n_campaigns": len(lengths),
+            "median_days": round(float(series.median()), 1),
+            "max_days": round(float(series.max()), 1),
+            "scale_hours_p95": round(float(agent.run_hours_scale or 0), 1)}
+
+
+def describe_anomalies(agent, avt: pd.DataFrame, ht: pd.DataFrame, cfg: dict) -> dict:
+    """Как часто многомерный детектор считает режим нетипичным."""
+    if not agent.detector.fitted:
+        return {}
+    frame = pd.DataFrame(index=ht.index)
+    temps = [t for t in agent.REACTOR_TEMPS if t in ht.columns]
+    if temps:
+        frame["wabt"] = ht[temps].mean(axis=1)
+    if agent.DP_TAG in ht.columns:
+        frame[agent.DP_TAG] = ht[agent.DP_TAG]
+    if agent.FURNACE_TAG in avt.columns:
+        frame[agent.FURNACE_TAG] = avt[agent.FURNACE_TAG]
+    if FEED in ht.columns:
+        frame["feed"] = ht[FEED]
+        if RECYCLE_GAS in ht.columns:
+            denom = ht[FEED].where(ht[FEED] > ht[FEED].median() * 0.1)
+            frame["h2_oil"] = ht[RECYCLE_GAS] / denom
+    if "P13" in ht.columns:
+        frame["pressure"] = ht["P13"]
+
+    flags = agent.detector.flags(frame.dropna())
+    tr_lo, tr_hi = cfg["split"]["train"]
+    te_lo, te_hi = cfg["split"]["test"]
+    train_part = flags.loc[tr_lo:tr_hi]
+    test_part = flags.loc[te_lo:te_hi]
+    return {
+        "threshold": round(agent.detector.threshold, 2),
+        "columns": agent.detector.columns,
+        "train_%": round(float(train_part.mean() * 100), 2) if len(train_part) else None,
+        "test_%": round(float(test_part.mean() * 100), 2) if len(test_part) else None,
+    }
 
 
 def main() -> int:
@@ -99,7 +184,8 @@ def main() -> int:
 
     # ---------- 2. severity ------------------------------------------------
     print("[2/3] severity по истории…")
-    agent = ReliabilityAgent.from_history(sb.avt, sb.ht, cfg)
+    agent = ReliabilityAgent.from_history(sb.avt, sb.ht, cfg,
+                                         raw_ht=load_telemetry("ht"))
     factors = severity_series(agent, sb.avt, sb.ht)
     sev = factors["severity"].dropna()
 
@@ -112,6 +198,31 @@ def main() -> int:
         sev.rename("severity").reset_index().rename(columns={"date": "ts", "index": "ts"}),
         on="ts", direction="backward", tolerance=pd.Timedelta("6h"),
         allow_exact_matches=False).dropna()
+
+    # ---------- 2б. новые факторы: наработка и аномалии --------------------
+    campaigns = describe_campaigns(agent)
+    if campaigns:
+        print(f"      циклов между остановами: {campaigns['n_campaigns']}, "
+              f"медиана {campaigns['median_days']} сут, "
+              f"самый длинный {campaigns['max_days']} сут")
+    downtime_share = float(agent.down_series.mean() * 100) if agent.down_series is not None else 0
+    print(f"      установка не в работе: {downtime_share:.1f} % времени")
+    explained = explain_health_by_downtime(agent, health)
+    if explained:
+        print(f"      из {explained['total_hours']:.0f} ч зависаний ПАК на остановы "
+              f"приходится {explained['explained_by_downtime_hours']:.0f} ч "
+              f"({explained['explained_%']:.0f} %) — прибор держал последнее значение, "
+              f"потому что через него ничего не шло")
+    anomalies = describe_anomalies(agent, sb.avt, sb.ht, cfg)
+    if anomalies:
+        print(f"      детектор аномалий: порог {anomalies['threshold']}, "
+              f"нетипично train {anomalies['train_%']} %, test {anomalies['test_%']} %")
+    report["downtime"] = {"share_%": round(downtime_share, 2), **explained}
+    report["campaigns"] = campaigns
+    report["anomaly_detector"] = anomalies
+    report["risk_thresholds"] = [round(agent.thresholds[0], 3), round(agent.thresholds[1], 3)]
+    print(f"      пороги risk_class по train: "
+          f"{agent.thresholds[0]:.2f} / {agent.thresholds[1]:.2f}")
 
     print("[3/3] оценка…")
     from sklearn.metrics import roc_auc_score

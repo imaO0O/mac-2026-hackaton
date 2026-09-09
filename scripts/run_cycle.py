@@ -20,6 +20,7 @@ from nefte.agents.optimizer import OptimizerAgent, linear_surrogate  # noqa: E40
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
 from nefte.agents.quality import QualityAgent  # noqa: E402
 from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
+from nefte.data.loaders import load_telemetry  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.kinetics import make_kinetic_surrogate  # noqa: E402
@@ -57,7 +58,10 @@ def load_quality_model(horizon: float | None = None) -> SulfurModel | None:
 
 def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
     # нормировка тяжести режима — только по обучающему периоду, без заглядывания вперёд
-    reliability = ReliabilityAgent.from_history(sb.avt, sb.ht, cfg)
+    # сырая телеметрия нужна агенту, чтобы увидеть остановы: очистка убирает
+    # замороженный на нуле расход сырья вместе с самим фактом останова
+    reliability = ReliabilityAgent.from_history(sb.avt, sb.ht, cfg,
+                                               raw_ht=load_telemetry("ht"))
     bounds = sb.model_bounds(CONTROL_TAGS, unit="ht")
 
     model = load_quality_model()

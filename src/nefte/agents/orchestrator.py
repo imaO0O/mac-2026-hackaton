@@ -58,7 +58,20 @@ class Orchestrator:
             "risk_class": r.risk_class,
         }
 
-        # --- отказ 1: данные непригодны ---------------------------------
+        # --- отказ 1: установка не в работе -----------------------------
+        # Проверяется ПЕРВОЙ: на остановленной установке устаревший ЛИМС и
+        # зависший анализатор — следствия останова, а не самостоятельные причины.
+        # Назвать оператору следствие вместо причины значит сбить его с толку.
+        if not r.admissible and any("остановлена" in note for note in r.notes):
+            rec = Recommendation(
+                ts=state.ts, state_summary=state_summary, freshness=freshness,
+                problem="Установка не в работе",
+                abstained=True, confidence=q.confidence,
+                abstain_reason="; ".join(r.notes),
+            )
+            return self._finish(rec, state, q, r)
+
+        # --- отказ 2: данные непригодны ---------------------------------
         if not state.data_quality.usable or q.confidence < self.min_confidence:
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
@@ -74,14 +87,16 @@ class Orchestrator:
 
         candidates = self.optimizer.propose(state, q, r)
 
-        # --- отказ 2: допустимых вариантов нет --------------------------
+        # --- отказ 3: допустимых вариантов нет --------------------------
         if not candidates:
+            reasons = ["Ни один вариант не проходит жёсткие ограничения",
+                       self.optimizer.rejection_summary()]
+            reasons += [n for n in r.notes if n]
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
                 problem=f"Риск нарушения спецификации по сере: {risk:.0%}",
                 abstained=True, confidence=q.confidence,
-                abstain_reason="Ни один вариант не проходит жёсткие ограничения. "
-                               f"{self.optimizer.rejection_summary()}. "
+                abstain_reason=". ".join(x for x in reasons if x) + ". "
                                "Требуется решение технолога.",
             )
             return self._finish(rec, state, q, r)

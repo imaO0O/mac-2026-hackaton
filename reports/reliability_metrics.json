@@ -45,22 +45,22 @@
     "train": {
       "n": 983,
       "n_over_limit": 148,
-      "roc_auc": 0.567,
-      "mean_severity_ok": 0.524,
-      "mean_severity_over": 0.567
+      "roc_auc": 0.565,
+      "mean_severity_ok": 0.521,
+      "mean_severity_over": 0.563
     },
     "test": {
       "n": 249,
       "n_over_limit": 36,
-      "roc_auc": 0.351,
+      "roc_auc": 0.35,
       "mean_severity_ok": 0.562,
-      "mean_severity_over": 0.502
+      "mean_severity_over": 0.501
     },
-    "dp_growth_spearman": 0.157,
+    "dp_growth_spearman": 0.165,
     "distribution": {
-      "low_%": 44.4,
-      "medium_%": 49.4,
-      "high_%": 6.1
+      "low_%": 44.9,
+      "medium_%": 49.0,
+      "high_%": 6.2
     }
   },
   "analyzer_failures": {
@@ -99,14 +99,75 @@
       }
     ]
   },
+  "downtime": {
+    "share_%": 3.91,
+    "total_hours": 2299.0,
+    "explained_by_downtime_hours": 1233.0,
+    "explained_%": 54.0,
+    "episodes": [
+      {
+        "start": "2024-03-16 18:20",
+        "hours": 1122.0,
+        "value": 7.71,
+        "downtime_share_%": 67.0
+      },
+      {
+        "start": "2026-06-18 06:00",
+        "hours": 437.5,
+        "value": 7.88,
+        "downtime_share_%": 55.0
+      },
+      {
+        "start": "2026-04-15 02:40",
+        "hours": 289.5,
+        "value": 18.45,
+        "downtime_share_%": 83.0
+      },
+      {
+        "start": "2023-05-06 13:40",
+        "hours": 92.8,
+        "value": 6.78,
+        "downtime_share_%": 0.0
+      },
+      {
+        "start": "2024-06-01 11:30",
+        "hours": 46.5,
+        "value": 8.31,
+        "downtime_share_%": 0.0
+      }
+    ]
+  },
+  "campaigns": {
+    "n_campaigns": 4,
+    "median_days": 253.4,
+    "max_days": 759.7,
+    "scale_hours_p95": 10017.1
+  },
+  "anomaly_detector": {
+    "threshold": 6.03,
+    "columns": [
+      "wabt",
+      "W10",
+      "T55",
+      "feed",
+      "h2_oil",
+      "pressure"
+    ],
+    "train_%": 1.0,
+    "test_%": 3.63
+  },
+  "risk_thresholds": [
+    0.525,
+    0.764
+  ],
   "tradeoff_quality_vs_severity": {
     "train": {
-      "auc_severity": 0.567,
-      "auc_inverse": 0.433
+      "auc_severity": 0.565,
+      "auc_inverse": 0.435
     },
     "test": {
-      "auc_severity": 0.351,
-      "auc_inverse": 0.649
+      "auc_severity": 0.35,
+      "auc_inverse": 0.65
     }
   }
 }
