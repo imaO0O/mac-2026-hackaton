@@ -152,19 +152,22 @@ class Recommendation(BaseModel):
         """Человекочитаемый вид для демо и логов."""
         head = f"[{self.ts:%Y-%m-%d %H:%M}] "
         if self.abstained:
-            return head + f"РЕКОМЕНДАЦИИ НЕТ: {self.abstain_reason}"
-        moves = ", ".join(
-            f"{tag}: {self.action.deltas.get(tag, 0):+.2f} → {val:.2f}"
-            for tag, val in (self.action.moves if self.action else {}).items()
-        )
-        text = (
-            f"{head}{self.problem}\n"
-            f"  Действие: {moves or 'без изменений'}\n"
-            f"  Эффект: {self.expected_effect}\n"
-            f"  Проверено: {'; '.join(self.checked_constraints)}\n"
-            f"  Уверенность: {self.confidence:.2f}\n"
-            f"  Почему: {self.explanation}"
-        )
+            # рецептуру показываем и при отказе: вопрос «а смешением не вытянуть?»
+            # оператор задаёт именно тогда, когда рекомендации по режиму нет
+            text = head + f"РЕКОМЕНДАЦИИ НЕТ: {self.abstain_reason}"
+        else:
+            moves = ", ".join(
+                f"{tag}: {self.action.deltas.get(tag, 0):+.2f} → {val:.2f}"
+                for tag, val in (self.action.moves if self.action else {}).items()
+            )
+            text = (
+                f"{head}{self.problem}\n"
+                f"  Действие: {moves or 'без изменений'}\n"
+                f"  Эффект: {self.expected_effect}\n"
+                f"  Проверено: {'; '.join(self.checked_constraints)}\n"
+                f"  Уверенность: {self.confidence:.2f}\n"
+                f"  Почему: {self.explanation}"
+            )
         if self.blend is not None:
             shares = ", ".join(f"{name} {share * 100:.1f} %"
                                for name, share in self.blend.fractions.items() if share > 0)

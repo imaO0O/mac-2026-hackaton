@@ -81,6 +81,15 @@ def test_recipe_appears_in_operator_text():
     assert "Смешение" in text and "сумма долей 100.0 %" in text
 
 
+def test_recipe_is_shown_even_when_recommendation_is_refused():
+    """«А смешением не вытянуть?» оператор спрашивает как раз при отказе."""
+    rec = build_system().run(make_state(lims=(12.0, 1.0), pak=(12.2, 0.1)))
+    rec.abstained = True
+    rec.abstain_reason = "проверка вывода"
+    text = rec.to_operator_text()
+    assert "РЕКОМЕНДАЦИИ НЕТ" in text and "Смешение (НЕДОПУСТИМА" in text
+
+
 def test_system_without_blending_agent_keeps_working():
     """Контракт остаётся совместимым: без блока смешения цикл прежний."""
     norms = SeverityNorms(bounds={"wabt": (355.0, 375.0)})
