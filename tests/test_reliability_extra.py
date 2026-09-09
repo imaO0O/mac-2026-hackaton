@@ -163,3 +163,47 @@ def test_risk_thresholds_are_used_from_agent():
 
     assert strict.assess(state).risk_class == "high"
     assert lenient.assess(state).risk_class == "low"
+
+
+def test_boundary_case_is_announced():
+    """У границы класса решение зависит от весов — оператор должен это видеть."""
+    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0)})
+    agent = ReliabilityAgent(norms=norms, thresholds=(0.30, 0.70))
+
+    state = make_state()
+    # severity ≈ 0.68 — почти порог «тяжёлого» режима
+    state.telemetry_ht.update({"T5": 369.0, "T6": 369.0, "T11": 368.5})
+    notes = " ".join(agent.assess(state).notes)
+    assert "вплотную к порогу" in notes
+
+    far = make_state()
+    far.telemetry_ht.update({"T5": 358.0, "T6": 357.0, "T11": 356.0})
+    assert "вплотную к порогу" not in " ".join(agent.assess(far).notes)
+
+
+# --------------------------------------------------------------------------- #
+# вердикты по подозрительным тегам
+# --------------------------------------------------------------------------- #
+
+def test_unusable_tags_are_not_in_features():
+    """Тег со статусом do_not_use не должен молча вернуться в признаки."""
+    from nefte.config import load_config
+    from nefte.models.dataset import AVT_TAGS
+
+    verdicts = load_config()["telemetry"].get("tag_verdicts", {})
+    banned = {key.split(":")[1] for key, v in verdicts.items()
+              if key.startswith("avt:") and v["status"] == "do_not_use"}
+
+    assert banned, "вердикты должны быть заданы в configs/config.yaml"
+    assert not (banned & set(AVT_TAGS)), (
+        f"в признаках АВТ есть запрещённые теги: {banned & set(AVT_TAGS)}. "
+        "Если решение изменилось — сначала обновите вердикт в конфиге."
+    )
+
+
+def test_every_verdict_has_a_reason():
+    from nefte.config import load_config
+
+    for tag, verdict in load_config()["telemetry"]["tag_verdicts"].items():
+        assert verdict["status"] in {"usable", "do_not_use"}, tag
+        assert len(verdict["reason"]) > 40, f"вердикт по {tag} без обоснования"

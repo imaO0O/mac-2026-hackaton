@@ -96,6 +96,10 @@ class ReliabilityAgent:
     # В истории таких периодов три, реактор в них 7-43 °C вместо 360.
     DOWN_FEED_LEVEL = 0.1          # доля от медианного расхода сырья
     DOWN_TEMP_C = 150.0
+    # Насколько близко к порогу класса severity считается «пограничным».
+    # Проверка устойчивости показала: решения, отстоящие от порога дальше, не
+    # меняются при возмущении весов на ±20 %, а пограничные — меняются всегда.
+    CLASS_BOUNDARY_MARGIN = 0.06
 
     def __init__(self, norms: SeverityNorms | None = None,
                  ramp_series: pd.Series | None = None,
@@ -342,6 +346,15 @@ class ReliabilityAgent:
         top = max(factors, key=factors.get)
         notes.append(f"Основной вклад в тяжесть режима: {top} ({factors[top]:.2f}); "
                      f"пороги {medium_thr:.2f}/{high_thr:.2f} — квантили обучающего периода.")
+
+        # Пограничный случай называем вслух: веса severity подобраны по смыслу,
+        # и у самой границы класса решение от них действительно зависит.
+        nearest = min((abs(severity - t), t) for t in (medium_thr, high_thr))
+        if nearest[0] <= self.CLASS_BOUNDARY_MARGIN:
+            notes.append(f"Тяжесть режима {severity:.2f} вплотную к порогу "
+                         f"{nearest[1]:.2f}: класс режима, а с ним и допустимый "
+                         f"диапазон уставок, может измениться от небольшой "
+                         f"переоценки факторов. Решение требует внимания технолога.")
 
         if factors.get("anomaly", 0) > 1.0:
             parts = self.detector.contributions(self._anomaly_inputs(state))

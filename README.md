@@ -108,6 +108,7 @@ scripts/prepare_data.py  распаковка + кэш
 scripts/train_quality.py обучение агента качества (CPU)
 scripts/backtest_reliability.py бэктест severity и отчёт по достоверности
 scripts/check_sensitivity.py замер отклика прогноза и суррогата на уставки
+scripts/check_severity_robustness.py устойчивость решений к весам severity
 scripts/run_blending.py  рецептура смешения на момент времени
 scripts/run_cycle.py     сквозной прогон
 docs/DATA_NOTES.md       разбор данных: ловушки, допущения, окна ← читать первым
