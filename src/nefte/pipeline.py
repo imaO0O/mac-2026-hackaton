@@ -41,6 +41,12 @@ class StateBuilder:
         lims = load_lims()
         self.lims_sulfur = clean_lims_sulfur(
             lims_series(self.cfg["quality"]["target"]["lims_source"], lims))
+        # сера сырья гидроочистки: нужна кинетическому суррогату как «вход» реакции
+        try:
+            feed = lims_series("Гидроочистка|1|Mass.Sulfur", lims)
+            self.lims_feed_sulfur = feed[feed > 0] * 10_000        # % масс. → мг/кг
+        except KeyError:
+            self.lims_feed_sulfur = None
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -69,6 +75,13 @@ class StateBuilder:
             quality["lims_sulfur_mgkg"] = Measurement(
                 value=lims_val, unit="мг/кг", source=Source.LIMS, age_hours=lims_age,
                 is_stale=lims_age > stale["lims"])
+        if self.lims_feed_sulfur is not None:
+            feed_val, feed_age = self._last(self.lims_feed_sulfur, ts)
+            if feed_val is not None:
+                quality["lims_feed_sulfur_mgkg"] = Measurement(
+                    value=feed_val, unit="мг/кг", source=Source.LIMS, age_hours=feed_age,
+                    is_stale=feed_age > stale["lims"] * 7,
+                    comment="сера сырья гидроочистки")
         if pak_val is not None:
             quality["pak_sulfur_ppm"] = Measurement(
                 value=pak_val, unit="мг/кг", source=Source.PAK, age_hours=pak_age,

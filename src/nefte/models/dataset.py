@@ -22,6 +22,7 @@ from nefte.config import cache_dir, load_config
 from nefte.data.cleaning import clean_lims_sulfur, clean_telemetry, frozen_mask
 from nefte.data.features import asof_features
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
+from nefte.models.regime import regime_features
 
 # Теги гидроочистки — берём все: именно там формируется сера продукта.
 HT_TAGS: list[str] | None = None
@@ -55,6 +56,11 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
     avt, _ = clean_telemetry(load_telemetry("avt", AVT_TAGS), unit="avt")
     ht, _ = clean_telemetry(load_telemetry("ht", HT_TAGS), unit="ht")
 
+    # Признаки режима считаются по «сырым» тегам 24-2000 ДО добавления префикса:
+    # обессеривание зависит от сочетания температуры, времени контакта и водорода,
+    # а не от каждого тега по отдельности (см. models/regime.py).
+    regime = regime_features(ht)
+
     avt = avt.add_prefix("avt_")
     ht = ht.add_prefix("ht_")
     tel = pd.concat([avt, ht], axis=1).astype("float32")
@@ -66,6 +72,14 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
         frames.append(roll.std().add_suffix(f"_std{w}").astype("float32"))
     # изменение режима за 6 ч — скорость, а не уровень
     frames.append((tel - tel.shift(36)).add_suffix("_d6h").astype("float32"))
+
+    # режим: мгновенные значения плюс сглаженные — качество реагирует с запаздыванием
+    frames.append(regime)
+    smooth = regime[[c for c in ("reg_wabt", "reg_kinetic", "reg_h2_partial")
+                     if c in regime.columns]]
+    for w in (36, 144):
+        frames.append(smooth.rolling(w, min_periods=max(2, w // 3))
+                      .mean().add_suffix(f"_mean{w}").astype("float32"))
     feats = pd.concat(frames, axis=1)
 
     # --- поточный анализатор серы: значение, динамика, достоверность ---

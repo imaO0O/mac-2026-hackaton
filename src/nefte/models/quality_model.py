@@ -21,6 +21,28 @@ from nefte.agents.schemas import ProcessState
 from nefte.config import ROOT
 
 MODELS_DIR = ROOT / "models"
+
+# Физика, зашитая в модель монотонными ограничениями CatBoost.
+# −1: рост признака СНИЖАЕТ серу в продукте, +1: повышает.
+# Смысл не в точности, а в направлении: без этого дерево кусочно-постоянно и
+# на сдвиг уставки может ответить нулём или ответить в неверную сторону, а
+# оптимизатор потом «улучшает» качество, понижая температуру реактора.
+PHYSICS_MONOTONE: dict[str, int] = {
+    # глубже режим — чище продукт
+    "reg_wabt": -1, "reg_wabt_mean36": -1, "reg_wabt_mean144": -1,
+    "reg_kinetic": -1, "reg_kinetic_mean36": -1, "reg_kinetic_mean144": -1,
+    "reg_drive": -1,
+    "reg_h2_partial": -1, "reg_h2_partial_mean36": -1, "reg_h2_partial_mean144": -1,
+    "reg_h2_oil": -1, "reg_makeup_h2_oil": -1,
+    # экзотерма — следствие глубины реакций: больше тепловыделение, чище продукт.
+    # Без этого знака рост T11 «улучшал» серу через незажатый признак разности.
+    "reg_dt_react": -1,
+    "ht_T5": -1, "ht_T6": -1, "ht_T11": -1, "ht_P13": -1,
+    # выше нагрузка и охлаждение слоя — меньше время контакта и глубина очистки
+    "ht_F26": 1, "reg_quench_ratio": 1, "ht_F15": 1,
+    # катализатор стареет — при тех же условиях сера растёт
+    "reg_run_hours": 1,
+}
 # 90 % интервал: σ = (q90 - q10) / (2 * 1.2816)
 Z90 = 1.2815515655446004
 
@@ -51,6 +73,8 @@ class SulfurModel:
     # можно ли вообще доверять тревоге: False, если ни один порог на валидации
     # не даёт precision заметно выше базовой частоты нарушений
     alarm_reliable: bool = True
+    # зашивать ли в модель физическое направление отклика
+    monotone: bool = True
     metrics: dict = field(default_factory=dict)
     # матрица признаков на регулярной сетке; нужна, чтобы отдать прогноз по ProcessState
     feature_matrix: pd.DataFrame | None = None
@@ -83,6 +107,7 @@ class SulfurModel:
 
         self.features = list(X.columns)
         eval_set = (X_val[self.features], y_val) if X_val is not None else None
+        constraints = self._monotone_constraints()
 
         for name, loss in [("q50", "Quantile:alpha=0.5"),
                            ("q10", "Quantile:alpha=0.1"),
@@ -91,13 +116,25 @@ class SulfurModel:
                 loss_function=loss, iterations=self.iterations,
                 learning_rate=self.learning_rate, depth=self.depth,
                 random_seed=self.seed, verbose=False, allow_writing_files=False,
-                task_type="CPU",
+                task_type="CPU", monotone_constraints=constraints,
             )
             model.fit(X, y, eval_set=eval_set, use_best_model=eval_set is not None)
             self.models[name] = model
 
         self._fit_classifier(X, y, X_val, y_val)
         return self
+
+    def _monotone_constraints(self) -> list[int] | None:
+        """Направление влияния каждого признака: −1, 0 или +1.
+
+        Ограничение накладывается только на признаки с ясной физикой; остальные
+        обучаются свободно. Классификатор превышения использует те же знаки:
+        что повышает серу, то повышает и риск выйти за спецификацию.
+        """
+        if not self.monotone:
+            return None
+        constraints = [PHYSICS_MONOTONE.get(f, 0) for f in self.features]
+        return constraints if any(constraints) else None
 
     def _fit_classifier(self, X, y, X_val=None, y_val=None) -> None:
         """Классификатор превышения спецификации. Классы несбалансированы (~15 %),
@@ -116,6 +153,7 @@ class SulfurModel:
             depth=self.depth, random_seed=self.seed, verbose=False,
             allow_writing_files=False, task_type="CPU",
             auto_class_weights="Balanced", loss_function="Logloss",
+            monotone_constraints=self._monotone_constraints(),
         )
         clf.fit(X, target, eval_set=eval_set, use_best_model=eval_set is not None)
         self.clf = clf
@@ -359,6 +397,7 @@ class SulfurModel:
                 "metrics": self.metrics, "seed": self.seed,
                 "sigma_scale": self.sigma_scale,
                 "alarm_threshold": self.alarm_threshold, "limit": self.limit,
+                "monotone": self.monotone,
                 "risk_calibration": list(self.risk_calibration) if self.risk_calibration else None,
                 "risk_source": self.risk_source, "alarm_reliable": self.alarm_reliable}
         (path / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -379,7 +418,8 @@ class SulfurModel:
                   risk_calibration=tuple(meta["risk_calibration"])
                   if meta.get("risk_calibration") else None,
                   risk_source=meta.get("risk_source", "classifier"),
-                  alarm_reliable=meta.get("alarm_reliable", True))
+                  alarm_reliable=meta.get("alarm_reliable", True),
+                  monotone=meta.get("monotone", True))
         for name in ("q50", "q10", "q90"):
             model = CatBoostRegressor()
             model.load_model(str(path / f"{name}.cbm"))
@@ -426,22 +466,22 @@ def baseline_metrics(pred: pd.Series, y: pd.Series, limit: float = 10.0) -> dict
 def make_model_surrogate(model: "SulfurModel", tag_prefix: str = "ht_"):
     """Суррогат «режим → качество» поверх обученной модели.
 
-    Берёт строку признаков на момент состояния, подменяет в ней управляющие теги
-    значениями кандидата и заново считает прогноз. Если тега нет среди признаков
-    модели, изменение этой уставки на прогноз не влияет — и это видно честно,
-    а не маскируется линейной заглушкой.
+    Берёт строку признаков на момент состояния, подставляет уставки кандидата и
+    ПЕРЕСЧИТЫВАЕТ производные признаки режима (WABT, кратность газ/сырьё,
+    кинетический индекс). Без пересчёта подмена одной колонки бессмысленна:
+    модель опирается на сочетания, и они остались бы от старого режима.
     """
+    from nefte.models.regime import apply_moves_to_rows
 
     def _fn(state: ProcessState, moves: dict[str, float]) -> dict[str, float]:
         row = model._row_for(state)
         if row is None:
             return {"product_sulfur_mgkg": float("nan")}
-        row = row.copy()
-        for tag, value in moves.items():
-            for col in (f"{tag_prefix}{tag}", f"avt_{tag}", tag):
-                if col in row.columns:
-                    row[col] = value
-                    break
+        row = apply_moves_to_rows(row.copy(), moves, prefix=tag_prefix)
+        for tag, value in moves.items():          # уставки АВТ, если такие есть
+            col = f"avt_{tag}"
+            if col in row.columns and f"{tag_prefix}{tag}" not in row.columns:
+                row[col] = value
         return {"product_sulfur_mgkg": float(model.predict_frame(row)["q50"].iloc[0])}
 
     return _fn

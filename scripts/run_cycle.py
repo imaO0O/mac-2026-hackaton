@@ -22,6 +22,7 @@ from nefte.agents.quality import QualityAgent  # noqa: E402
 from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
+from nefte.models.kinetics import make_kinetic_surrogate  # noqa: E402
 from nefte.models.quality_model import (  # noqa: E402
     MODELS_DIR,
     SulfurModel,
@@ -64,7 +65,10 @@ def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
         seen = controllable_features(model, CONTROL_TAGS)
         print(f"[модель] sulfur: {len(model.features)} признаков, порог тревоги "
               f"{model.alarm_threshold:.2f}, управляющие теги в модели: {seen or 'нет'}")
-        surrogate = make_model_surrogate(model)
+        # уровень серы даёт модель, отклик на изменение уставок — кинетика:
+        # в истории связи «температура → сера» почти нет, и чисто статистический
+        # суррогат оставил бы оптимизатор без градиента (docs/QUALITY_AGENT.md)
+        surrogate = make_kinetic_surrogate(model, base_surrogate=make_model_surrogate(model))
     else:
         print("[модель] обученной модели нет — персистенция и линейная заглушка "
               "(запустите scripts/train_quality.py)")

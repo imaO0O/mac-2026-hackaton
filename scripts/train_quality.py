@@ -25,6 +25,7 @@ from nefte.models.dataset import (  # noqa: E402
     build_training_table,
     persistence_baselines,
 )
+from nefte.models.regime import INSTANT_FEATURES  # noqa: E402
 from nefte.models.quality_model import (  # noqa: E402
     SulfurModel,
     baseline_metrics,
@@ -34,7 +35,8 @@ from nefte.models.quality_model import (  # noqa: E402
 # Кандидатные управляющие воздействия: модель обязана их видеть, иначе оптимизатор
 # не сможет оценивать сценарии (см. configs/config.yaml → controls).
 CONTROL_TAGS = ["T5", "T11", "F26", "P13", "F15", "P24"]
-CONTROL_COLUMNS = [f"ht_{t}" for t in CONTROL_TAGS] + ["avt_T55"]
+CONTROL_COLUMNS = ([f"ht_{t}" for t in CONTROL_TAGS] + ["avt_T55"]
+                   + INSTANT_FEATURES)   # признаки режима тоже обязаны остаться
 
 
 def main() -> int:
