@@ -45,6 +45,8 @@ def main() -> int:
     ap.add_argument("--iterations", type=int, default=600)
     ap.add_argument("--top-features", type=int, default=40,
                     help="сколько признаков оставить после первого прохода (0 — все)")
+    ap.add_argument("--no-monotone", action="store_true",
+                    help="не зашивать физическое направление отклика в модель")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -62,7 +64,8 @@ def main() -> int:
         print(f"      {name}: {len(xx)} анализов")
 
     print("[3/4] обучение CatBoost (CPU)…")
-    model = SulfurModel(horizon_hours=args.horizon, iterations=args.iterations)
+    model = SulfurModel(horizon_hours=args.horizon, iterations=args.iterations,
+                        monotone=not args.no_monotone)
     model.fit(*parts["train"], *parts["val"], top_features=args.top_features or None,
               must_keep=CONTROL_COLUMNS)
     print(f"      признаков после отбора: {len(model.features)}; "
@@ -89,6 +92,7 @@ def main() -> int:
 
     print("[4/4] оценка…")
     report = {"horizon_hours": args.horizon, "n_features": len(model.features),
+              "monotone": model.monotone,
               "sigma_scale": model.sigma_scale, "alarm_threshold": model.alarm_threshold,
               "splits": {}}
     for name in ("train", "val", "test"):
