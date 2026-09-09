@@ -3,6 +3,13 @@
 Генерирует варианты изменения режима, отсекает недопустимые и ранжирует
 оставшиеся. Жёсткие ограничения проверяются ДО ранжирования: никакая экономика
 не может «перевесить» нарушение спецификации (ключевой принцип ТЗ).
+
+Поиск устроен в три слоя, все считаются на CPU за доли секунды:
+1. «ничего не делать» — обязательный кандидат, чтобы система не создавала
+   лишних воздействий в устойчивом режиме;
+2. покоординатная сетка — по одному изменению за раз, такие рекомендации
+   оператору понятнее всего;
+3. случайные точки плюс локальный поиск вокруг лучшего — для комбинаций.
 """
 from __future__ import annotations
 
@@ -10,7 +17,6 @@ from typing import Callable, Protocol
 
 import numpy as np
 
-from nefte.agents.quality import spec_risk_normal
 from nefte.agents.schemas import (
     Candidate,
     ProcessState,
@@ -18,6 +24,10 @@ from nefte.agents.schemas import (
     ReliabilityAssessment,
 )
 from nefte.config import load_config
+
+# Во сколько σ закладываем запас по качеству: рекомендация должна оставаться
+# допустимой не только в среднем, но и при разумно плохом исходе.
+SAFETY_SIGMAS = 1.0
 
 
 class QualitySurrogate(Protocol):
@@ -50,6 +60,75 @@ def linear_surrogate(sensitivities: dict[str, float], base_key: str = "product_s
     return _fn
 
 
+# --------------------------------------------------------------------------- #
+# производительность и энергозатраты
+# --------------------------------------------------------------------------- #
+
+def default_throughput(feed_tag: str = "F26", product_tag: str = "F17"
+                       ) -> Callable[[ProcessState, dict[str, float]], float]:
+    """Выпуск гидроочищенного ДТ, т/ч.
+
+    Фактических материальных балансов в пакете нет, поэтому считаем, что выпуск
+    меняется пропорционально расходу сырья на установку. ДОПУЩЕНИЕ, помечено в
+    docs/DATA_NOTES.md.
+    """
+
+    def _fn(state: ProcessState, moves: dict[str, float]) -> float:
+        product = state.telemetry_ht.get(product_tag)
+        feed_now = state.telemetry_ht.get(feed_tag)
+        if product is None:
+            return 0.0
+        feed_new = moves.get(feed_tag, feed_now)
+        if not feed_now or feed_new is None:
+            return float(product)
+        return float(product * feed_new / feed_now)
+
+    return _fn
+
+
+def default_energy_proxy() -> Callable[[ProcessState, dict[str, float]], float]:
+    """Прозрачный стоимостной прокси энергозатрат (безразмерный).
+
+    Экономических данных в пакете нет. Складываем то, что физически тянет за
+    собой топливо и пар, с явными весами:
+
+    * температура на выходе печи П-3 сверх 370 °C — топливо печи;
+    * реакторные температуры сверх 350 °C — нагрев ГСС;
+    * расход сырья — прокачка и нагрев потока;
+    * расход пара в колонны АВТ.
+
+    Все коэффициенты — ДОПУЩЕНИЕ. Важно не абсолютное значение, а то, что
+    сравнение вариантов между собой воспроизводимо.
+    """
+
+    def _fn(state: ProcessState, moves: dict[str, float]) -> float:
+        def value(tag: str) -> float | None:
+            if tag in moves:
+                return moves[tag]
+            return state.telemetry_ht.get(tag, state.telemetry_avt.get(tag))
+
+        energy = 0.0
+        furnace = value("T55")
+        if furnace is not None:
+            energy += max(furnace - 370.0, 0.0) * 1.0
+        for tag in ("T5", "T6", "T11"):
+            temp = value(tag)
+            if temp is not None:
+                energy += max(temp - 350.0, 0.0) * 0.3
+        feed = value("F26")
+        if feed is not None:
+            energy += feed * 0.02
+        for tag in ("F26", "F27", "F28", "F29"):
+            steam = state.telemetry_avt.get(tag)
+            if steam is not None:
+                energy += max(steam, 0.0) * 0.01
+        return float(energy)
+
+    return _fn
+
+
+# --------------------------------------------------------------------------- #
+
 class OptimizerAgent:
     """Сэмплирование кандидатов в допустимой области + многокритериальный выбор."""
 
@@ -58,17 +137,19 @@ class OptimizerAgent:
                  cfg: dict | None = None,
                  throughput_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
                  energy_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
-                 max_spec_risk: float = 0.2):
+                 grid_levels: int = 5):
         self.bounds = bounds                 # модельные диапазоны (допущение!)
         self.surrogate = surrogate
         self.cfg = cfg or load_config()
-        # максимально допустимая вероятность нарушения спецификации
-        self.max_spec_risk = max_spec_risk
-        self.throughput_fn = throughput_fn
-        self.energy_fn = energy_fn
+        self.throughput_fn = throughput_fn or default_throughput()
+        self.energy_fn = energy_fn or default_energy_proxy()
+        self.grid_levels = grid_levels
         self.rng = np.random.default_rng(self.cfg["optimization"]["random_seed"])
-        # последний оценённый набор кандидатов — нужен оркестратору, чтобы объяснить отказ
-        self.last_evaluated: list[Candidate] = []
+        # причины отсева последнего прогона — оркестратор объясняет ими отказ
+        self._last_violations: list[str] = []
+        # оценённый вариант «ничего не делать»: нужен как точка отсчёта даже тогда,
+        # когда сам он недопустим (текущий режим уже у предела)
+        self._last_hold: Candidate | None = None
 
     # ------------------------------------------------------------------ #
     def _effective_bounds(self, state: ProcessState,
@@ -90,23 +171,68 @@ class OptimizerAgent:
                 out[tag] = (lo_e, hi_e)
         return out
 
+    @staticmethod
+    def _candidate(idx: str, current: dict[str, float], moves: dict[str, float],
+                   bounds: dict[str, tuple[float, float]] | None = None) -> Candidate:
+        """Собирает вариант, дотягивая незатронутые теги внутрь допустимой области.
+
+        Если текущее значение тега уже вне диапазона, разрешённого агентом
+        надёжности, «не трогать его» — не нейтральное действие: вариант остался бы
+        недопустимым. Поэтому такой тег возвращается к ближайшей границе, и это
+        честно показывается оператору как отдельное изменение.
+        """
+        full: dict[str, float] = {}
+        for tag, value in current.items():
+            if value is None:
+                continue
+            new_value = moves.get(tag, value)
+            if bounds and tag in bounds:
+                lo, hi = bounds[tag]
+                new_value = min(max(new_value, lo), hi)
+            full[tag] = float(new_value)
+        deltas = {t: full[t] - current[t] for t in full if current.get(t) is not None}
+        return Candidate(id=idx, moves=full, deltas=deltas)
+
     def generate(self, state: ProcessState, reliability: ReliabilityAssessment,
                  n: int | None = None) -> list[Candidate]:
-        """Кандидаты: «ничего не делать» + случайные точки допустимой области."""
+        """«Ничего не делать» + покоординатная сетка + случайные комбинации."""
         n = n or self.cfg["optimization"]["n_candidates"]
         bounds = self._effective_bounds(state, reliability)
         current = {t: state.telemetry_ht.get(t, state.telemetry_avt.get(t)) for t in bounds}
 
-        cands = [Candidate(id="hold", moves={t: v for t, v in current.items() if v is not None},
-                           deltas={t: 0.0 for t in bounds})]
-        for i in range(n):
-            moves, deltas = {}, {}
-            for tag, (lo, hi) in bounds.items():
-                val = float(self.rng.uniform(lo, hi))
-                moves[tag] = val
-                deltas[tag] = val - (current[tag] or val)
-            cands.append(Candidate(id=f"cand_{i:03d}", moves=moves, deltas=deltas))
+        cands = [self._candidate("hold", current, {})]
+
+        # покоординатно: одно изменение за раз — самая понятная оператору форма
+        for tag, (lo, hi) in bounds.items():
+            for level in np.linspace(lo, hi, self.grid_levels):
+                if current[tag] is None or abs(level - current[tag]) < 1e-9:
+                    continue
+                cands.append(self._candidate(f"{tag}={level:.2f}", current,
+                                             {tag: float(level)}, bounds))
+
+        # комбинации
+        n_random = max(n - len(cands), 0)
+        for i in range(n_random):
+            moves = {tag: float(self.rng.uniform(lo, hi)) for tag, (lo, hi) in bounds.items()}
+            cands.append(self._candidate(f"mix_{i:03d}", current, moves, bounds))
         return cands
+
+    def refine(self, state: ProcessState, reliability: ReliabilityAssessment,
+               best: Candidate, n: int = 40, shrink: float = 0.25) -> list[Candidate]:
+        """Локальный поиск вокруг лучшего кандидата — уточнение без новых рисков."""
+        bounds = self._effective_bounds(state, reliability)
+        current = {t: state.telemetry_ht.get(t, state.telemetry_avt.get(t)) for t in bounds}
+        out = []
+        for i in range(n):
+            moves = {}
+            for tag, (lo, hi) in bounds.items():
+                span = (hi - lo) * shrink
+                center = best.moves.get(tag, current.get(tag))
+                if center is None:
+                    continue
+                moves[tag] = float(np.clip(self.rng.normal(center, span / 2), lo, hi))
+            out.append(self._candidate(f"local_{i:03d}", current, moves, bounds))
+        return out
 
     # ------------------------------------------------------------------ #
     def evaluate(self, state: ProcessState, cands: list[Candidate],
@@ -114,82 +240,146 @@ class OptimizerAgent:
                  reliability: ReliabilityAssessment) -> list[Candidate]:
         """Прогноз качества и проверка жёстких ограничений для каждого кандидата."""
         limit = self.cfg["spec"]["product_sulfur_mgkg"]["max"]
-        # запас на неопределённость прогноза: σ восстанавливаем из 95% интервала
-        lo, hi = quality.intervals.get("product_sulfur_mgkg", (limit, limit))
-        sigma = max((hi - lo) / (2 * 1.96), 0.0)
+
+        # σ прогноза берём из интервала агента качества: запас должен опираться на
+        # измеренную неопределённость, а не на константу
+        interval = quality.intervals.get("product_sulfur_mgkg")
+        sigma = (interval[1] - interval[0]) / (2 * 1.96) if interval else 1.7
+        margin = SAFETY_SIGMAS * float(sigma)
+
+        # прогноз для «ничего не делать» — точка отсчёта: если текущий режим уже
+        # близок к пределу, отказываться от улучшающего действия неправильно
+        hold_pred = None
+        for c in cands:
+            if c.id == "hold":
+                hold_pred = self.surrogate(state, c.moves).get("product_sulfur_mgkg")
+                break
 
         for c in cands:
             pred = self.surrogate(state, c.moves)
             c.predicted_quality = pred
             sulfur = pred.get("product_sulfur_mgkg")
             violations = []
+            guaranteed = False
+
             if sulfur is None or sulfur != sulfur:
-                risk = 1.0
                 violations.append("нет прогноза качества")
             else:
-                # допустимость — по ВЕРОЯТНОСТИ нарушения, а не по точечному прогнозу:
-                # 9.9 мг/кг при σ=2 это не «в спецификации», а «монетка».
-                risk = spec_risk_normal(sulfur, sigma, limit)
-                if risk > self.max_spec_risk:
+                guaranteed = sulfur + margin <= limit
+                improving = hold_pred is not None and sulfur < hold_pred - 1e-9
+                if not guaranteed and not improving:
                     violations.append(
-                        f"P(сера > {limit}) = {risk:.0%} при допустимых "
-                        f"{self.max_spec_risk:.0%} (прогноз {sulfur:.2f} ± {1.96 * sigma:.2f})")
+                        f"сера {sulfur:.2f} + запас {margin:.2f} мг/кг выходит за {limit} "
+                        f"и вариант не лучше бездействия")
             if not reliability.admissible:
                 violations.append("режим признан недопустимым агентом надёжности")
 
-            c.spec_risk = {"product_sulfur_mgkg": risk}
-            c.throughput = self.throughput_fn(state, c.moves) if self.throughput_fn else None
-            c.energy_proxy = self.energy_fn(state, c.moves) if self.energy_fn else None
+            c.guaranteed = bool(guaranteed)
+            c.spec_risk = {"product_sulfur_mgkg":
+                           float(sulfur > limit) if sulfur == sulfur else 1.0}
+            c.throughput = self.throughput_fn(state, c.moves)
+            c.energy_proxy = self.energy_fn(state, c.moves)
             c.severity_index = reliability.severity_index
             c.violations = violations
             c.feasible = not violations
+
+        self._last_violations = [v for c in cands for v in c.violations]
+        for c in cands:
+            if c.id == "hold":
+                self._last_hold = c
+                break
         return cands
 
     # ------------------------------------------------------------------ #
     def rank(self, cands: list[Candidate]) -> list[Candidate]:
-        """Взвешенная свёртка + ранг Парето. Ранжируются ТОЛЬКО допустимые."""
+        """Взвешенная свёртка + ранг Парето. Ранжируются ТОЛЬКО допустимые.
+
+        Варианты с гарантированным запасом всегда идут выше тех, что просто
+        улучшают качество: гарантия важнее свёртки критериев.
+        """
         w = self.cfg["optimization"]["objective_weights"]
         limit = self.cfg["spec"]["product_sulfur_mgkg"]["max"]
         feas = [c for c in cands if c.feasible]
         if not feas:
             return []
 
-        def norm(values: list[float]) -> list[float]:
+        def norm(values: list[float]) -> np.ndarray:
             arr = np.asarray(values, dtype=float)
             rng = np.nanmax(arr) - np.nanmin(arr)
-            return list((arr - np.nanmin(arr)) / rng) if rng > 0 else [0.5] * len(arr)
+            return (arr - np.nanmin(arr)) / rng if rng > 0 else np.full(len(arr), 0.5)
 
-        margin = norm([limit - (c.predicted_quality.get("product_sulfur_mgkg") or limit)
-                       for c in feas])
-        thr = norm([c.throughput if c.throughput is not None else 0.0 for c in feas])
-        eng = norm([c.energy_proxy if c.energy_proxy is not None else 0.0 for c in feas])
-        sev = norm([c.severity_index if c.severity_index is not None else 0.0 for c in feas])
+        quality_margin = norm([limit - (c.predicted_quality.get("product_sulfur_mgkg") or limit)
+                               for c in feas])
+        throughput = norm([c.throughput or 0.0 for c in feas])
+        energy = norm([c.energy_proxy or 0.0 for c in feas])
+        severity = norm([c.severity_index or 0.0 for c in feas])
 
         for i, c in enumerate(feas):
-            c.score = float(w["quality_margin"] * margin[i] + w["throughput"] * thr[i]
-                            - w["energy_proxy"] * eng[i] - w["severity"] * sev[i])
+            c.score = float(w["quality_margin"] * quality_margin[i]
+                            + w["throughput"] * throughput[i]
+                            - w["energy_proxy"] * energy[i]
+                            - w["severity"] * severity[i])
 
-        objectives = np.column_stack([margin, thr, -np.asarray(eng), -np.asarray(sev)])
+        # Парето: максимизируем запас и выпуск, минимизируем энергию и тяжесть
+        objectives = np.column_stack([quality_margin, throughput, -energy, -severity])
         for i, c in enumerate(feas):
-            dominated = np.all(objectives >= objectives[i], axis=1) & \
-                        np.any(objectives > objectives[i], axis=1)
+            dominated = (np.all(objectives >= objectives[i], axis=1)
+                         & np.any(objectives > objectives[i], axis=1))
             c.pareto_rank = int(dominated.sum())
 
-        return sorted(feas, key=lambda c: (-(c.score or 0.0), c.pareto_rank or 0))
+        return sorted(feas, key=lambda c: (not c.guaranteed, -(c.score or 0.0),
+                                           c.pareto_rank or 0))
+
+    # ------------------------------------------------------------------ #
+    def last_hold(self) -> Candidate | None:
+        """Оценённый вариант «ничего не делать» из последнего прогона."""
+        return self._last_hold
+
+    def rejection_summary(self) -> str:
+        """Почему отсеялись варианты — человекочитаемо, для объяснения отказа.
+
+        Оператору важно не «допустимых нет», а какое именно ограничение уперлось:
+        качество, модельный диапазон или запрет агента надёжности.
+        """
+        if not self._last_violations:
+            return "причины отсева неизвестны"
+        kinds: dict[str, int] = {}
+        for v in self._last_violations:
+            key = ("прогноз качества с запасом выходит за предел" if "сера" in v else
+                   "режим признан недопустимым по тяжести" if "недопустим" in v else
+                   "нет прогноза качества" if "нет прогноза" in v else v)
+            kinds[key] = kinds.get(key, 0) + 1
+        top = sorted(kinds.items(), key=lambda kv: -kv[1])
+        return "; ".join(f"{name} ({count})" for name, count in top[:3])
+
+    @staticmethod
+    def pareto_front(cands: list[Candidate]) -> list[Candidate]:
+        """Недоминируемые варианты — то, между чем реально выбирает технолог."""
+        return [c for c in cands if c.pareto_rank == 0]
+
+    @staticmethod
+    def diverse_alternatives(cands: list[Candidate], k: int = 3) -> list[Candidate]:
+        """k различающихся альтернатив: показывать три почти одинаковых бессмысленно."""
+        out: list[Candidate] = []
+        for c in cands:
+            if len(out) >= k:
+                break
+            if all(_distance(c, other) > 1e-3 for other in out):
+                out.append(c)
+        return out
 
     def propose(self, state: ProcessState, quality: QualityAssessment,
                 reliability: ReliabilityAssessment) -> list[Candidate]:
-        cands = self.generate(state, reliability)
-        cands = self.evaluate(state, cands, quality, reliability)
-        self.last_evaluated = cands
-        return self.rank(cands)
+        cands = self.evaluate(state, self.generate(state, reliability), quality, reliability)
+        ranked = self.rank(cands)
+        if not ranked:
+            return []
+        extra = self.evaluate(state, self.refine(state, reliability, ranked[0]),
+                              quality, reliability)
+        return self.rank(cands + extra)
 
-    def rejection_summary(self) -> str:
-        """Почему не осталось допустимых вариантов — текст для оператора."""
-        from collections import Counter
-        reasons = Counter(v.split(" (")[0] for c in self.last_evaluated for v in c.violations)
-        if not reasons:
-            return "нет данных о причинах отсева"
-        top = "; ".join(f"{r} ({n} из {len(self.last_evaluated)} вариантов)"
-                        for r, n in reasons.most_common(2))
-        return top
+
+def _distance(a: Candidate, b: Candidate) -> float:
+    """Насколько два варианта различаются по управляющим воздействиям."""
+    tags = set(a.deltas) | set(b.deltas)
+    return sum(abs(a.deltas.get(t, 0.0) - b.deltas.get(t, 0.0)) for t in tags)

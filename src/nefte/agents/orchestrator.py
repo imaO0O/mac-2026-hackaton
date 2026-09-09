@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from nefte.agents.optimizer import OptimizerAgent
 from nefte.agents.quality import QualityAgent
 from nefte.agents.reliability import ReliabilityAgent
@@ -26,7 +28,7 @@ class Orchestrator:
     def __init__(self, quality: QualityAgent, reliability: ReliabilityAgent,
                  optimizer: OptimizerAgent, cfg: dict | None = None,
                  min_confidence: float = 0.35, act_risk_threshold: float | None = None,
-                 log_runs: bool = True):
+                 log_runs: bool = True, min_hours_between_actions: float = 4.0):
         self.quality = quality
         self.reliability = reliability
         self.optimizer = optimizer
@@ -36,6 +38,10 @@ class Orchestrator:
         self.act_risk_threshold = (act_risk_threshold if act_risk_threshold is not None
                                    else getattr(quality, "alarm_threshold", 0.2))
         self.log_runs = log_runs
+        # Ограничение частоты воздействий: дёргать уставки каждый цикл нельзя,
+        # отклик качества запаздывает и режим не успевает устояться.
+        self.min_hours_between_actions = min_hours_between_actions
+        self._last_action_ts = None
 
     # ------------------------------------------------------------------ #
     def run(self, state: ProcessState) -> Recommendation:
@@ -81,7 +87,29 @@ class Orchestrator:
             return self._finish(rec, state, q, r)
 
         best = candidates[0]
-        hold = next((c for c in candidates if c.id == "hold"), None)
+        # точка отсчёта — всегда оценённое бездействие, даже если оно недопустимо
+        hold = self.optimizer.last_hold() or next(
+            (c for c in candidates if c.id == "hold"), None)
+
+        # Воздействовали недавно — ждём отклика, а не накладываем новое изменение.
+        # Переступаем через лимит только если продукт УЖЕ вне спецификации: тогда
+        # ждать нельзя. Просто высокий риск ожидания не отменяет.
+        already_off_spec = pred is not None and pred > self.cfg["spec"]["product_sulfur_mgkg"]["max"]
+        if self._too_soon(state.ts) and hold is not None and not already_off_spec:
+            rec = Recommendation(
+                ts=state.ts, state_summary=state_summary, freshness=freshness,
+                problem=f"Риск нарушения спецификации: {risk:.0%}",
+                action=hold, confidence=q.confidence,
+                expected_effect={"сера, мг/кг": round(pred, 2) if pred else "н/д"},
+                checked_constraints=self._constraint_log(),
+                explanation=(
+                    f"Предыдущее воздействие было менее {self.min_hours_between_actions:.0f} ч "
+                    "назад. Качество реагирует на изменение режима с запаздыванием, "
+                    "поэтому ждём отклика вместо нового вмешательства. "
+                    "Спецификация при этом не нарушена."),
+                alternatives=self.optimizer.diverse_alternatives(candidates, 3),
+            )
+            return self._finish(rec, state, q, r)
 
         # --- нормальный режим: не создаём лишних воздействий ------------
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
@@ -92,11 +120,11 @@ class Orchestrator:
                          f"Риск {risk:.0%} — ниже порога вмешательства "
                          f"{self.act_risk_threshold:.0%}, режим держим под наблюдением"),
                 action=hold, confidence=q.confidence,
-                expected_effect={"сера, мг/кг": round(pred, 2) if pred else "н/д"},
+                expected_effect=self._effect(hold, hold, r),
                 checked_constraints=self._constraint_log(),
                 explanation="Текущий режим удовлетворяет ограничениям, "
                             "изменение уставок не требуется.",
-                alternatives=candidates[1:4],
+                alternatives=self.optimizer.diverse_alternatives(candidates, 3),
             )
             return self._finish(rec, state, q, r)
 
@@ -106,18 +134,42 @@ class Orchestrator:
             problem=f"Риск нарушения спецификации по сере: {risk:.0%} "
                     f"(прогноз {pred:.2f} мг/кг при пределе "
                     f"{self.cfg['spec']['product_sulfur_mgkg']['max']})",
-            action=best, confidence=q.confidence,
-            expected_effect={
-                "сера, мг/кг": round(best.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
-                "тяжесть режима": round(r.severity_index, 2),
-            },
+            action=best,
+            expected_effect=self._effect(best, hold, r),
             checked_constraints=self._constraint_log(),
-            explanation=self._explain(best, candidates, q, r),
-            alternatives=candidates[1:4],
+            explanation=self._explain(best, candidates, q, r,
+                                      q.confidence * (1.0 if best.guaranteed else 0.6)),
+            confidence=q.confidence * (1.0 if best.guaranteed else 0.6),
+            alternatives=self.optimizer.diverse_alternatives(candidates[1:], 3),
         )
+        self._last_action_ts = state.ts if any(
+            abs(d) > 1e-6 for d in best.deltas.values()) else self._last_action_ts
         return self._finish(rec, state, q, r)
 
     # ------------------------------------------------------------------ #
+    def _too_soon(self, ts) -> bool:
+        if self._last_action_ts is None:
+            return False
+        hours = (pd.Timestamp(ts) - pd.Timestamp(self._last_action_ts)).total_seconds() / 3600
+        return 0 <= hours < self.min_hours_between_actions
+
+    def _effect(self, best, hold, r) -> dict:
+        """Эффект показываем относительно бездействия — иначе он ни о чём не говорит."""
+        out: dict[str, float | str] = {
+            "сера, мг/кг": round(best.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
+            "тяжесть режима": round(r.severity_index, 2),
+        }
+        if hold is not None:
+            base = hold.predicted_quality.get("product_sulfur_mgkg")
+            cur = best.predicted_quality.get("product_sulfur_mgkg")
+            if base is not None and cur is not None:
+                out["сера к бездействию"] = round(cur - base, 2)
+            if hold.throughput and best.throughput is not None:
+                out["выпуск, %"] = round((best.throughput / hold.throughput - 1) * 100, 2)
+            if hold.energy_proxy and best.energy_proxy is not None:
+                out["энергия, %"] = round((best.energy_proxy / hold.energy_proxy - 1) * 100, 2)
+        return out
+
     def _constraint_log(self) -> list[str]:
         spec = self.cfg["spec"]
         out = [f"сера ≤ {spec['product_sulfur_mgkg']['max']} мг/кг (жёсткое)"]
@@ -125,15 +177,26 @@ class Orchestrator:
         out.append("шаг изменения за цикл ограничен")
         return out
 
-    def _explain(self, best, candidates, q, r) -> str:
+    def _explain(self, best, candidates, q, r, confidence: float | None = None) -> str:
         n_feas = len(candidates)
+        n_front = len(self.optimizer.pareto_front(candidates))
         moves = ", ".join(f"{t} {d:+.2f}" for t, d in best.deltas.items() if abs(d) > 1e-6)
-        return (
-            f"Из {n_feas} допустимых вариантов выбран {best.id}: {moves or 'без изменений'}. "
-            f"Он даёт наибольший запас по сере при тяжести режима "
-            f"{r.severity_index:.2f} ({r.risk_class}). "
-            f"Уверенность прогноза {q.confidence:.2f}."
+        text = (
+            f"Из {n_feas} допустимых вариантов ({n_front} на фронте Парето) выбран "
+            f"{best.id}: {moves or 'без изменений'}. Он даёт наибольший запас по сере "
+            f"при тяжести режима {r.severity_index:.2f} ({r.risk_class}). "
+            f"Уверенность {confidence if confidence is not None else q.confidence:.2f}."
         )
+        # конфликт целей: качество тянет вверх по температуре, надёжность — вниз
+        if not best.guaranteed:
+            text += (" ВНИМАНИЕ: запас по неопределённости не гарантирован — вариант "
+                     "снижает серу относительно бездействия, но остаётся близко к пределу. "
+                     "Нужен контрольный лабораторный анализ.")
+        if r.constraints:
+            limited = ", ".join(sorted(r.constraints))
+            text += (f" Агент надёжности ограничил {limited}, поэтому вариант выбран "
+                     f"внутри суженного диапазона, а не по максимуму качества.")
+        return text
 
     def _finish(self, rec: Recommendation, state, q, r) -> Recommendation:
         if self.log_runs:

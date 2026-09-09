@@ -88,6 +88,9 @@ class Candidate(BaseModel):
     energy_proxy: float | None = None
     severity_index: float | None = None
     feasible: bool = True
+    # True — прогноз укладывается в предел С ЗАПАСОМ на неопределённость;
+    # False — вариант лишь улучшает качество относительно бездействия, гарантии нет
+    guaranteed: bool = True
     violations: list[str] = []
     score: float | None = None
     pareto_rank: int | None = None
