@@ -23,6 +23,7 @@ from nefte.data.cleaning import clean_lims_sulfur, clean_telemetry, frozen_mask
 from nefte.data.features import asof_features
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
 from nefte.models.regime import regime_features
+from nefte.models.vak import evaluate as evaluate_vak
 
 # Теги гидроочистки — берём все: именно там формируется сера продукта.
 HT_TAGS: list[str] | None = None
@@ -53,8 +54,28 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
         return pd.read_parquet(cache)
 
     cfg = load_config()
-    avt, _ = clean_telemetry(load_telemetry("avt", AVT_TAGS), unit="avt")
+    # АВТ грузим целиком: формулы ВАК используют теги за пределами отобранного
+    # набора. В признаки при этом идёт только подмножество AVT_TAGS.
+    avt_full, _ = clean_telemetry(load_telemetry("avt", None), unit="avt")
     ht, _ = clean_telemetry(load_telemetry("ht", HT_TAGS), unit="ht")
+    avt = avt_full[[c for c in AVT_TAGS if c in avt_full.columns]]
+
+    # Виртуальные анализаторы из справочника: экспертные комбинации тех же тегов.
+    # Формулы, опирающиеся на ЛИМС, получают значение строго ДО момента t.
+    lims_all = load_lims()
+    lims_ctx = {}
+    for key, series_name in (("LIMS_D15", "Гидроочистка|2|D15"),
+                             ("LIMS_T95", "Гидроочистка|2|95%.T")):
+        try:
+            raw_series = lims_series(series_name, lims_all)
+        except KeyError:
+            continue
+        column = asof_features(ht.index, raw_series, key, allow_exact_matches=False)[key]
+        lims_ctx[key] = column
+    vak, vak_skipped = evaluate_vak(avt_full, ht, lims_ctx)
+    if vak_skipped:
+        names = ", ".join(f"{i['target']} ({i['reason']})" for i in vak_skipped)
+        print(f"[ВАК] не обсчитаны: {names}")
 
     # Признаки режима считаются по «сырым» тегам 24-2000 ДО добавления префикса:
     # обессеривание зависит от сочетания температуры, времени контакта и водорода,
@@ -75,6 +96,7 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
 
     # режим: мгновенные значения плюс сглаженные — качество реагирует с запаздыванием
     frames.append(regime)
+    frames.append(vak)
     smooth = regime[[c for c in ("reg_wabt", "reg_kinetic", "reg_h2_partial")
                      if c in regime.columns]]
     for w in (36, 144):
@@ -96,7 +118,7 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
     feats = feats.join(pak_df.reindex(feats.index).astype("float32"))
 
     # --- лабораторные ряды как признаки: значение + возраст --------------
-    lims = load_lims()
+    lims = lims_all
     target = clean_lims_sulfur(lims_series(TARGET_SERIES, lims))
     feed = lims_series(FEED_SULFUR_SERIES, lims)
 
