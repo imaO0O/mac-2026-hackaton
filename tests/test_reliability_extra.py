@@ -207,3 +207,55 @@ def test_every_verdict_has_a_reason():
     for tag, verdict in load_config()["telemetry"]["tag_verdicts"].items():
         assert verdict["status"] in {"usable", "do_not_use"}, tag
         assert len(verdict["reason"]) > 40, f"вердикт по {tag} без обоснования"
+
+
+# --------------------------------------------------------------------------- #
+# переходный режим
+# --------------------------------------------------------------------------- #
+
+def test_ramp_sees_a_feed_step_not_only_temperatures():
+    """Скачок расхода сырья — тоже быстрое изменение режима.
+
+    Пока фактор считался только по реакторным температурам, ступенька по сырью
+    была для него невидимой, и система спокойно добавляла +2 °C поверх скачка.
+    """
+    n = 2000
+    rng = np.random.default_rng(0)
+    idx = pd.date_range("2024-01-01", periods=n, freq="10min", name="date")
+    # обычный шум расхода нужен, иначе нормировать нечем: p95 обучающего периода
+    # окажется нулём и фактор просто не соберётся
+    feed = 250.0 + rng.normal(0, 1.5, n)
+    feed[1500:] += 80.0                       # ступенька +32 %
+    temps = {name: 360.0 + rng.normal(0, 0.2, n) for name in ("T5", "T6", "T11")}
+    ht = pd.DataFrame({**temps, "F26": feed}, index=idx)
+    avt = pd.DataFrame({"T55": 380.0 + rng.normal(0, 0.2, n)}, index=idx)
+    cfg = {"split": {"train": ["2024-01-01", "2024-01-20"]}}
+
+    with_feed = ReliabilityAgent.from_history(avt, ht, cfg).ramp_series
+    without_feed = ReliabilityAgent.from_history(avt, ht.drop(columns=["F26"]),
+                                                 cfg).ramp_series
+    assert with_feed is not None and without_feed is not None
+
+    # температуры только шумят: всплеск в момент ступеньки даёт именно расход
+    assert with_feed.iloc[1500] > ReliabilityAgent.RAMP_LIMIT
+    assert with_feed.iloc[1500] > with_feed.iloc[1400]
+    # уберём расход из набора — и тот же момент перестанет выделяться:
+    # ровно так фактор и вёл себя до правки
+    assert with_feed.iloc[1500] > without_feed.iloc[1500]
+
+
+def test_fast_ramp_forbids_raising_reactor_temperature():
+    """В переходном режиме снижать можно, ужесточать нельзя."""
+    idx = pd.date_range("2024-01-01", periods=50, freq="10min", name="date")
+    agent = ReliabilityAgent(SeverityNorms(bounds={"wabt": (355.0, 375.0)}),
+                             ramp_series=pd.Series(np.ones(len(idx)), index=idx))
+    state = make_state()
+    state.ts = idx[-1].to_pydatetime()
+
+    out = agent.assess(state)
+    assert out.factors["ramp"] > agent.RAMP_LIMIT
+    for tag in ("T5", "T6", "T11"):
+        current = state.telemetry_ht[tag]
+        lo, hi = out.constraints[tag]
+        assert hi <= current and lo < current
+    assert any("меняется быстро" in note for note in out.notes)

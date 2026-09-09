@@ -14,6 +14,28 @@ from nefte.data.cleaning import clean_lims_sulfur, frozen_mask
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
 from nefte.data.validity import SignalValidity
 
+# Доля пропусков в срезе, после которой решение принимать нельзя. ДОПУЩЕНИЕ:
+# порог выбран нами, в пакете такого требования нет.
+MAX_MISSING_SHARE = 0.2
+
+
+def is_state_usable(missing_share: float, pak_is_frozen: bool,
+                    lims_age_hours: float | None, cfg: dict | None = None) -> bool:
+    """Пригоден ли срез для принятия решения.
+
+    Правило одно на всю систему: срез непригоден, если в нём слишком много
+    пропусков или если оба источника качества молчат — поточный анализатор завис,
+    а лабораторный результат старше трёх нормативных сроков. Вынесено из
+    ``StateBuilder.build``, чтобы «злые» сценарии проверялись тем же правилом,
+    что и рабочий цикл, а не его копией.
+    """
+    cfg = cfg or load_config()
+    stale = cfg["quality"]["staleness_hours"]
+    if missing_share >= MAX_MISSING_SHARE:
+        return False
+    return not (pak_is_frozen and lims_age_hours is not None
+                and lims_age_hours > stale["lims"] * 3)
+
 
 class StateBuilder:
     """Готовит данные один раз, затем быстро отдаёт срез на любой момент."""
@@ -112,8 +134,7 @@ class StateBuilder:
             frozen_tags=(["pak_sulfur"] if pak_is_frozen else []) + sorted(frozen_tags),
             sentinel_tags=sorted(sentinel_tags),
             stale_sources=[k for k, m in quality.items() if m.is_stale],
-            usable=missing_share < 0.2 and not (pak_is_frozen and lims_age is not None
-                                                and lims_age > stale["lims"] * 3),
+            usable=is_state_usable(missing_share, pak_is_frozen, lims_age, self.cfg),
             notes=notes,
         )
 

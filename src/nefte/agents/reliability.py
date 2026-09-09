@@ -100,6 +100,10 @@ class ReliabilityAgent:
     # Проверка устойчивости показала: решения, отстоящие от порога дальше, не
     # меняются при возмущении весов на ±20 %, а пограничные — меняются всегда.
     CLASS_BOUNDARY_MARGIN = 0.06
+    # Выше этого значения фактора ramp режим считается переходным. ДОПУЩЕНИЕ:
+    # ramp нормирован на p95 обучающего периода, то есть 0.8 — это «почти самые
+    # резкие изменения, какие вообще были в истории».
+    RAMP_LIMIT = 0.8
 
     def __init__(self, norms: SeverityNorms | None = None,
                  ramp_series: pd.Series | None = None,
@@ -150,15 +154,28 @@ class ReliabilityAgent:
 
         norms = SeverityNorms.fit(frame, list(frame.columns), train=train)
 
-        # скорость изменения режима: максимальный по реакторным температурам модуль
-        # изменения за час, нормированный на p95 обучающего периода
+        # Скорость изменения режима: модуль изменения за час, нормированный на p95
+        # обучающего периода. Считаем и по реакторным температурам, и по расходу
+        # сырья: скачок сырья — самое частое возмущение на установке, и для
+        # реактора он значит не меньше подъёма температуры (меньше время контакта
+        # — хуже обессеривание). Раньше фактор смотрел только на температуры и
+        # ступеньку по расходу не видел вовсе — это нашли «злые» кейсы.
         ramp = None
         step = pd.Series(ht.index).diff().median()
         per_hour = max(int(pd.Timedelta("1h") / step), 1) if step else 6
+        deltas = []
         if temps:
-            delta = ht[temps].diff(per_hour).abs().max(axis=1)
-            scale = float(delta.loc[train[0]:train[1]].quantile(0.95)) or 1.0
-            ramp = (delta / scale).clip(0.0, 1.5)
+            deltas.append(ht[temps].diff(per_hour).abs().max(axis=1))
+        if FEED in ht.columns:
+            deltas.append(ht[FEED].diff(per_hour).abs())
+        normalized = []
+        for delta in deltas:
+            scale = float(delta.loc[train[0]:train[1]].quantile(0.95))
+            if scale > 0:
+                normalized.append((delta / scale).clip(0.0, 1.5))
+        if normalized:
+            # берём худший из каналов: быстрым режим делает любой из них
+            ramp = pd.concat(normalized, axis=1).max(axis=1)
 
         # наработка от последнего останова: разметки нет, восстанавливаем по
         # длительным провалам расхода сырья (см. models/regime.py)
@@ -378,8 +395,20 @@ class ReliabilityAgent:
                 if v is not None:
                     constraints[tag] = (v - 3.0, v + 1.0)
 
-        if factors.get("ramp", 0) > 0.8:
-            notes.append("Режим меняется быстро — дополнительные воздействия нежелательны.")
+        if factors.get("ramp", 0) > self.RAMP_LIMIT:
+            # Раньше здесь была только запись в примечания, и оптимизатор её не
+            # видел: система спокойно добавляла +2 °C поверх скачка сырья. Теперь
+            # переходный режим ограничивает диапазон так же, как тяжёлый, —
+            # снижать можно, ужесточать нельзя, пока режим не устоится.
+            notes.append("Режим меняется быстро (температуры или расход сырья): подъём "
+                         "реакторных температур отложен до стабилизации, снижение "
+                         "разрешено.")
+            for tag in self.REACTOR_TEMPS:
+                value = state.telemetry_ht.get(tag)
+                if value is None:
+                    continue
+                lo, hi = constraints.get(tag, (value - 3.0, value))
+                constraints[tag] = (lo, min(hi, value))
 
         return ReliabilityAssessment(
             ts=state.ts,
