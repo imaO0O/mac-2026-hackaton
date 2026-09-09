@@ -112,14 +112,29 @@ def main() -> int:
     system.log_runs = False
     decision_stamps = pd.date_range(lo, hi, periods=args.decision_stamps)
     decision_states = [sb.build(ts) for ts in decision_stamps]
-    base_outcomes = [outcome(system.run(s)) for s in decision_states]
+
+    def run_once(state):
+        """Один независимый прогон момента.
+
+        Лимит частоты воздействий — состояние оркестратора, и между независимыми
+        наборами весов его надо сбрасывать. Без сброса второй прогон того же
+        момента попадал в ветку «недавно уже вмешивались» и возвращал «держим
+        режим» — то есть измерялась не чувствительность к весам, а собственная
+        память системы. Именно так и появилась «неустойчивая точка» в прошлом
+        отчёте: неустойчивым оказывался ровно тот момент, где базовый исход был
+        «меняем уставки».
+        """
+        system._last_action_ts = None
+        return outcome(system.run(state))
+
+    base_outcomes = [run_once(s) for s in decision_states]
 
     changed = np.zeros(len(decision_states))
     try:
         for _ in range(args.decision_draws):
             ReliabilityAgent.WEIGHTS = perturbed_weights(original, rng, args.spread)
             for i, state in enumerate(decision_states):
-                if outcome(system.run(state)) != base_outcomes[i]:
+                if run_once(state) != base_outcomes[i]:
                     changed[i] += 1
     finally:
         ReliabilityAgent.WEIGHTS = original
