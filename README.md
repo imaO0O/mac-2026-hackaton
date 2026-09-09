@@ -113,6 +113,7 @@ scripts/run_blending.py  рецептура смешения на момент �
 scripts/run_cycle.py     сквозной прогон
 docs/DATA_NOTES.md       разбор данных: ловушки, допущения, окна ← читать первым
 docs/PLAN.md             план на трёх участников
+docs/GPU_SETUP.md        для участника с NVIDIA: что считать на карте и как подключить
 docs/QUALITY_AGENT.md    отчёт по агенту качества: метрики, утечка, что дальше
 docs/RELIABILITY_AGENT.md отчёт по надёжности: детекторы, severity, конфликт целей
 docs/OPTIMIZER_AGENT.md  отчёт по оптимизации: поиск, критерии, правила отказа
