@@ -184,6 +184,31 @@ def main() -> None:
             st.markdown("**Факторы тяжести режима**")
             st.bar_chart(pd.Series(r.factors, name="вклад"))
 
+    # ---------- смешение ----------------------------------------------- #
+    if rec.blend is not None:
+        st.subheader("Смешение товарного ДТ")
+        left, right = st.columns([2, 3])
+        with left:
+            st.dataframe(pd.DataFrame([
+                {"компонент": name, "доля, %": round(share * 100, 2)}
+                for name, share in rec.blend.fractions.items()]),
+                hide_index=True, use_container_width=True)
+            st.markdown(f"**Сумма долей:** {rec.blend.fractions_sum() * 100:.1f} % "
+                        f"(жёсткое требование ТЗ)")
+            st.markdown(f"**Выпуск смеси:** {rec.blend.throughput_tph:.1f} т/ч")
+        with right:
+            basis = rec.blend.basis_sulfur_mgkg
+            if basis is not None:
+                st.markdown(f"Рецептура посчитана на **прогнозной** сере "
+                            f"{basis:.2f} мг/кг — то есть для того режима, который "
+                            f"рекомендован, а не для прошедшего.")
+            if rec.blend.feasible:
+                st.success("Рецептура проходит жёсткие проверки.")
+            else:
+                st.error("Допустимой рецептуры нет: " + "; ".join(rec.blend.violations))
+            for note in rec.blend.notes:
+                st.markdown(f"- {note}")
+
     # ---------- альтернативы ------------------------------------------- #
     if rec.alternatives:
         st.subheader("Альтернативы и фронт Парето")

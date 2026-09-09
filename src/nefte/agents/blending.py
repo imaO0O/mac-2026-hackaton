@@ -24,40 +24,17 @@ from __future__ import annotations
 import itertools
 
 import numpy as np
-from pydantic import BaseModel, Field
 
+from nefte.agents.schemas import BlendComponent, BlendRecipe
 from nefte.config import load_config
+
+__all__ = ["ADDITIVE_CFPP_EFFECT_C", "ADDITIVE_MAX_PPM", "BlendComponent", "BlendRecipe",
+           "BlendingAgent", "components_from_data", "mix"]
 
 # Эффект депрессорной присадки на предельную температуру фильтруемости.
 # ДОПУЩЕНИЕ: паспортных данных присадки в пакете нет.
 ADDITIVE_CFPP_EFFECT_C = -8.0
 ADDITIVE_MAX_PPM = 500.0
-
-
-class BlendComponent(BaseModel):
-    """Компонент смешения с его свойствами и располагаемым расходом."""
-    name: str
-    sulfur_mgkg: float
-    density_15c: float | None = None
-    t95_c: float | None = None
-    cfpp_c: float | None = None
-    available_tph: float = Field(default=0.0, description="располагаемый расход, т/ч")
-    is_assumption: bool = Field(default=False,
-                                description="свойства взяты из допущения, а не из ЛИМС")
-
-
-class BlendRecipe(BaseModel):
-    """Рецептура и свойства полученной смеси."""
-    fractions: dict[str, float] = Field(description="компонент → массовая доля, сумма = 1")
-    properties: dict[str, float] = {}
-    throughput_tph: float = 0.0
-    additive_ppm: float = 0.0
-    feasible: bool = True
-    violations: list[str] = []
-    notes: list[str] = []
-
-    def fractions_sum(self) -> float:
-        return float(sum(self.fractions.values()))
 
 
 def mix(components: list[BlendComponent], fractions: dict[str, float],
@@ -98,6 +75,10 @@ class BlendingAgent:
     поэтому полный перебор на CPU занимает миллисекунды и не требует солвера —
     зато результат воспроизводим и его легко объяснить.
     """
+
+    # Компонент, серу которого прогнозирует агент качества: это и есть продукт
+    # гидроочистки, ЛИМС «Гидроочистка, точка 2».
+    HYDROTREATED = "ГО ДТ"
 
     def __init__(self, cfg: dict | None = None, step: float = 0.01):
         self.cfg = cfg or load_config()
@@ -180,6 +161,36 @@ class BlendingAgent:
 
         best.notes = self._notes(components, best)
         return best
+
+    # ------------------------------------------------------------------ #
+    def with_forecast(self, components: list[BlendComponent], sulfur_mgkg: float,
+                      additive_ppm: float = 0.0,
+                      component: str | None = None) -> BlendRecipe:
+        """Рецептура на ПРОГНОЗНОЙ сере гидроочищенного ДТ, а не на прошлом анализе.
+
+        В цикле оркестратора смешивать нужно тот продукт, который получится в
+        рекомендуемом режиме. Разница существенна: при сере 8.9 мг/кг предельная
+        доля прямогонки 0.013 %, при 9.5 — уже 0.006 %, то есть вдвое меньше.
+        Последний анализ ЛИМС относится к прошлому режиму и такой вопрос не
+        закрывает.
+        """
+        target = component or self.HYDROTREATED
+        base = next((c for c in components if c.name == target), None)
+        if base is None and components:
+            # имя может отличаться — берём самый чистый компонент, это и есть
+            # продукт гидроочистки
+            base = min(components, key=lambda c: c.sulfur_mgkg)
+        updated = [c.model_copy(update={"sulfur_mgkg": float(sulfur_mgkg)})
+                   if c is base else c for c in components]
+        recipe = self.optimize(updated, additive_ppm=additive_ppm)
+        recipe.basis = "forecast"
+        recipe.basis_sulfur_mgkg = float(sulfur_mgkg)
+        if base is not None:
+            recipe.notes = [
+                f"Рецептура посчитана на прогнозной сере «{base.name}» "
+                f"{sulfur_mgkg:.2f} мг/кг (последний анализ {base.sulfur_mgkg:.2f})."
+            ] + recipe.notes
+        return recipe
 
     # ------------------------------------------------------------------ #
     def _notes(self, components: list[BlendComponent], recipe: BlendRecipe) -> list[str]:

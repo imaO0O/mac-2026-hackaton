@@ -16,11 +16,12 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from nefte.agents.blending import BlendingAgent, components_from_data  # noqa: E402
 from nefte.agents.optimizer import OptimizerAgent, linear_surrogate  # noqa: E402
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
 from nefte.agents.quality import QualityAgent  # noqa: E402
 from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
-from nefte.data.loaders import load_telemetry  # noqa: E402
+from nefte.data.loaders import load_lims, load_telemetry  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.kinetics import make_kinetic_surrogate  # noqa: E402
@@ -31,6 +32,7 @@ from nefte.models.quality_model import (  # noqa: E402
     make_model_surrogate,
 )
 from nefte.pipeline import StateBuilder  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
 
 # Кандидатные управляющие воздействия для базового прогона (см. configs/config.yaml).
 CONTROL_TAGS = ["T5", "T11", "F26", "P13"]
@@ -79,10 +81,19 @@ def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
         surrogate = linear_surrogate(SENSITIVITIES)
 
     optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg)
-    return Orchestrator(QualityAgent(model=model, cfg=cfg), reliability, optimizer, cfg=cfg)
+
+    # ЛИМС читается один раз: компоненты смешения собираются на каждом такте,
+    # перечитывать книгу на каждый момент времени незачем
+    lims = load_lims()
+    return Orchestrator(
+        QualityAgent(model=model, cfg=cfg), reliability, optimizer, cfg=cfg,
+        blending=BlendingAgent(cfg),
+        components_fn=lambda ts: components_from_data(sb, ts, lims=lims),
+    )
 
 
 def main() -> int:
+    use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--ts", help="момент времени, например '2026-04-20 12:00'")
     ap.add_argument("--window", help="имя окна из configs/config.yaml: demo_windows")

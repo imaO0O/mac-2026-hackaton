@@ -54,6 +54,10 @@ class ProcessState(BaseModel):
 class QualityAssessment(BaseModel):
     """Ответ агента качества."""
     ts: datetime
+    # Источник, по которому принято решение. ЛИМС → ПАК → ВАК (приоритет из ТЗ).
+    # Без этого поля оркестратор показывал оператору источник, которого в решении
+    # не было: в срезе есть и сера сырья, и сера продукта.
+    source: Source = Source.NONE
     predictions: dict[str, float] = {}
     intervals: dict[str, tuple[float, float]] = {}
     spec_risk: dict[str, float] = Field(default_factory=dict,
@@ -96,6 +100,36 @@ class Candidate(BaseModel):
     pareto_rank: int | None = None
 
 
+class BlendComponent(BaseModel):
+    """Компонент смешения с его свойствами и располагаемым расходом."""
+    name: str
+    sulfur_mgkg: float
+    density_15c: float | None = None
+    t95_c: float | None = None
+    cfpp_c: float | None = None
+    available_tph: float = Field(default=0.0, description="располагаемый расход, т/ч")
+    is_assumption: bool = Field(default=False,
+                                description="свойства взяты из допущения, а не из ЛИМС")
+
+
+class BlendRecipe(BaseModel):
+    """Ответ агента смешения: рецептура и свойства полученной смеси."""
+    fractions: dict[str, float] = Field(description="компонент → массовая доля, сумма = 1")
+    properties: dict[str, float] = {}
+    throughput_tph: float = 0.0
+    additive_ppm: float = 0.0
+    feasible: bool = True
+    violations: list[str] = []
+    notes: list[str] = []
+    # сера, на которой считалась рецептура: в цикле это ПРОГНОЗ агента качества,
+    # а не последний анализ — иначе рецептура относится к уже прошедшему режиму
+    basis_sulfur_mgkg: float | None = None
+    basis: Literal["lims", "forecast"] = "lims"
+
+    def fractions_sum(self) -> float:
+        return float(sum(self.fractions.values()))
+
+
 class Recommendation(BaseModel):
     """Итог цикла. Структура повторяет п.5 ТЗ «Пример рекомендаций оператору»."""
     ts: datetime
@@ -109,6 +143,8 @@ class Recommendation(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
     explanation: str = ""
     alternatives: list[Candidate] = []
+    blend: BlendRecipe | None = Field(
+        default=None, description="рецептура смешения при рекомендуемом режиме")
     abstained: bool = False
     abstain_reason: str = ""
 
@@ -121,7 +157,7 @@ class Recommendation(BaseModel):
             f"{tag}: {self.action.deltas.get(tag, 0):+.2f} → {val:.2f}"
             for tag, val in (self.action.moves if self.action else {}).items()
         )
-        return (
+        text = (
             f"{head}{self.problem}\n"
             f"  Действие: {moves or 'без изменений'}\n"
             f"  Эффект: {self.expected_effect}\n"
@@ -129,3 +165,12 @@ class Recommendation(BaseModel):
             f"  Уверенность: {self.confidence:.2f}\n"
             f"  Почему: {self.explanation}"
         )
+        if self.blend is not None:
+            shares = ", ".join(f"{name} {share * 100:.1f} %"
+                               for name, share in self.blend.fractions.items() if share > 0)
+            status = "допустима" if self.blend.feasible else "НЕДОПУСТИМА"
+            text += (f"\n  Смешение ({status}, сумма долей "
+                     f"{self.blend.fractions_sum() * 100:.1f} %): {shares}")
+            for violation in self.blend.violations:
+                text += f"\n    нарушение: {violation}"
+        return text

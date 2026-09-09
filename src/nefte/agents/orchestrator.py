@@ -1,7 +1,12 @@
 """Оркестратор: один цикл принятия решения.
 
 Порядок ровно как в п.1 ТЗ: состояние → проверка данных → качество → надёжность →
-варианты → отсев → сравнение → рекомендация либо мотивированный отказ.
+варианты → отсев → сравнение → смешение → рекомендация либо мотивированный отказ.
+
+Блок смешения стоит ПОСЛЕ выбора режима, а не рядом с ним: рецептуру считать
+имеет смысл для того продукта, который получится в рекомендуемом режиме. Обратный
+порядок — «подобрать рецептуру, чтобы вытянуть некачественный продукт» — запрещён
+правилом системы: качество и технологические ограничения выше экономики.
 
 Каждый прогон сохраняется в reports/runs/*.json: входные данные, ответы агентов и
 итог — чтобы логику решения можно было проверить постфактум (требование ТЗ).
@@ -10,13 +15,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
+from nefte.agents.blending import BlendingAgent
 from nefte.agents.optimizer import OptimizerAgent
 from nefte.agents.quality import QualityAgent
 from nefte.agents.reliability import ReliabilityAgent
-from nefte.agents.schemas import ProcessState, Recommendation
+from nefte.agents.schemas import (
+    BlendComponent,
+    ProcessState,
+    QualityAssessment,
+    Recommendation,
+)
 from nefte.config import ROOT, load_config
 
 RUNS_DIR = ROOT / "reports" / "runs"
@@ -28,10 +40,18 @@ class Orchestrator:
     def __init__(self, quality: QualityAgent, reliability: ReliabilityAgent,
                  optimizer: OptimizerAgent, cfg: dict | None = None,
                  min_confidence: float = 0.35, act_risk_threshold: float | None = None,
-                 log_runs: bool = True, min_hours_between_actions: float = 4.0):
+                 log_runs: bool = True, min_hours_between_actions: float = 4.0,
+                 blending: BlendingAgent | None = None,
+                 components_fn: Callable[[object], list[BlendComponent]] | None = None,
+                 additive_ppm: float = 0.0):
         self.quality = quality
         self.reliability = reliability
         self.optimizer = optimizer
+        # Блок смешения необязателен: без него цикл работает как раньше, а
+        # рекомендация просто не содержит рецептуры.
+        self.blending = blending
+        self.components_fn = components_fn
+        self.additive_ppm = additive_ppm
         self.cfg = cfg or load_config()
         self.min_confidence = min_confidence
         # порог, начиная с которого вмешиваемся: берём подобранный вместе с моделью
@@ -52,8 +72,9 @@ class Orchestrator:
             key: m.age_hours for key, m in state.quality.items()
         }
         state_summary = {
-            "sulfur_source": next((m.source.value for m in state.quality.values()
-                                   if m.value is not None), "нет"),
+            # именно тот источник, по которому принято решение: раньше здесь
+            # оказывался первый попавшийся в срезе — например, сера СЫРЬЯ
+            "sulfur_source": q.source.value,
             "severity_index": round(r.severity_index, 3),
             "risk_class": r.risk_class,
         }
@@ -69,7 +90,7 @@ class Orchestrator:
                 abstained=True, confidence=q.confidence,
                 abstain_reason="; ".join(r.notes),
             )
-            return self._finish(rec, state, q, r)
+            return self._finish(rec, state, q, r, blend=False)
 
         # --- отказ 2: данные непригодны ---------------------------------
         if not state.data_quality.usable or q.confidence < self.min_confidence:
@@ -80,7 +101,7 @@ class Orchestrator:
                 abstain_reason="; ".join(q.notes + state.data_quality.notes)
                 or "низкая уверенность прогноза",
             )
-            return self._finish(rec, state, q, r)
+            return self._finish(rec, state, q, r, blend=False)
 
         risk = q.spec_risk.get("product_sulfur_mgkg", 0.0)
         pred = q.predictions.get("product_sulfur_mgkg")
@@ -213,7 +234,55 @@ class Orchestrator:
                      f"внутри суженного диапазона, а не по максимуму качества.")
         return text
 
-    def _finish(self, rec: Recommendation, state, q, r) -> Recommendation:
+    # ------------------------------------------------------------------ #
+    def _attach_blend(self, rec: Recommendation, state: ProcessState,
+                      q: QualityAssessment) -> None:
+        """Рецептура смешения для того продукта, который даст выбранный режим.
+
+        Смешение НЕ используется как способ вытянуть некачественный продукт: если
+        прогноз серы уже за пределом, допустимой рецептуры не существует, и агент
+        это показывает — разбавлять товарное ДТ прямогонкой под Евро-5 нельзя
+        (предельная доля порядка сотых долей процента, docs/BLENDING.md).
+        """
+        if self.blending is None or self.components_fn is None:
+            return
+        sulfur = self._blend_basis(rec, q)
+        if sulfur is None or sulfur != sulfur:
+            return
+        components = self.components_fn(state.ts)
+        if not components:
+            return
+
+        recipe = self.blending.with_forecast(components, sulfur,
+                                             additive_ppm=self.additive_ppm)
+        rec.blend = recipe
+        rec.checked_constraints.append(
+            f"доли компонентов смешения дают {recipe.fractions_sum() * 100:.1f} % "
+            "(жёсткое требование ТЗ)")
+        if not recipe.feasible:
+            rec.explanation = (rec.explanation + " Смешением это не компенсируется: "
+                               + "; ".join(recipe.violations) + ".").strip()
+        elif len(recipe.fractions) > 1:
+            rec.expected_effect["выпуск смеси, т/ч"] = round(recipe.throughput_tph, 1)
+
+    @staticmethod
+    def _blend_basis(rec: Recommendation, q: QualityAssessment) -> float | None:
+        """Сера, на которой считается рецептура: прогноз выбранного варианта.
+
+        Если действие не выбрано (отказ), берём прогноз агента качества для
+        текущего режима — вопрос «спасёт ли рецептура» задаётся именно к нему.
+        """
+        if rec.action is not None:
+            value = rec.action.predicted_quality.get("product_sulfur_mgkg")
+            if value is not None:
+                return float(value)
+        value = q.predictions.get("product_sulfur_mgkg")
+        return None if value is None else float(value)
+
+    def _finish(self, rec: Recommendation, state, q, r,
+                blend: bool = True) -> Recommendation:
+        if blend:
+            self._attach_blend(rec, state, q)
         if self.log_runs:
             RUNS_DIR.mkdir(parents=True, exist_ok=True)
             path: Path = RUNS_DIR / f"{state.ts:%Y%m%dT%H%M}.json"
