@@ -33,6 +33,7 @@ from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
 from nefte.data.loaders import lims_series, load_pak  # noqa: E402
 from nefte.data.validity import analyzer_health  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
 
 
 def severity_series(agent: ReliabilityAgent, avt: pd.DataFrame, ht: pd.DataFrame,
@@ -148,6 +149,7 @@ def describe_anomalies(agent, avt: pd.DataFrame, ht: pd.DataFrame, cfg: dict) ->
 
 
 def main() -> int:
+    use_utf8_console()
     cfg = load_config()
     limit = cfg["spec"]["product_sulfur_mgkg"]["max"]
     print("[1/3] загрузка и очистка…")

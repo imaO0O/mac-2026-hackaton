@@ -16,6 +16,24 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = ROOT / "configs" / "config.yaml"
 
 
+def load_dotenv(path: str | Path | None = None) -> None:
+    """Читает .env в окружение, не перекрывая уже заданные переменные.
+
+    README предлагает скопировать .env.example в .env — без этой функции файл
+    никто не читал, и пути приходилось задавать вручную в каждой консоли.
+    Отдельная зависимость ради пяти строк не нужна.
+    """
+    env_path = Path(path) if path else ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 @lru_cache(maxsize=None)
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     """Читает config.yaml и применяет переопределения из окружения."""
@@ -23,6 +41,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
     with open(cfg_path, encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
 
+    load_dotenv()
     if env := os.getenv("NEFTE_SOURCE_DIR"):
         cfg["paths"]["source_dir"] = env
     if env := os.getenv("NEFTE_DATA_DIR"):

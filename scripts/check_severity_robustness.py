@@ -33,6 +33,7 @@ from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.loaders import load_telemetry  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
 
 
 def perturbed_weights(base: dict[str, float], rng: np.random.Generator,
@@ -55,6 +56,7 @@ def outcome(recommendation) -> str:
 
 
 def main() -> int:
+    use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--draws", type=int, default=100, help="случайных наборов весов")
     ap.add_argument("--stamps", type=int, default=24, help="моментов времени")

@@ -27,6 +27,7 @@ from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.features import time_split  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.quality_model import SulfurModel  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
 
 # Шаги, на которых меряем реакцию: соответствуют limits.max_step_per_cycle.
 STEPS = {"T5": 2.0, "T11": 2.0, "T6": 2.0, "P13": 0.05, "F26": -8.0,
@@ -121,6 +122,7 @@ def measure_surrogates(model: SulfurModel, cfg: dict, matrix: pd.DataFrame,
 
 
 def main() -> int:
+    use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", type=float, default=0.0)
     ap.add_argument("--sample", type=int, default=200)

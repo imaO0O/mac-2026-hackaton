@@ -19,9 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nefte.agents.blending import BlendingAgent, components_from_data  # noqa: E402
 from nefte.config import load_config  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
 
 
 def main() -> int:
+    use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--ts", default="2026-02-28 00:00", help="момент времени")
     ap.add_argument("--additive", type=float, default=0.0,

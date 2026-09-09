@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.config import data_dir, load_config, source_dir  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
 
 UNRAR_CANDIDATES = [
     r"C:\Program Files\WinRAR\UnRAR.exe",
@@ -94,6 +95,7 @@ def check() -> int:
 
 
 def main() -> int:
+    use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="только проверка путей")
     ap.add_argument("--force", action="store_true", help="перераспаковать архив")

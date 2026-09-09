@@ -31,6 +31,7 @@ from nefte.models.quality_model import (  # noqa: E402
     baseline_metrics,
     controllable_features,
 )
+from nefte.utils import use_utf8_console  # noqa: E402
 
 # Кандидатные управляющие воздействия: модель обязана их видеть, иначе оптимизатор
 # не сможет оценивать сценарии (см. configs/config.yaml → controls).
@@ -40,6 +41,7 @@ CONTROL_COLUMNS = ([f"ht_{t}" for t in CONTROL_TAGS] + ["avt_T55"]
 
 
 def main() -> int:
+    use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", type=float, default=2.0, help="горизонт прогноза, часов")
     ap.add_argument("--iterations", type=int, default=600)
