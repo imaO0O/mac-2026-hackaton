@@ -22,6 +22,11 @@ from nefte.config import load_config
 # MAE 1.70 мг/кг, смещение -0.26. Используется как априорная σ базовой модели.
 BASELINE_SIGMA_MGKG = 1.7
 
+# Во сколько раз режем уверенность, когда значение пришло от виртуального
+# анализатора, а не от лаборатории или поточного прибора. ДОПУЩЕНИЕ: прямого
+# сравнения «ВАК без ЛИМС и ПАК» в данных нет, множитель выбран консервативно.
+VAK_CONFIDENCE_FACTOR = 0.5
+
 
 def fuse_sulfur(state: ProcessState, cfg: dict | None = None) -> Measurement:
     """Выбирает значение серы по приоритету ЛИМС → ПАК → ВАК с учётом свежести.
@@ -86,15 +91,26 @@ class QualityAgent:
         mean, sigma = self.predict(state, current)
 
         notes: list[str] = []
+        # Ни лаборатории, ни поточного анализатора. Если обученной модели нет,
+        # прогнозировать нечем. Если есть — это ровно тот случай, для которого ТЗ
+        # предусматривает третий приоритет: виртуальный анализатор. Называть его
+        # надо своим именем и с пониженной уверенностью, а не выдавать за измерение.
+        from_vak = current.source is Source.NONE and self.model is not None
         if current.source is Source.NONE:
-            notes.append("Нет достоверного источника по сере — прогноз недоступен.")
+            notes.append(
+                "Ни ЛИМС, ни ПАК недостоверны: значение получено виртуальным "
+                "анализатором (ВАК, третий приоритет по ТЗ), уверенность снижена."
+                if from_vak else
+                "Нет достоверного источника по сере — прогноз недоступен.")
         if current.is_frozen:
             notes.append("Поточный анализатор признан замороженным.")
         if current.is_stale:
             notes.append(f"Лабораторное значение устарело: {current.age_hours:.1f} ч.")
 
+        source = Source.VAK if from_vak else current.source
         if mean != mean:      # NaN
             return QualityAssessment(ts=state.ts, confidence=0.0, notes=notes,
+                                     source=Source.NONE,
                                      horizon_hours=self.horizon_hours)
 
         # если у модели есть отдельный классификатор превышения — доверяем ему:
@@ -107,9 +123,12 @@ class QualityAgent:
         confidence = max(0.05, min(0.95, 1.0 / (1.0 + sigma / BASELINE_SIGMA_MGKG - 1.0)))
         if not state.data_quality.usable:
             confidence *= 0.5
+        if from_vak:
+            confidence *= VAK_CONFIDENCE_FACTOR
 
         return QualityAssessment(
             ts=state.ts,
+            source=source,
             predictions={"product_sulfur_mgkg": mean},
             intervals={"product_sulfur_mgkg": (mean - 1.96 * sigma, mean + 1.96 * sigma)},
             spec_risk={"product_sulfur_mgkg": risk},

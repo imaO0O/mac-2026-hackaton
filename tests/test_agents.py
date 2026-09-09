@@ -80,3 +80,42 @@ def test_recommendation_is_explainable():
     if not rec.abstained:
         assert rec.checked_constraints
         assert rec.explanation
+
+
+def test_source_of_decision_is_reported_not_first_measurement_in_slice():
+    """В срезе есть и сера продукта, и сера сырья — показывать надо ту, по которой решили."""
+    state = make_state(lims=(5.0, 1.0), pak=(5.2, 0.1))
+    state.quality["lims_feed_sulfur_mgkg"] = Measurement(
+        value=9500.0, unit="мг/кг", source=Source.LIMS, age_hours=200.0,
+        comment="сера сырья гидроочистки")
+    rec = build_system().run(state)
+    assert rec.state_summary["sulfur_source"] == "lims"
+    assert QualityAgent().assess(state).source is Source.LIMS
+
+
+def test_model_without_lims_and_pak_is_declared_as_vak():
+    """Модель без обоих измерений — виртуальный анализатор, третий приоритет ТЗ.
+
+    Работать по нему можно, выдавать его за измерение — нельзя.
+    """
+    class FakeModel:
+        horizon_hours = 0.0
+        alarm_threshold = 0.2
+
+        def predict_with_sigma(self, state):
+            return 7.0, 1.7
+
+    state = make_state(lims=None, pak=None)
+    with_sources = QualityAgent(model=FakeModel()).assess(
+        make_state(lims=(5.0, 1.0), pak=(5.2, 0.1)))
+    without = QualityAgent(model=FakeModel()).assess(state)
+
+    assert without.source is Source.VAK
+    assert without.confidence < with_sources.confidence
+    assert any("ВАК" in note for note in without.notes)
+
+
+def test_without_model_and_without_sources_there_is_no_forecast():
+    out = QualityAgent().assess(make_state(lims=None, pak=None))
+    assert out.source is Source.NONE and out.confidence == 0.0
+    assert not out.predictions
