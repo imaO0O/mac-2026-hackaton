@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nefte.agents.optimizer import OptimizerAgent, linear_surrogate  # noqa: E402
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
 from nefte.agents.quality import QualityAgent  # noqa: E402
-from nefte.agents.reliability import ReliabilityAgent, SeverityNorms  # noqa: E402
+from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.quality_model import (  # noqa: E402
@@ -55,11 +55,8 @@ def load_quality_model(horizon: float | None = None) -> SulfurModel | None:
 
 
 def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
-    norms = SeverityNorms.fit(
-        pd.concat([sb.ht[["T5", "T6", "T11", "W10"]], sb.avt[["T55"]]], axis=1)
-        .assign(wabt=lambda d: d[["T5", "T6", "T11"]].mean(axis=1)),
-        columns=["wabt", "W10", "T55"],
-    )
+    # нормировка тяжести режима — только по обучающему периоду, без заглядывания вперёд
+    reliability = ReliabilityAgent.from_history(sb.avt, sb.ht, cfg)
     bounds = sb.model_bounds(CONTROL_TAGS, unit="ht")
 
     model = load_quality_model()
@@ -74,8 +71,7 @@ def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
         surrogate = linear_surrogate(SENSITIVITIES)
 
     optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg)
-    return Orchestrator(QualityAgent(model=model, cfg=cfg), ReliabilityAgent(norms),
-                        optimizer, cfg=cfg)
+    return Orchestrator(QualityAgent(model=model, cfg=cfg), reliability, optimizer, cfg=cfg)
 
 
 def main() -> int:

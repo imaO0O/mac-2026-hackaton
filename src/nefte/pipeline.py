@@ -10,8 +10,9 @@ import pandas as pd
 
 from nefte.agents.schemas import DataQuality, Measurement, ProcessState, Source
 from nefte.config import load_config
-from nefte.data.cleaning import clean_lims_sulfur, clean_telemetry, frozen_mask
+from nefte.data.cleaning import clean_lims_sulfur, frozen_mask
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
+from nefte.data.validity import SignalValidity
 
 
 class StateBuilder:
@@ -21,10 +22,14 @@ class StateBuilder:
                  ht_tags: list[str] | None = None, mask_frozen: bool = True):
         self.cfg = cfg or load_config()
 
-        self.avt, self.avt_report = clean_telemetry(
-            load_telemetry("avt", avt_tags), unit="avt", mask_frozen=mask_frozen)
-        self.ht, self.ht_report = clean_telemetry(
-            load_telemetry("ht", ht_tags), unit="ht", mask_frozen=mask_frozen)
+        # Маски недостоверности считаются один раз на всю историю: дальше срез на
+        # любой момент отдаётся мгновенно, вместе с причинами брака по каждому тегу.
+        self.avt_validity = SignalValidity.build(
+            load_telemetry("avt", avt_tags), unit="avt", cfg=self.cfg)
+        self.ht_validity = SignalValidity.build(
+            load_telemetry("ht", ht_tags), unit="ht", cfg=self.cfg)
+        self.avt = self.avt_validity.clean
+        self.ht = self.ht_validity.clean
 
         pak = load_pak()
         self.pak_sulfur = pak["sulfur_ppm"]
@@ -72,15 +77,27 @@ class StateBuilder:
 
         row = pd.concat([avt_row, ht_row])
         missing_share = float(row.isna().mean()) if len(row) else 1.0
+
+        # причины брака по каждому тегу на этот момент — это и есть объяснение,
+        # почему часть данных не используется
+        flags = {**self.avt_validity.flags_at(ts), **self.ht_validity.flags_at(ts)}
+        frozen_tags = [t for t, r in flags.items() if "полка" in r]
+        sentinel_tags = [t for t, r in flags.items() if "заглушка" in r]
+
         notes = []
         if pak_is_frozen:
             notes.append("Поточный анализатор серы заморожен — значение не является фактом.")
         if lims_age is not None and lims_age > stale["lims"]:
             notes.append(f"Последний анализ ЛИМС старше {stale['lims']} ч ({lims_age:.0f} ч).")
+        if sentinel_tags:
+            notes.append(f"Значения-заглушки в тегах: {', '.join(sorted(sentinel_tags)[:5])}.")
+        if frozen_tags:
+            notes.append(f"Сигнал не меняется в тегах: {', '.join(sorted(frozen_tags)[:5])}.")
 
         dq = DataQuality(
             missing_share=missing_share,
-            frozen_tags=["pak_sulfur"] if pak_is_frozen else [],
+            frozen_tags=(["pak_sulfur"] if pak_is_frozen else []) + sorted(frozen_tags),
+            sentinel_tags=sorted(sentinel_tags),
             stale_sources=[k for k, m in quality.items() if m.is_stale],
             usable=missing_share < 0.2 and not (pak_is_frozen and lims_age is not None
                                                 and lims_age > stale["lims"] * 3),

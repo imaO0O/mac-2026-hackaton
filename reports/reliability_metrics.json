@@ -1,0 +1,112 @@
+{
+  "validity": {
+    "avt": {
+      "n_tags": 71,
+      "dead_tags": [
+        "D10"
+      ],
+      "suspicious_negative": {
+        "F5": 0.897,
+        "F26": 0.598,
+        "F63": 0.06
+      },
+      "worst": {
+        "D10": 99.99,
+        "F26": 40.04,
+        "T39": 9.62,
+        "F68": 5.69,
+        "F69": 5.42,
+        "F25": 4.91,
+        "F54": 4.71,
+        "F28": 4.53
+      },
+      "mean_bad_share_pct": 3.97
+    },
+    "ht": {
+      "n_tags": 26,
+      "dead_tags": [],
+      "suspicious_negative": {
+        "F1": 0.053
+      },
+      "worst": {
+        "Q20": 11.65,
+        "T18": 6.69,
+        "F17": 5.23,
+        "F22": 4.61,
+        "F26": 4.1,
+        "F9": 4.09,
+        "F2": 3.69,
+        "T12": 3.65
+      },
+      "mean_bad_share_pct": 2.468
+    }
+  },
+  "severity": {
+    "train": {
+      "n": 983,
+      "n_over_limit": 148,
+      "roc_auc": 0.567,
+      "mean_severity_ok": 0.524,
+      "mean_severity_over": 0.567
+    },
+    "test": {
+      "n": 249,
+      "n_over_limit": 36,
+      "roc_auc": 0.351,
+      "mean_severity_ok": 0.562,
+      "mean_severity_over": 0.502
+    },
+    "dp_growth_spearman": 0.157,
+    "distribution": {
+      "low_%": 44.4,
+      "medium_%": 49.4,
+      "high_%": 6.1
+    }
+  },
+  "analyzer_failures": {
+    "n_episodes": 42,
+    "total_hours": 2298.8,
+    "longest": [
+      {
+        "start": "2024-03-16 18:20:00",
+        "end": "2024-05-02 12:10:00",
+        "value": 7.705160617828369,
+        "hours": 1122.0
+      },
+      {
+        "start": "2026-06-18 06:00:00",
+        "end": "2026-07-06 11:20:00",
+        "value": 7.884457111358643,
+        "hours": 437.5
+      },
+      {
+        "start": "2026-04-15 02:40:00",
+        "end": "2026-04-27 04:00:00",
+        "value": 18.446149826049805,
+        "hours": 289.5
+      },
+      {
+        "start": "2023-05-06 13:40:00",
+        "end": "2023-05-10 10:20:00",
+        "value": 6.775872230529785,
+        "hours": 92.8
+      },
+      {
+        "start": "2024-06-01 11:30:00",
+        "end": "2024-06-03 09:50:00",
+        "value": 8.305612564086914,
+        "hours": 46.5
+      }
+    ]
+  },
+  "tradeoff_quality_vs_severity": {
+    "train": {
+      "auc_severity": 0.567,
+      "auc_inverse": 0.433
+    },
+    "test": {
+      "auc_severity": 0.351,
+      "auc_inverse": 0.649
+    }
+  }
+}
