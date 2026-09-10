@@ -17,6 +17,7 @@ from typing import Callable, Protocol
 
 import numpy as np
 
+from nefte.agents.quality import spec_risk_normal
 from nefte.agents.schemas import (
     Candidate,
     ProcessState,
@@ -28,6 +29,16 @@ from nefte.config import load_config
 # Во сколько σ закладываем запас по качеству: рекомендация должна оставаться
 # допустимой не только в среднем, но и при разумно плохом исходе.
 SAFETY_SIGMAS = 1.0
+
+# Сетка, на которой варианты вообще считаются различными по критерию: доля
+# диапазона значений среди допустимых вариантов. 0.2 — это пять градаций на
+# критерий, то есть «заметно лучше / лучше / так же / хуже / заметно хуже».
+#
+# Это выбор ради читаемости, а не оценка точности, и его надо называть допущением.
+# Причина: при четырёх непрерывных критериях строгий фронт Парето вырождается —
+# недоминируемыми оказываются 97 % вариантов, и фронт перестаёт что-либо значить.
+# Оператор всё равно различает варианты грубо, поэтому и сравниваем грубо.
+PARETO_EPS = 0.2
 
 
 class QualitySurrogate(Protocol):
@@ -137,7 +148,12 @@ class OptimizerAgent:
                  cfg: dict | None = None,
                  throughput_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
                  energy_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
-                 grid_levels: int = 5):
+                 grid_levels: int = 5,
+                 reliability_agent=None):
+        # Агент надёжности нужен, чтобы пересчитать тяжесть режима под каждый
+        # вариант. Необязателен: без него severity берётся текущий, как раньше,
+        # и это честно видно по тому, что критерий перестаёт различать варианты.
+        self.reliability_agent = reliability_agent
         self.bounds = bounds                 # модельные диапазоны (допущение!)
         self.surrogate = surrogate
         self.cfg = cfg or load_config()
@@ -152,6 +168,13 @@ class OptimizerAgent:
         self._last_hold: Candidate | None = None
 
     # ------------------------------------------------------------------ #
+    def _severity_for(self, state: ProcessState, reliability: ReliabilityAssessment,
+                      moves: dict[str, float]) -> float:
+        agent = self.reliability_agent
+        if agent is None or not hasattr(agent, "severity_for"):
+            return reliability.severity_index
+        return float(agent.severity_for(state, moves))
+
     def _effective_bounds(self, state: ProcessState,
                           reliability: ReliabilityAssessment) -> dict[str, tuple[float, float]]:
         """Пересечение модельного диапазона, ограничения агента надёжности и шага."""
@@ -275,11 +298,18 @@ class OptimizerAgent:
                 violations.append("режим признан недопустимым агентом надёжности")
 
             c.guaranteed = bool(guaranteed)
+            # Вероятность, а не флаг «выше предела». Раньше здесь стоял 0/1, и в
+            # карточке оператора все альтернативы выглядели одинаково безрисковыми,
+            # хотя запас у них разный. σ берём ту же, что и для запаса: другой
+            # оценки неопределённости у суррогата нет, и выдумывать её нельзя.
             c.spec_risk = {"product_sulfur_mgkg":
-                           float(sulfur > limit) if sulfur == sulfur else 1.0}
+                           spec_risk_normal(sulfur, float(sigma), limit)
+                           if sulfur == sulfur else 1.0}
             c.throughput = self.throughput_fn(state, c.moves)
             c.energy_proxy = self.energy_fn(state, c.moves)
-            c.severity_index = reliability.severity_index
+            # Тяжесть режима У ЭТОГО варианта, а не у текущего: иначе критерий
+            # severity в свёртке и на фронте Парето вырождается в константу.
+            c.severity_index = self._severity_for(state, reliability, c.moves)
             c.violations = violations
             c.feasible = not violations
 
@@ -320,11 +350,17 @@ class OptimizerAgent:
                             - w["energy_proxy"] * energy[i]
                             - w["severity"] * severity[i])
 
-        # Парето: максимизируем запас и выпуск, минимизируем энергию и тяжесть
+        # Парето: максимизируем запас и выпуск, минимизируем энергию и тяжесть.
+        # Сравниваем не точные числа, а округлённые до PARETO_EPS доли диапазона:
+        # различие в тысячную долю мг/кг — это не различие, а шум суррогата. Без
+        # округления при четырёх критериях недоминируемыми оказываются почти все
+        # варианты (150 из 152 на реальном срезе), и фронт перестаёт что-либо
+        # значить оператору.
         objectives = np.column_stack([quality_margin, throughput, -energy, -severity])
+        grid = np.round(objectives / PARETO_EPS)
         for i, c in enumerate(feas):
-            dominated = (np.all(objectives >= objectives[i], axis=1)
-                         & np.any(objectives > objectives[i], axis=1))
+            dominated = (np.all(grid >= grid[i], axis=1)
+                         & np.any(grid > grid[i], axis=1))
             c.pareto_rank = int(dominated.sum())
 
         return sorted(feas, key=lambda c: (not c.guaranteed, -(c.score or 0.0),

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from nefte.agents.schemas import (
     DataQuality,
     Measurement,
@@ -22,10 +24,41 @@ from nefte.config import load_config
 # MAE 1.70 мг/кг, смещение -0.26. Используется как априорная σ базовой модели.
 BASELINE_SIGMA_MGKG = 1.7
 
-# Во сколько раз режем уверенность, когда значение пришло от виртуального
-# анализатора, а не от лаборатории или поточного прибора. ДОПУЩЕНИЕ: прямого
-# сравнения «ВАК без ЛИМС и ПАК» в данных нет, множитель выбран консервативно.
-VAK_CONFIDENCE_FACTOR = 0.5
+# Множители уверенности по источнику значения. ДОПУЩЕНИЕ: прямого сравнения в
+# данных нет, числа выбраны консервативно и по смыслу. Лаборатория — контрольный
+# факт (ТЗ), поточный прибор шумнее её (MAE 1.7 на исторических парах), а
+# виртуальный анализатор работает вообще без измерения продукта.
+SOURCE_CONFIDENCE = {Source.LIMS: 1.0, Source.PAK: 0.85, Source.VAK: 0.5,
+                     Source.NONE: 0.0}
+VAK_CONFIDENCE_FACTOR = SOURCE_CONFIDENCE[Source.VAK]
+
+
+def confidence_parts(sigma: float, source: Source, age_hours: float | None,
+                     stale_after_hours: float, usable: bool) -> dict[str, float]:
+    """Из чего складывается уверенность. Возвращает множители, а не одно число.
+
+    Раньше уверенность считалась только по σ прогноза — и оказывалась 0.95 почти
+    всегда, потому что σ обученной модели стабильна. В карточке оператора это было
+    украшением: цифра, которая не меняется, решению не помогает.
+
+    Теперь учитывается ещё и то, ОТКУДА взято значение и насколько оно свежее.
+    Для модели это принципиально: σ ничего не знает ни про устаревший анализ, ни
+    про то, что прибор молчит, — а решение зависит от этого сильнее, чем от
+    ширины интервала.
+    """
+    parts = {
+        # разброс прогноза: пока он не хуже исторического разброса «лаборатория
+        # против поточного прибора», уверенность не режем
+        "σ прогноза": 1.0 / (1.0 + max(sigma - BASELINE_SIGMA_MGKG, 0.0)
+                             / BASELINE_SIGMA_MGKG),
+        "источник": SOURCE_CONFIDENCE.get(source, 0.0),
+    }
+    if age_hours is not None and stale_after_hours > 0:
+        overdue = max(age_hours - stale_after_hours, 0.0)
+        parts["свежесть"] = 1.0 / (1.0 + overdue / stale_after_hours)
+    if not usable:
+        parts["достоверность данных"] = 0.5
+    return parts
 
 
 def fuse_sulfur(state: ProcessState, cfg: dict | None = None) -> Measurement:
@@ -120,11 +153,14 @@ class QualityAgent:
             risk = self.model.risk_for_state(state)
         if risk is None:
             risk = spec_risk_normal(mean, sigma, self.limit)
-        confidence = max(0.05, min(0.95, 1.0 / (1.0 + sigma / BASELINE_SIGMA_MGKG - 1.0)))
-        if not state.data_quality.usable:
-            confidence *= 0.5
-        if from_vak:
-            confidence *= VAK_CONFIDENCE_FACTOR
+        stale_after = float(self.cfg["quality"]["staleness_hours"]["lims"])
+        parts = confidence_parts(sigma, source, current.age_hours, stale_after,
+                                 state.data_quality.usable)
+        confidence = max(0.05, min(0.95, float(np.prod(list(parts.values())))))
+        weakest = min(parts, key=parts.get)
+        if parts[weakest] < 0.9:
+            notes.append(f"Уверенность {confidence:.2f}; сильнее всего её снижает "
+                         f"«{weakest}» (множитель {parts[weakest]:.2f}).")
 
         return QualityAssessment(
             ts=state.ts,

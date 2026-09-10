@@ -363,6 +363,65 @@ class ReliabilityAgent:
             "pressure": ht.get("P13"),
         }
 
+    def severity_for(self, state: ProcessState,
+                     moves: dict[str, float] | None = None) -> float:
+        """Тяжесть режима, какой она станет при заданных уставках.
+
+        Нужна оптимизатору. Раньше он получал у всех кандидатов ОДНО И ТО ЖЕ
+        значение — тяжесть текущего режима, — из-за чего критерий severity в
+        свёртке и на фронте Парето не работал вовсе: нормировка одинаковых чисел
+        даёт константу. То есть заявленный конфликт «качество против нагрузки на
+        оборудование» в выборе варианта не участвовал.
+
+        Пересчитываются только те факторы, на которые уставки реально влияют:
+        WABT, температура печи и нетипичность режима. Скорость изменения режима,
+        наработка катализатора и перепад на Р-202 считаются по истории и от
+        предполагаемой уставки не зависят — они берутся как есть.
+        """
+        factors = self._factors(state)
+        if not factors or not moves:
+            return float(np.clip(self._weighted(factors), 0.0, 1.0)) if factors else 0.5
+
+        ht = {**state.telemetry_ht, **moves}
+        avt = {**state.telemetry_avt,
+               **{k: v for k, v in moves.items() if k in state.telemetry_avt}}
+
+        temps = [ht.get(t) for t in self.REACTOR_TEMPS if ht.get(t) is not None]
+        if temps:
+            value = self.norms.normalize("wabt", float(np.mean(temps)))
+            if value is not None:
+                factors["wabt"] = value
+        furnace = self.norms.normalize(self.FURNACE_TAG, avt.get(self.FURNACE_TAG))
+        if furnace is not None:
+            factors["furnace"] = furnace
+
+        # нетипичность пересчитываем только у детектора, работающего на срезе:
+        # у оконного (автоэнкодера) значение приходит рядом рядом с историей и к
+        # гипотетической уставке отношения не имеет
+        if "anomaly" in factors and self.anomaly_series is None:
+            moved = self._anomaly_inputs(state)
+            gas, feed = ht.get(RECYCLE_GAS), ht.get(FEED)
+            moved.update({
+                "wabt": float(np.mean(temps)) if temps else moved.get("wabt"),
+                self.DP_TAG: ht.get(self.DP_TAG),
+                self.FURNACE_TAG: avt.get(self.FURNACE_TAG),
+                "feed": feed,
+                "h2_oil": (gas / feed) if (gas is not None and feed) else None,
+                "pressure": ht.get("P13"),
+            })
+            score = self.detector.score_row(moved)
+            if score is not None:
+                factors["anomaly"] = float(np.clip(score, 0.0, 1.5))
+        return float(np.clip(self._weighted(factors), 0.0, 1.0))
+
+    def _weighted(self, factors: dict[str, float]) -> float:
+        """Свёртка факторов теми же весами, что и в assess."""
+        if not factors:
+            return 0.5
+        weights = {k: self.WEIGHTS[k] for k in factors}
+        total = sum(weights.values())
+        return sum(factors[k] * weights[k] for k in factors) / total
+
     def is_unit_down(self, state: ProcessState) -> bool:
         """Установка стоит: сырья нет И реактор холодный.
 
@@ -401,9 +460,7 @@ class ReliabilityAgent:
                 notes=["Нет данных для оценки тяжести режима — принята средняя оценка."],
             )
 
-        w = {k: self.WEIGHTS[k] for k in factors}
-        total = sum(w.values())
-        severity = float(np.clip(sum(factors[k] * w[k] for k in factors) / total, 0.0, 1.0))
+        severity = float(np.clip(self._weighted(factors), 0.0, 1.0))
 
         medium_thr, high_thr = self.thresholds
         risk_class = ("low" if severity < medium_thr

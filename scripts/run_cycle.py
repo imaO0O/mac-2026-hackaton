@@ -149,7 +149,8 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
         # Кинетика берёт у модели только уровень серы, и этого достаточно —
         # так прямо написано в контракте docs/GPU_SETUP.md §3.
         surrogate = make_kinetic_surrogate(model)
-        optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg)
+        optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg,
+                               reliability_agent=reliability)
         lims = load_lims()
         return Orchestrator(
             QualityAgent(model=model, cfg=cfg), reliability, optimizer, cfg=cfg,
@@ -170,7 +171,8 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
               "(запустите scripts/train_quality.py)")
         surrogate = linear_surrogate(SENSITIVITIES)
 
-    optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg)
+    optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg,
+                               reliability_agent=reliability)
 
     # ЛИМС читается один раз: компоненты смешения собираются на каждом такте,
     # перечитывать книгу на каждый момент времени незачем

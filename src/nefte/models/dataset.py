@@ -15,6 +15,9 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -22,7 +25,7 @@ from nefte.config import cache_dir, load_config
 from nefte.data.cleaning import clean_lims_sulfur, clean_telemetry, frozen_mask
 from nefte.data.features import asof_features
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
-from nefte.models.regime import regime_features
+from nefte.models.regime import INSTANT_FEATURES, regime_features
 from nefte.models.vak import evaluate as evaluate_vak
 
 # Теги гидроочистки — берём все: именно там формируется сера продукта.
@@ -40,6 +43,32 @@ ROLL_WINDOWS = [6, 36, 144]
 TARGET_SERIES = "Гидроочистка|2|Mg.Sulfur"
 FEED_SULFUR_SERIES = "Гидроочистка|1|Mass.Sulfur"
 
+# Версия схемы признаков. Поднимайте её, когда меняете САМ РАСЧЁТ (формулу окна,
+# набор лаговых признаков, способ ресемплинга) — то, что не выражено константами
+# выше. Состав тегов, окна и целевые ряды подставляются в ключ кэша сами.
+FEATURE_VERSION = 1
+
+
+def cache_key(freq: str) -> str:
+    """Отпечаток настроек, определяющих матрицу признаков.
+
+    Кэш лежал в `features_1h.parquet` без всякой привязки к тому, чем он посчитан.
+    Стоило поменять список тегов или окна — и следующий запуск молча брал старый
+    файл: числа в отчётах не сходились, а причина не была видна нигде. Теперь
+    настройки входят в имя файла, и несовпадение просто приводит к пересчёту.
+    """
+    payload = json.dumps({
+        "version": FEATURE_VERSION,
+        "freq": freq,
+        "avt_tags": AVT_TAGS,
+        "ht_tags": HT_TAGS,
+        "roll_windows": ROLL_WINDOWS,
+        "target": TARGET_SERIES,
+        "feed": FEED_SULFUR_SERIES,
+        "regime": INSTANT_FEATURES,
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
+
 
 def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFrame:
     """Матрица признаков на регулярной сетке.
@@ -49,7 +78,7 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
     шесть раз легче и спокойно обучается на CPU. Метка бакета — правая граница,
     иначе строка содержала бы данные из собственного будущего.
     """
-    cache = cache_dir() / f"features_{freq}.parquet"
+    cache = cache_dir() / f"features_{freq}_{cache_key(freq)}.parquet"
     if use_cache and cache.exists():
         return pd.read_parquet(cache)
 
