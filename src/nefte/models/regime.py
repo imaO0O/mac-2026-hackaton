@@ -179,9 +179,17 @@ def apply_moves_to_rows(rows: pd.DataFrame, moves: dict[str, float],
         column = f"{prefix}{tag}"
         if column not in out.columns:
             continue
-        new = raw[tag] + value if relative else pd.Series(value, index=out.index)
-        delta = new - raw[tag]
-        raw[tag] = new
+        # Уставка может быть и не из тех, что влияют на признаки режима (MOVE_SENSITIVE).
+        # Раньше такой тег ронял расчёт по KeyError: обращение к raw[tag] шло раньше,
+        # чем проверка, что тег вообще туда попал. Сейчас управляющие теги все
+        # «чувствительные», но добавление любого другого сломало бы оптимизатор.
+        current = raw.get(tag)
+        if current is None:
+            current = out[column].astype("float64")
+        new = current + value if relative else pd.Series(value, index=out.index)
+        delta = new - current
+        if tag in raw:
+            raw[tag] = new
         out[column] = new.astype(out[column].dtype)
         hourly = f"{column}_mean6"
         if hourly in out.columns:

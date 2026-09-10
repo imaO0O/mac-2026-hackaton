@@ -76,7 +76,8 @@ def main() -> int:
     print(f"      {feats.shape[0]} моментов × {feats.shape[1]} признаков")
 
     print(f"[2/5] обучающая таблица, горизонт {args.horizon} ч…")
-    X, y = build_training_table(horizon_hours=args.horizon, features=feats)
+    X, y = build_training_table(horizon_hours=args.horizon, features=feats,
+                                train_bounds=tuple(cfg["split"]["train"]))
     masks = time_split(X.index, cfg)
     parts = {k: (X[m.to_numpy()], y[m.to_numpy()]) for k, m in masks.items()}
     for name, (xx, _) in parts.items():

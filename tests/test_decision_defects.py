@@ -184,3 +184,124 @@ def test_plain_system_still_lists_hard_limit():
     rec = build_system().run(make_state(lims=(5.0, 1.0), pak=(5.2, 0.1)))
     assert any("сера" in item for item in rec.checked_constraints)
     assert isinstance(pd.Timestamp(rec.ts), pd.Timestamp)
+
+
+# --------------------------------------------------------------------------- #
+# 7. смесь с неизвестной серой — не «ноль»
+# --------------------------------------------------------------------------- #
+
+def test_unknown_sulfur_is_not_zero():
+    """Было: weighted(...) or 0.0 — смесь с неизвестной серой объявлялась годной."""
+    from nefte.agents.blending import BlendingAgent, mix
+    from nefte.agents.schemas import BlendComponent
+
+    ghost = BlendComponent(name="без анализа", sulfur_mgkg=float("nan"),
+                           available_tph=100.0)
+    props = mix([ghost], {"без анализа": 1.0})
+    assert props["sulfur_mgkg"] != props["sulfur_mgkg"]          # NaN, а не 0
+    violations = BlendingAgent().check(props, {"без анализа": 1.0})
+    assert any("не из чего посчитать" in v for v in violations)
+
+
+# --------------------------------------------------------------------------- #
+# 8. недоступный компонент обнуляет выпуск
+# --------------------------------------------------------------------------- #
+
+def test_recipe_with_unavailable_component_promises_no_throughput():
+    """Было: компонент с нулевым расходом просто выпадал из расчёта выпуска."""
+    from nefte.agents.blending import BlendingAgent
+    from nefte.agents.schemas import BlendComponent
+
+    plenty = BlendComponent(name="есть", sulfur_mgkg=6.0, density_15c=835.0,
+                            t95_c=340.0, cfpp_c=-9.0, available_tph=200.0)
+    empty = BlendComponent(name="нет в наличии", sulfur_mgkg=2.0, density_15c=830.0,
+                           t95_c=330.0, cfpp_c=-12.0, available_tph=0.0)
+    agent = BlendingAgent()
+    recipe = agent.optimize([plenty, empty])
+    # рецептура из одного доступного компонента даёт выпуск, из недоступного — нет
+    assert recipe.throughput_tph > 0
+    assert recipe.fractions["нет в наличии"] == pytest.approx(0.0)
+
+    forced = {"есть": 0.5, "нет в наличии": 0.5}
+    from nefte.agents.blending import mix
+    props = mix([plenty, empty], forced)
+    assert not agent.check(props, forced)          # по спецификации проходит
+    # но выпуска у такой смеси быть не может — оптимизатор её и не выбрал
+    assert recipe.fractions["есть"] == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------- #
+# 9. отбор признаков не смотрит в будущее
+# --------------------------------------------------------------------------- #
+
+def test_column_selection_uses_train_only():
+    """Было: почти пустые колонки отбирались по доле пропусков во ВСЕЙ истории.
+
+    Утечка слабая, но настоящая: признак, которого в обучающем периоде почти нет,
+    выживал за счёт того, что он появляется в тестовом.
+    """
+    import nefte.models.dataset as dataset
+
+    idx = pd.date_range("2024-01-01", periods=400, freq="1h", name="date")
+    feats = pd.DataFrame({
+        "всегда": 1.0,
+        # в обучающем периоде признака нет вовсе, зато потом он заполнен —
+        # по всей истории выходит 62 % заполненности, по train — ноль
+        "появился позже": [np.nan] * 150 + [1.0] * 250,
+    }, index=idx)
+    target = pd.Series(8.0, index=idx[::10])
+
+    original = dataset.clean_lims_sulfur
+    dataset.clean_lims_sulfur = lambda *_a, **_k: target
+    try:
+        whole, _ = dataset.build_training_table(0.0, features=feats)
+        train_only, _ = dataset.build_training_table(
+            0.0, features=feats, train_bounds=("2024-01-01", "2024-01-06"))
+    finally:
+        dataset.clean_lims_sulfur = original
+
+    assert "всегда" in whole.columns and "всегда" in train_only.columns
+    assert "появился позже" in whole.columns, "по всей истории признак выживал"
+    assert "появился позже" not in train_only.columns, "по train его быть не должно"
+
+
+# --------------------------------------------------------------------------- #
+# 10. уставка, не влияющая на признаки режима, не роняет расчёт
+# --------------------------------------------------------------------------- #
+
+def test_move_of_a_non_regime_tag_does_not_crash():
+    """Было: обращение к raw[tag] шло раньше проверки, что тег туда попал.
+
+    Управляющие теги сейчас все «чувствительные к режиму», но добавление любого
+    другого — например уставки АВТ — уронило бы оптимизатор по KeyError.
+    """
+    from nefte.models.regime import apply_moves_to_rows
+
+    rows = pd.DataFrame({"ht_T5": [360.0], "ht_T6": [358.0], "ht_T11": [362.0],
+                         "ht_F26": [250.0], "ht_F99": [10.0], "ht_F99_mean6": [9.0]},
+                        index=pd.DatetimeIndex(["2026-01-01"]))
+    out = apply_moves_to_rows(rows, {"F99": 12.0, "T5": 362.0})
+    assert out["ht_F99"].iloc[0] == pytest.approx(12.0)
+    assert out["ht_F99_mean6"].iloc[0] == pytest.approx(11.0)   # среднее подтянулось
+    assert out["ht_T5"].iloc[0] == pytest.approx(362.0)
+
+
+# --------------------------------------------------------------------------- #
+# 11. подозрительный тег не остаётся без вердикта
+# --------------------------------------------------------------------------- #
+
+def test_every_suspect_tag_has_a_verdict():
+    """Было: P44 и P52 значились подозрительными, но вердикта не имели.
+
+    При этом P44 — один из значимых признаков модели качества, то есть тег без
+    разбора работал в проде. Список подозрительных и список вердиктов обязаны
+    сходиться, иначе такое повторится молча.
+    """
+    from nefte.config import load_config
+
+    telemetry = load_config()["telemetry"]
+    verdicts = telemetry.get("tag_verdicts", {})
+    suspects = set(telemetry.get("suspect_tags", []))
+    without = {tag for tag in suspects
+               if not any(key.endswith(f":{tag}") for key in verdicts)}
+    assert not without, f"без вердикта остались теги: {sorted(without)}"

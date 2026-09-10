@@ -169,12 +169,18 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
 
 
 def build_training_table(horizon_hours: float = 2.0,
-                         features: pd.DataFrame | None = None
+                         features: pd.DataFrame | None = None,
+                         train_bounds: tuple[str, str] | None = None
                          ) -> tuple[pd.DataFrame, pd.Series]:
     """Обучающая таблица: X — признаки за ``horizon_hours`` ДО анализа, y — анализ.
 
     Так модель отвечает на вопрос «каким будет лабораторный результат через
     H часов», а не «каким он был». Это и есть прогноз качества из ТЗ.
+
+    ``train_bounds`` — границы обучающего периода. Они нужны для отбора почти
+    пустых колонок: без них решение «выкинуть признак» принимается по доле
+    пропусков во ВСЕЙ истории, то есть с оглядкой на тест. Утечка слабая, но
+    настоящая: состав признаков зависит от будущего.
     """
     feats = build_feature_matrix() if features is None else features
     y = clean_lims_sulfur(lims_series(TARGET_SERIES))
@@ -195,7 +201,9 @@ def build_training_table(horizon_hours: float = 2.0,
     X["feature_age_h"] = [(ts - r).total_seconds() / 3600 for ts, r in zip(index, rows)]
     y = y.loc[X.index]
 
-    keep = X.notna().mean() > 0.5              # выкидываем почти пустые признаки
+    # выкидываем почти пустые признаки — по обучающему периоду, а не по всей истории
+    scope = X.loc[train_bounds[0]:train_bounds[1]] if train_bounds else X
+    keep = (scope if len(scope) else X).notna().mean() > 0.5
     X = X.loc[:, keep]
     return X, y
 

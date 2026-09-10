@@ -56,7 +56,10 @@ def mix(components: list[BlendComponent], fractions: dict[str, float],
                 weight += share
         return total / weight if weight > 0 else None
 
-    props["sulfur_mgkg"] = weighted("sulfur_mgkg") or 0.0
+    # Если серу посчитать не из чего, это НЕ ноль. Ноль прошёл бы проверку
+    # спецификации и смесь с неизвестной серой объявили бы годной.
+    sulfur = weighted("sulfur_mgkg")
+    props["sulfur_mgkg"] = float("nan") if sulfur is None else sulfur
     for attr, key in (("density_15c", "density_15c"), ("t95_c", "t95_c"), ("cfpp_c", "cfpp_c")):
         value = weighted(attr)
         if value is not None:
@@ -95,7 +98,9 @@ class BlendingAgent:
             violations.append(f"сумма долей {total:.4f}, а должна быть 1")
 
         sulfur = props.get("sulfur_mgkg")
-        if sulfur is not None and sulfur > self.spec["product_sulfur_mgkg"]["max"]:
+        if sulfur is None or sulfur != sulfur:          # None или NaN
+            violations.append("серу смеси не из чего посчитать")
+        elif sulfur > self.spec["product_sulfur_mgkg"]["max"]:
             violations.append(
                 f"сера {sulfur:.2f} мг/кг выше предела "
                 f"{self.spec['product_sulfur_mgkg']['max']}")
@@ -139,9 +144,15 @@ class BlendingAgent:
             violations = self.check(props, fractions)
             if violations:
                 continue
-            # выпуск ограничен самым дефицитным компонентом
-            limits = [capacity[n] / f for n, f in fractions.items() if f > 0 and capacity[n] > 0]
-            throughput = min(limits) if limits else 0.0
+            # Выпуск ограничен самым дефицитным компонентом. Если компонент с
+            # ненулевой долей недоступен вовсе, смесь не сделать — выпуск ноль, а
+            # не «минимум по остальным». Раньше такой компонент просто выпадал из
+            # расчёта, и рецептура обещала выпуск, которого быть не может.
+            needed = [n for n, f in fractions.items() if f > 0]
+            if any(capacity[n] <= 0 for n in needed):
+                throughput = 0.0
+            else:
+                throughput = min(capacity[n] / fractions[n] for n in needed) if needed else 0.0
             if best is None or throughput > best.throughput_tph:
                 best = BlendRecipe(fractions=fractions, properties=props,
                                    throughput_tph=throughput, additive_ppm=additive_ppm,

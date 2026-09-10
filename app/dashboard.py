@@ -217,6 +217,10 @@ def main() -> None:
             st.dataframe(pd.DataFrame([
                 {"вариант": c.id,
                  "сера": round(c.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
+                 # риск и тяжесть режима у каждого варианта СВОИ — именно между
+                 # ними и выбирает технолог
+                 "риск": round(c.spec_risk.get("product_sulfur_mgkg", float("nan")), 3),
+                 "тяжесть": round(c.severity_index or 0, 3),
                  "выпуск": round(c.throughput or 0, 1),
                  "энергия": round(c.energy_proxy or 0, 1),
                  "с запасом": "да" if c.guaranteed else "нет"}
