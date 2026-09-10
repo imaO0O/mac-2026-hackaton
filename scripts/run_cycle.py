@@ -71,10 +71,15 @@ def load_sequence_model(horizon: float | None = None):
         print("[модель] torch не установлен — нейросетевую модель не подключить")
         return None
 
-    candidates = [p for p in sorted((ROOT / "models").glob("sulfur_seq_*"))
-                  if (p / "meta.json").exists()]
-    if horizon is not None:
-        candidates = [p for p in candidates if p.name.endswith(f"_h{horizon:g}")]
+    trained = [p for p in sorted((ROOT / "models").glob("sulfur_seq_*"))
+               if (p / "meta.json").exists()]
+    # Горизонты не смешиваем: сравнивать MAE прогноза на 0 и на 2 часа бессмысленно.
+    # По умолчанию берём nowcast, как и у бустинга, и только если его нет — h=2.
+    candidates: list[Path] = []
+    for wanted in ([horizon] if horizon is not None else [0, 2]):
+        candidates = [p for p in trained if p.name.endswith(f"_h{wanted:g}")]
+        if candidates:
+            break
     if not candidates:
         print("[модель] обученной нейросетевой модели нет "
               "(запустите scripts/train_sequence.py)")
