@@ -34,6 +34,31 @@ from nefte.models.anomaly import RegimeAnomalyDetector
 from nefte.models.regime import FEED, RECYCLE_GAS, hours_since_outage
 
 
+def regime_anomaly_frame(avt: pd.DataFrame, ht: pd.DataFrame) -> pd.DataFrame:
+    """Описатели режима, на которых работает детектор аномалий.
+
+    Вынесено из ``ReliabilityAgent.from_history``: альтернативный детектор
+    (LSTM-автоэнкодер) обязан обучаться ровно на том же наборе, иначе сравнение
+    двух методов ничего не значит.
+    """
+    temps = [t for t in ReliabilityAgent.REACTOR_TEMPS if t in ht.columns]
+    frame = pd.DataFrame(index=ht.index)
+    if temps:
+        frame["wabt"] = ht[temps].mean(axis=1)
+    if ReliabilityAgent.DP_TAG in ht.columns:
+        frame[ReliabilityAgent.DP_TAG] = ht[ReliabilityAgent.DP_TAG]
+    if ReliabilityAgent.FURNACE_TAG in avt.columns:
+        frame[ReliabilityAgent.FURNACE_TAG] = avt[ReliabilityAgent.FURNACE_TAG]
+    if FEED in ht.columns:
+        frame["feed"] = ht[FEED]
+        if RECYCLE_GAS in ht.columns:
+            denom = ht[FEED].where(ht[FEED] > ht[FEED].median() * 0.1)
+            frame["h2_oil"] = ht[RECYCLE_GAS] / denom
+    if "P13" in ht.columns:
+        frame["pressure"] = ht["P13"]
+    return frame
+
+
 @dataclass
 class SeverityNorms:
     """Нормировка прокси-факторов по историческим квантилям.
@@ -112,7 +137,9 @@ class ReliabilityAgent:
                  detector: RegimeAnomalyDetector | None = None,
                  thresholds: tuple[float, float] | None = None,
                  feed_median: float | None = None,
-                 down_series: pd.Series | None = None):
+                 down_series: pd.Series | None = None,
+                 anomaly_series: pd.Series | None = None,
+                 anomaly_parts: pd.DataFrame | None = None):
         self.norms = norms or SeverityNorms(bounds={})
         # нормированная скорость изменения режима, посчитанная по истории
         self.ramp_series = ramp_series
@@ -126,6 +153,13 @@ class ReliabilityAgent:
         # маска «установка стоит», посчитанная по СЫРОЙ телеметрии: в очищенном
         # срезе расход сырья на останове замаскирован, и признак не виден
         self.down_series = down_series
+        # Готовый ряд аномальности и разбивка по каналам. Нужны детектору, который
+        # работает на ОКНЕ, а не на строке: LSTM-автоэнкодер по одному срезу
+        # ничего сказать не может, поэтому его оценки считаются заранее по всей
+        # истории и здесь только читаются по метке времени — тем же способом, что
+        # ramp_series и run_hours. Если ряда нет, работает Махаланобис.
+        self.anomaly_series = anomaly_series
+        self.anomaly_parts = anomaly_parts
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -195,14 +229,7 @@ class ReliabilityAgent:
             down_series = (cold & no_feed).reindex(ht.index).fillna(False)
 
         # многомерный детектор: описатели режима, а не отдельные теги
-        anomaly_frame = frame.copy()
-        if FEED in ht.columns:
-            anomaly_frame["feed"] = ht[FEED]
-            if RECYCLE_GAS in ht.columns:
-                denom = ht[FEED].where(ht[FEED] > ht[FEED].median() * 0.1)
-                anomaly_frame["h2_oil"] = ht[RECYCLE_GAS] / denom
-        if "P13" in ht.columns:
-            anomaly_frame["pressure"] = ht["P13"]
+        anomaly_frame = regime_anomaly_frame(avt, ht)
         detector = RegimeAnomalyDetector.fit(anomaly_frame, list(anomaly_frame.columns),
                                              train=train)
 
@@ -246,7 +273,10 @@ class ReliabilityAgent:
         if self.run_hours is not None and self.run_hours_scale:
             factors["catalyst"] = (self.run_hours.reindex(frame.index)
                                    / self.run_hours_scale).clip(0.0, 1.5)
-        if anomaly_frame is not None and self.detector.fitted:
+        if self.anomaly_series is not None:
+            factors["anomaly"] = (self.anomaly_series.reindex(frame.index)
+                                  .clip(0.0, 1.5))
+        elif anomaly_frame is not None and self.detector.fitted:
             distance = self.detector.distance(anomaly_frame.reindex(frame.index))
             factors["anomaly"] = pd.Series(distance / self.detector.threshold,
                                            index=frame.index).clip(0.0, 1.5)
@@ -286,10 +316,31 @@ class ReliabilityAgent:
         if run is not None and self.run_hours_scale:
             factors["catalyst"] = float(np.clip(run / self.run_hours_scale, 0.0, 1.5))
 
-        score = self.detector.score_row(self._anomaly_inputs(state))
-        if score is not None:
+        # Готовый ряд (например, от LSTM-автоэнкодера) имеет приоритет: детектор
+        # на окне по одному срезу оценку дать не может.
+        score = self._anomaly_at(state.ts)
+        if score is None:
+            score = self.detector.score_row(self._anomaly_inputs(state))
+        if score is not None and score == score:
             factors["anomaly"] = float(np.clip(score, 0.0, 1.5))
         return factors
+
+    def _anomaly_at(self, ts) -> float | None:
+        """Аномальность из заранее посчитанного ряда, если он подключён."""
+        if self.anomaly_series is None:
+            return None
+        sub = self.anomaly_series.loc[:ts].dropna()
+        return None if sub.empty else float(sub.iloc[-1])
+
+    def _anomaly_contributions(self, state: ProcessState) -> dict[str, float]:
+        """Вклад переменных в аномальность — для объяснения оператору."""
+        if self.anomaly_parts is not None:
+            sub = self.anomaly_parts.loc[:state.ts].dropna(how="all")
+            if len(sub):
+                row = sub.iloc[-1].dropna().sort_values(ascending=False)
+                return {k: round(float(v), 3) for k, v in row.items()}
+            return {}
+        return self.detector.contributions(self._anomaly_inputs(state))
 
     def _run_hours_at(self, ts) -> float | None:
         if self.run_hours is None:
@@ -374,7 +425,7 @@ class ReliabilityAgent:
                          f"переоценки факторов. Решение требует внимания технолога.")
 
         if factors.get("anomaly", 0) > 1.0:
-            parts = self.detector.contributions(self._anomaly_inputs(state))
+            parts = self._anomaly_contributions(state)
             worst = ", ".join(f"{k} ({v:.0%})" for k, v in list(parts.items())[:3])
             notes.append(f"Режим нетипичен для истории: наибольший вклад дают {worst}. "
                          "Каждый параметр по отдельности в норме — нетипично их сочетание.")
