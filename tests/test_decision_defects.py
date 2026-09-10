@@ -11,12 +11,12 @@ import pandas as pd
 import pytest
 
 from nefte.agents.optimizer import PARETO_EPS, OptimizerAgent, linear_surrogate
+from nefte.agents.orchestrator import Orchestrator
 from nefte.agents.quality import (
     SOURCE_CONFIDENCE,
     QualityAgent,
     confidence_parts,
 )
-from nefte.agents.orchestrator import Orchestrator
 from nefte.agents.reliability import ReliabilityAgent, SeverityNorms
 from nefte.agents.schemas import Source
 from nefte.models.dataset import cache_key
