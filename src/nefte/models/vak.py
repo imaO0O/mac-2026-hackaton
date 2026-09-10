@@ -30,6 +30,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from nefte.config import load_config
+
 from nefte.data.loaders import load_vak_formulas, parse_vak_formula
 
 # Ссылки на ЛИМС внутри формул → ряды из нашего длинного формата.
@@ -82,13 +84,19 @@ def compile_formulas() -> tuple[list[dict], list[dict]]:
     отброшенных с причиной. Отбрасываем молча только то, что не компилируется:
     молчаливая «починка» чужой формулы хуже честного пропуска.
     """
+    corrections = (load_config().get("vak") or {}).get("corrections") or {}
     usable, skipped = [], []
     for _, row in load_vak_formulas().iterrows():
-        expr = parse_vak_formula(row["formula"])
+        target = row["target"]
+        # Поправки организаторов важнее выданного файла: часть формул на листе
+        # «ВАК» содержит ошибки (T90 давал 198 000 °C). Источник каждой поправки
+        # записан в конфиге, чтобы было видно, что это не наша самодеятельность.
+        fix = corrections.get(target)
+        raw_formula = fix["formula"] if fix else row["formula"]
+        expr = parse_vak_formula(raw_formula)
         for token, (name, _series) in LIMS_TOKENS.items():
             expr = expr.replace(token, name)
 
-        target = row["target"]
         try:
             code = compile(expr, f"<vak:{target}>", "eval")
         except SyntaxError as err:
@@ -103,9 +111,52 @@ def compile_formulas() -> tuple[list[dict], list[dict]]:
             "code": code,
             "expr": expr,
             "tags": sorted(set(_NAME_RE.findall(expr))),
-            "uses_lims": bool(row["uses_lims"]),
+            "uses_lims": bool(row["uses_lims"]) or "LIMS_" in expr,
+            "corrected": bool(fix),
+            "correction_reason": (fix or {}).get("reason", ""),
         })
     return usable, skipped
+
+
+def point_evaluator(target: str):
+    """Функция, считающая ОДНУ формулу ВАК в одной точке.
+
+    ``evaluate`` работает по всей истории и нужен для признаков. Оптимизатору
+    нужно другое: посчитать показатель для КАЖДОГО варианта уставок, то есть в
+    одной точке и много раз. Пересчитывать всю историю ради этого нельзя.
+
+    Возвращает ``callable(values: dict[str, float]) -> float | None`` либо None,
+    если такой формулы нет. Недостающий тег даёт None, а не ноль: ноль прошёл бы
+    проверку спецификации и вариант объявили бы годным.
+    """
+    usable, _ = compile_formulas()
+    item = next((i for i in usable if i["target"] == target), None)
+    if item is None:
+        return None
+
+    # Имена лабораторных входов регулярка тегов не ловит (LIMS_T95 не похож на
+    # тег установки), а формуле они нужны наравне с телеметрией.
+    needed = list(item["tags"]) + [name for name, _ in LIMS_TOKENS.values()
+                                   if name in item["expr"]]
+    code = item["code"]
+
+    def _fn(values: dict[str, float]) -> float | None:
+        namespace = {}
+        for name in needed:
+            value = values.get(name)
+            if value is None or value != value:
+                return None
+            namespace[name] = float(value)
+        try:
+            result = float(eval(code, {"__builtins__": {}}, namespace))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+        return None if result != result else result
+
+    _fn.tags = needed
+    _fn.target = target
+    _fn.corrected = item["corrected"]
+    return _fn
 
 
 def evaluate(avt: pd.DataFrame, ht: pd.DataFrame,

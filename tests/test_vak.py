@@ -21,13 +21,27 @@ def test_parse_handles_both_notations():
         "0.27467*T42-0.32983*(F31/F57)"
 
 
-def test_broken_formula_is_skipped_not_repaired():
-    """AVT6:240-350:CFPP записана с непарной скобкой — домысливать её нельзя."""
-    usable, skipped = compile_formulas()
-    names = {i["target"] for i in skipped}
-    assert "AVT6:240-350:CFPP" in names
-    assert all("CFPP" not in i["target"] or "350:" not in i["target"]
-               for i in usable if i["unit"] == "avt" and "240-350" in i["target"])
+def test_formula_is_repaired_only_by_a_declared_correction():
+    """AVT6:240-350:CFPP была записана с непарной скобкой.
+
+    Домысливать чужую формулу нельзя — и мы не домысливали, а получили поправку
+    от организаторов. Теперь формула считается, но только потому, что поправка
+    объявлена в конфиге вместе с причиной. Проверяем именно это: исправленная
+    формула обязана иметь источник, иначе это самодеятельность.
+    """
+    usable, _ = compile_formulas()
+    by_target = {i["target"]: i for i in usable}
+    fixed = by_target["AVT6:240-350:CFPP"]
+    assert fixed["corrected"] is True
+    assert "организатор" in fixed["correction_reason"].lower()
+
+
+def test_uncorrected_formulas_stay_untouched():
+    """Формула без объявленной поправки берётся из выданного файла как есть."""
+    usable, _ = compile_formulas()
+    untouched = [i for i in usable if not i["corrected"]]
+    assert untouched, "не все формулы поправлены — проверять есть что"
+    assert all(i["correction_reason"] == "" for i in untouched)
 
 
 def test_formulas_are_bound_to_their_own_unit():
@@ -57,8 +71,8 @@ def test_evaluate_computes_formula_arithmetic():
     avt, ht = _telemetry()
     out, _ = evaluate(avt, ht, check_plausibility=False)
     assert "vak_24_2000_GODT_T50" in out.columns
-    # формула T50 = 44.625 + 10.0224*P13 + 0.06981*F9 + 0.8052*T6
-    expected = 44.625 + 10.0224 * 1.0 + 0.06981 * 1.0 + 0.8052 * 1.0
+    # исправленная организаторами формула: 44.625 + 10.0224*P13 + 0.06981*F9 + 0.471*T6
+    expected = 44.625 + 10.0224 * 1.0 + 0.06981 * 1.0 + 0.471 * 1.0
     assert out["vak_24_2000_GODT_T50"].iloc[0] == pytest.approx(expected, rel=1e-5)
 
 
@@ -98,7 +112,8 @@ def test_lims_context_enables_those_formulas():
 
 
 def test_all_expected_targets_are_covered():
-    """16 формул из 17: одна битая в исходнике."""
+    """Все 17 формул считаются: единственная битая исправлена поправкой."""
     usable, skipped = compile_formulas()
-    assert len(usable) == 16
-    assert len(skipped) == 1
+    assert len(usable) == 17
+    assert skipped == []
+    assert sum(1 for i in usable if i["corrected"]) == 6

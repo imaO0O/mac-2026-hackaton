@@ -77,7 +77,7 @@ def main() -> int:
     sim = ClosedLoopSimulator(sb, system, system.optimizer.surrogate,
                               tau_hours=args.tau)
     steps = sim.run(stamps, hist_sulfur=sb.lims_sulfur)
-    report = summarize(steps, limit)
+    report = summarize(steps, limit, t95_limit=cfg["spec"]["t95_c"]["max"])
 
     print("Исходы:", report["исходы"])
     print(f"Вмешательств: {report['вмешательств']} из {report['шагов']} циклов")
@@ -87,6 +87,18 @@ def main() -> int:
         print(f"Она же по лаборатории без вмешательства: "
               f"среднее {report['сера_история']['среднее']}, выше предела "
               f"{report['сера_история']['доля выше предела']:.0%} времени")
+
+    t95 = report.get("Т95")
+    if t95:
+        print(f"
+Т95: начало {t95['начало']} °C, конец {t95['конец']} °C, "
+              f"уход за прогон {t95['уход за прогон']:+.2f} °C")
+        if "предел" in t95:
+            print(f"     предел {t95['предел']} °C, минимальный запас "
+                  f"{t95['минимальный запас']:+.2f} °C, выше предела "
+                  f"{t95['доля выше предела']:.0%} времени")
+        print("     Это проверка на «починили серу, сломали Т95»: за один цикл "
+              "прибавка меньше градуса, но она копится.")
 
     if report["уставки"]:
         print("\nЧто система сделала с уставками:")
@@ -99,8 +111,9 @@ def main() -> int:
     REPORT.write_text(json.dumps({
         "период": [str(lo), str(hi)], "шаг": args.every, "tau_hours": args.tau,
         "итог": report,
-        "шаги": [{"ts": str(s.ts), "исход": s.outcome,
+        "шаги": [{"ts": str(s.ts), "исход": s.outcome, "применено": s.applied,
                   "сера": round(s.sulfur_sim, 3),
+                  "Т95": None if s.t95_sim is None else round(s.t95_sim, 2),
                   "сера_история": None if s.sulfur_hist is None else round(s.sulfur_hist, 3),
                   "смещения": {k: round(v, 3) for k, v in s.offsets.items()},
                   "шаг": {k: round(v, 3) for k, v in s.moved.items()}}

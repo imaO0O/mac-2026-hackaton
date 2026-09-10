@@ -26,6 +26,7 @@ from nefte.agents.schemas import (
     ReliabilityAssessment,
 )
 from nefte.config import load_config
+from nefte.models.vak import point_evaluator
 
 # Во сколько σ закладываем запас по качеству: рекомендация должна оставаться
 # допустимой не только в среднем, но и при разумно плохом исходе.
@@ -72,6 +73,60 @@ def linear_surrogate(sensitivities: dict[str, float], base_key: str = "product_s
             if cur is not None and tag in sensitivities:
                 value += sensitivities[tag] * (new - cur)
         return {base_key: float(value)}
+
+    return _fn
+
+
+def default_t95_estimator(target: str = "24-2000:GODT:T95"
+                          ) -> Callable[[ProcessState, dict[str, float]], float | None]:
+    """Т95 продукта при заданных уставках: УРОВЕНЬ из лаборатории, ПРИРАЩЕНИЕ из формулы.
+
+    Формула виртуального анализатора взята с листа «ВАК» с поправкой организаторов.
+    Использовать её абсолютное значение как оценку Т95 нельзя, и это измерено: на
+    400 последних анализах смещение всего −0.8 °C, но MAE 5.5 °C при разбросе самой
+    лаборатории 6.5 °C и корреляции 0.30. То есть УРОВЕНЬ формула держит, а вот
+    попадание в конкретное значение — нет, и жёсткий предел 360 °C по такому числу
+    был бы ложной точностью.
+
+    Зато коэффициенты формулы — это отклик, а он структурный: температура Р-202
+    входит в Т95 с множителем 0.50, то есть +2 °C ради серы дают +1 °C к Т95.
+    Поэтому берём то же правило, что и в кинетическом суррогате: уровень из
+    измерения, приращение из модели. В разности лабораторный член формулы
+    сокращается, и остаётся ровно чувствительность к уставкам::
+
+        Т95(вариант) = Т95(лаборатория) + [ВАК(вариант) − ВАК(текущий режим)]
+
+    Опорное значение приходит из среза, то есть уже с задержкой публикации. Оно
+    стареет: между анализами до суток, и на столько же устаревает оценка.
+
+    Возвращает None, когда посчитать не из чего. None означает «не знаем», и выше
+    по коду разбирается отдельно: молча подставить ноль нельзя — ноль прошёл бы
+    проверку предела.
+    """
+    evaluator = point_evaluator(target)
+
+    def _at(state: ProcessState, moves: dict[str, float]) -> float | None:
+        values: dict[str, float] = {}
+        for tag in evaluator.tags:
+            if tag.startswith("LIMS_"):
+                values[tag] = 0.0        # в разности сокращается
+                continue
+            values[tag] = moves.get(tag, state.telemetry_ht.get(
+                tag, state.telemetry_avt.get(tag)))
+        return evaluator(values)
+
+    def _fn(state: ProcessState, moves: dict[str, float]) -> float | None:
+        if evaluator is None:
+            return None
+        lab = state.quality.get("lims_t95_c")
+        if lab is None or lab.value is None:
+            return None
+        if not moves:
+            return float(lab.value)
+        base, moved = _at(state, {}), _at(state, moves)
+        if base is None or moved is None:
+            return None
+        return float(lab.value) + (moved - base)
 
     return _fn
 
@@ -154,7 +209,8 @@ class OptimizerAgent:
                  throughput_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
                  energy_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
                  grid_levels: int = 5,
-                 reliability_agent=None):
+                 reliability_agent=None,
+                 t95_fn: Callable[[ProcessState, dict[str, float]], float | None] | None = None):
         # Агент надёжности нужен, чтобы пересчитать тяжесть режима под каждый
         # вариант. Необязателен: без него severity берётся текущий, как раньше,
         # и это честно видно по тому, что критерий перестаёт различать варианты.
@@ -164,6 +220,13 @@ class OptimizerAgent:
         self.cfg = cfg or load_config()
         self.throughput_fn = throughput_fn or default_throughput()
         self.energy_fn = energy_fn or default_energy_proxy()
+        # Т95 — второй обязательный показатель. Он не «ещё один критерий»: по
+        # исправленной формуле ВАК температура Р-202 входит в Т95 с коэффициентом
+        # 0.50, то есть каждые +2 °C ради серы дают +1 °C к Т95. Запас до предела
+        # 360 °C бывает в пять градусов, так что несколько шагов подряд выводят
+        # продукт за спецификацию по другому показателю. Без этой проверки система
+        # чинила одно за счёт другого и не знала об этом.
+        self.t95_fn = t95_fn if t95_fn is not None else default_t95_estimator()
         self.grid_levels = grid_levels
         self.seed = int(self.cfg["optimization"]["random_seed"])
         # причины отсева последнего прогона — оркестратор объясняет ими отказ
@@ -305,12 +368,29 @@ class OptimizerAgent:
                 hold_pred = self.surrogate(state, c.moves).get("product_sulfur_mgkg")
                 break
 
+        t95_limit = self.cfg["spec"]["t95_c"]["max"]
+        # Т95 текущего режима: с ним сравниваем вариант. Если Т95 УЖЕ за пределом,
+        # запрещать варианты по этому признаку бессмысленно — тогда важно лишь то,
+        # что вариант не делает хуже.
+        t95_now = self.t95_fn(state, {}) if self.t95_fn else None
+
         for c in cands:
             pred = self.surrogate(state, c.moves)
             c.predicted_quality = pred
             sulfur = pred.get("product_sulfur_mgkg")
             violations = []
             guaranteed = False
+
+            # Второй обязательный показатель. Проверяем ДО ранжирования: вариант,
+            # который чинит серу ценой Т95, недопустим, а не «чуть хуже по баллам».
+            t95 = self.t95_fn(state, c.moves) if self.t95_fn else None
+            if t95 is not None:
+                pred["product_t95_c"] = float(t95)
+                worse = t95_now is not None and t95 > t95_now + 1e-9
+                if t95 > t95_limit and (t95_now is None or t95_now <= t95_limit or worse):
+                    violations.append(
+                        f"Т95 {t95:.1f} °C выходит за {t95_limit} — вариант чинит серу "
+                        f"за счёт другого обязательного показателя")
 
             if sulfur is None or sulfur != sulfur:
                 violations.append("нет прогноза качества")

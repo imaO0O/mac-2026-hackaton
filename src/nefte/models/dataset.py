@@ -23,7 +23,7 @@ import pandas as pd
 
 from nefte.config import cache_dir, load_config
 from nefte.data.cleaning import clean_lims_sulfur, frozen_mask
-from nefte.data.features import asof_features
+from nefte.data.features import asof_features, known_from
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
 from nefte.data.validity import SignalValidity
 from nefte.models.regime import INSTANT_FEATURES, regime_features
@@ -47,7 +47,7 @@ FEED_SULFUR_SERIES = "Гидроочистка|1|Mass.Sulfur"
 # Версия схемы признаков. Поднимайте её, когда меняете САМ РАСЧЁТ (формулу окна,
 # набор лаговых признаков, способ ресемплинга) — то, что не выражено константами
 # выше. Состав тегов, окна и целевые ряды подставляются в ключ кэша сами.
-FEATURE_VERSION = 3
+FEATURE_VERSION = 4
 
 
 def cache_key(freq: str) -> str:
@@ -66,6 +66,10 @@ def cache_key(freq: str) -> str:
         "roll_windows": ROLL_WINDOWS,
         "target": TARGET_SERIES,
         "feed": FEED_SULFUR_SERIES,
+        "lims_delay": load_config()["quality"].get("lims_publication_delay_hours"),
+        # поправки к формулам ВАК меняют состав признаков — кэш обязан это заметить
+        "vak_corrections": sorted((load_config().get("vak") or {})
+                                  .get("corrections", {}).items()),
         "regime": INSTANT_FEATURES,
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]
@@ -107,6 +111,8 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
             raw_series = lims_series(series_name, lims_all)
         except KeyError:
             continue
+        raw_series = known_from(raw_series, float(
+            cfg["quality"].get("lims_publication_delay_hours", 0.0)))
         column = asof_features(ht.index, raw_series, key, allow_exact_matches=False)[key]
         lims_ctx[key] = column
     vak, vak_skipped = evaluate_vak(avt_full, ht, lims_ctx,
@@ -160,11 +166,14 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
     target = clean_lims_sulfur(lims_series(TARGET_SERIES, lims))
     feed = lims_series(FEED_SULFUR_SERIES, lims)
 
-    # предыдущий анализ продукта: строго ДО момента t
-    prev = asof_features(feats.index, target, "lims_sulfur_prev",
+    # Лабораторные ряды как признаки — только после публикации: метка времени в
+    # ЛИМС это отбор пробы, а результат появляется позже (организаторы: до 4 ч).
+    # Без сдвига модель обучается на анализах, которых в тот момент ещё не было.
+    delay = float(cfg["quality"].get("lims_publication_delay_hours", 0.0))
+    prev = asof_features(feats.index, known_from(target, delay), "lims_sulfur_prev",
                          allow_exact_matches=False)
     # сера сырья: контекст нагрузки на катализатор
-    feed_f = asof_features(feats.index, feed, "lims_feed_sulfur")
+    feed_f = asof_features(feats.index, known_from(feed, delay), "lims_feed_sulfur")
     feats = pd.concat([feats, prev, feed_f], axis=1)
 
     if freq:

@@ -49,6 +49,10 @@ def main() -> int:
                     help="сколько признаков оставить после первого прохода (0 — все)")
     ap.add_argument("--no-monotone", action="store_true",
                     help="не зашивать физическое направление отклика в модель")
+    ap.add_argument("--no-vak", action="store_true",
+                    help="выбросить признаки vak_* — абляция вклада формул справочника")
+    ap.add_argument("--tag", default="",
+                    help="суффикс имени модели и отчёта: чтобы абляция не затирала рабочую модель")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -56,6 +60,13 @@ def main() -> int:
 
     print("[1/4] матрица признаков…")
     feats = build_feature_matrix()
+    if args.no_vak:
+        # Абляция: считаем ту же матрицу и снимаем ровно признаки справочника.
+        # Пересборка матрицы без них дала бы другой кэш и другие пропуски, и
+        # сравнение перестало бы быть сравнением одного и того же.
+        dropped = [c for c in feats.columns if c.startswith("vak_")]
+        feats = feats.drop(columns=dropped)
+        print(f"      абляция: снято {len(dropped)} признаков vak_*")
     print(f"      {feats.shape[0]} моментов × {feats.shape[1]} признаков")
 
     print(f"[2/4] обучающая таблица, горизонт {args.horizon} ч…")
@@ -115,8 +126,13 @@ def main() -> int:
         report["splits"][name] = block
 
     model.metrics = report
-    path = model.save()
-    out = ROOT / "reports" / f"quality_metrics_h{args.horizon:g}.json"
+    # Абляционный прогон не должен затирать рабочую модель и рабочий отчёт: их
+    # числа попадают в документацию, и подмена «модели без справочника» на месте
+    # рабочей осталась бы незамеченной.
+    suffix = args.tag or ("_novak" if args.no_vak else "")
+    path = model.save(model.default_path(args.horizon).with_name(
+        model.default_path(args.horizon).name + suffix) if suffix else None)
+    out = ROOT / "reports" / f"quality_metrics_h{args.horizon:g}{suffix}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 

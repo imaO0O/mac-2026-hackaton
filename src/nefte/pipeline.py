@@ -10,7 +10,12 @@ import pandas as pd
 
 from nefte.agents.schemas import DataQuality, Measurement, ProcessState, Source
 from nefte.config import load_config
-from nefte.data.cleaning import clean_lims_sulfur, frozen_mask
+from nefte.data.cleaning import (
+    clean_lims_distillation,
+    clean_lims_sulfur,
+    frozen_mask,
+)
+from nefte.data.features import known_from
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
 from nefte.data.validity import SignalValidity
 
@@ -61,14 +66,32 @@ class StateBuilder:
             self.pak_sulfur, int(self.cfg["telemetry"]["frozen_min_samples"]))
 
         lims = load_lims()
+        # Факт: когда проба отобрана. С ним сверяются прогоны и бэктесты.
         self.lims_sulfur = clean_lims_sulfur(
             lims_series(self.cfg["quality"]["target"]["lims_source"], lims))
+        # Вход решения: когда результат стал известен оператору. Разница — до
+        # четырёх часов, и без неё система смотрит в будущее.
+        delay = float(self.cfg["quality"].get("lims_publication_delay_hours", 0.0))
+        self.lims_delay_hours = delay
+        self.lims_sulfur_known = known_from(self.lims_sulfur, delay)
         # сера сырья гидроочистки: нужна кинетическому суррогату как «вход» реакции
         try:
             feed = lims_series("Гидроочистка|1|Mass.Sulfur", lims)
-            self.lims_feed_sulfur = feed[feed > 0] * 10_000        # % масс. → мг/кг
+            # сера сырья — тоже лабораторный анализ, и публикуется так же поздно
+            self.lims_feed_sulfur = known_from(feed[feed > 0] * 10_000, delay)
         except KeyError:
             self.lims_feed_sulfur = None
+        # Т95 — второй обязательный показатель по ответу организаторов. Он нужен не
+        # для отчётности: исправленная формула ВАК даёт Т95 с коэффициентом 0.50 по
+        # температуре Р-202, то есть КАЖДОЕ повышение температуры ради серы тянет
+        # Т95 вверх. Без этого ряда оптимизатор не знает, что чинит одно за счёт
+        # другого.
+        try:
+            t95 = clean_lims_distillation(lims_series("Гидроочистка|2|95%.T", lims))
+            self.lims_t95 = t95
+            self.lims_t95_known = known_from(t95, delay)
+        except KeyError:
+            self.lims_t95 = self.lims_t95_known = None
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -87,7 +110,12 @@ class StateBuilder:
         avt_row = self.avt.loc[:ts].iloc[-1] if len(self.avt.loc[:ts]) else pd.Series(dtype=float)
         ht_row = self.ht.loc[:ts].iloc[-1] if len(self.ht.loc[:ts]) else pd.Series(dtype=float)
 
-        lims_val, lims_age = self._last(self.lims_sulfur, ts)
+        # в срез идёт ТОЛЬКО опубликованное значение
+        lims_val, lims_age = self._last(self.lims_sulfur_known, ts)
+        if lims_age is not None:
+            # возраст показываем от ОТБОРА пробы: оператору важно, насколько
+            # старая проба, а не когда её напечатали
+            lims_age += self.lims_delay_hours
         pak_val, pak_age = self._last(self.pak_sulfur, ts)
         pak_is_frozen = bool(self.pak_frozen.loc[:ts].iloc[-1]) if len(
             self.pak_frozen.loc[:ts]) else False
@@ -104,6 +132,14 @@ class StateBuilder:
                     value=feed_val, unit="мг/кг", source=Source.LIMS, age_hours=feed_age,
                     is_stale=feed_age > stale["lims"] * 7,
                     comment="сера сырья гидроочистки")
+        if self.lims_t95_known is not None:
+            t95_val, t95_age = self._last(self.lims_t95_known, ts)
+            if t95_val is not None:
+                quality["lims_t95_c"] = Measurement(
+                    value=t95_val, unit="°C", source=Source.LIMS,
+                    age_hours=None if t95_age is None else t95_age + self.lims_delay_hours,
+                    is_stale=t95_age > stale["lims"],
+                    comment="Т95 продукта гидроочистки")
         if pak_val is not None:
             quality["pak_sulfur_ppm"] = Measurement(
                 value=pak_val, unit="мг/кг", source=Source.PAK, age_hours=pak_age,

@@ -60,14 +60,6 @@ MAIN_WINDOW = 24.0
 ACT_THRESHOLD = 0.2
 
 
-def outcome(rec: Recommendation) -> str:
-    if rec.abstained:
-        return "отказ"
-    moves = {t: d for t, d in (rec.action.deltas if rec.action else {}).items()
-             if abs(d) > 1e-6}
-    return "меняем уставки" if moves else "держим режим"
-
-
 def abstain_kind(rec: Recommendation) -> str:
     """Причина отказа в терминах, понятных технологу, а не по тексту целиком."""
     reason = rec.abstain_reason.lower()
@@ -118,7 +110,7 @@ def main() -> int:
         rec = system.run(state)
         row = {
             "ts": str(ts),
-            "исход": outcome(rec),
+            "исход": rec.outcome(),
             "риск": None if risk is None else round(float(risk), 4),
             "причина отказа": abstain_kind(rec) if rec.abstained else None,
             "risk_class": rec.state_summary.get("risk_class"),

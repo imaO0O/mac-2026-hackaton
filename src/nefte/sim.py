@@ -41,8 +41,13 @@ import pandas as pd
 
 from nefte.agents.schemas import Measurement, ProcessState, Source
 
-# Постоянная времени отклика серы на изменение режима, часы. ДОПУЩЕНИЕ.
-RESPONSE_TAU_HOURS = 4.0
+# Постоянная времени отклика серы на изменение режима, часы. Больше не допущение:
+# 4.6 ч ИЗМЕРЕНО по данным — авторегрессия первого порядка на серу ПАК с
+# управляющей уставкой на входе, только train, остановы и залипший анализатор
+# выкинуты (scripts/find_delays.py, reports/delays.json). Само транспортное
+# запаздывание там же вышло меньше 10 минут, то есть неразличимо на сетке данных,
+# поэтому чистого dead time в модели отклика нет.
+RESPONSE_TAU_HOURS = 4.6
 
 # Насколько далеко уставке позволено уехать от исторического значения за весь
 # прогон. ДОПУЩЕНИЕ и одновременно защита: без него ошибка в кинетике увела бы
@@ -60,6 +65,15 @@ class SimStep:
     sulfur_hist: float | None
     offsets: dict[str, float]
     moved: dict[str, float] = field(default_factory=dict)
+    # исход — то, что РЕШИЛА система; applied — то, что удалось применить. Они
+    # расходятся, когда уставка упёрлась в потолок дрейфа, и путать их нельзя: в
+    # остальных прогонах «держим режим» означает «система не захотела», а не
+    # «не смогла».
+    applied: bool = False
+    # Т95 при накопленном смещении уставок. Отдельно от серы, потому что именно
+    # здесь видно, не чинит ли контур серу за счёт другого обязательного показателя:
+    # за один цикл прибавка к Т95 меньше градуса и незаметна, а за прогон копится.
+    t95_sim: float | None = None
     confidence: float = 0.0
 
 
@@ -74,10 +88,14 @@ class ClosedLoopSimulator:
 
     def __init__(self, state_builder, system, surrogate,
                  tau_hours: float = RESPONSE_TAU_HOURS,
-                 max_drift: dict[str, float] | None = None):
+                 max_drift: dict[str, float] | None = None,
+                 t95_fn=None):
+        from nefte.agents.optimizer import default_t95_estimator
+
         self.sb = state_builder
         self.system = system
         self.surrogate = surrogate
+        self.t95_fn = t95_fn if t95_fn is not None else default_t95_estimator()
         self.tau_hours = tau_hours
         self.max_drift = dict(max_drift or MAX_DRIFT)
         # накопленные смещения уставок относительно истории
@@ -127,6 +145,23 @@ class ClosedLoopSimulator:
                 moves[tag] = float(base + delta)
         value = self.surrogate(state, moves).get("product_sulfur_mgkg")
         return None if value is None or value != value else float(value)
+
+    def _t95_level(self, base: ProcessState) -> float | None:
+        """Т95 при НАКОПЛЕННОМ смещении уставок относительно истории.
+
+        Считается на исходном (несмещённом) срезе: смещение подставляется как
+        воздействие, и оценка получается относительно исторического режима, а не
+        относительно уже уехавшего. Иначе накопленный уход был бы не виден —
+        каждый шаг мерился бы от предыдущего и выглядел бы безобидным.
+        """
+        if not self.offsets:
+            return self.t95_fn(base, {})
+        moves = {}
+        for tag, delta in self.offsets.items():
+            value = base.telemetry_ht.get(tag, base.telemetry_avt.get(tag))
+            if value is not None:
+                moves[tag] = float(value + delta)
+        return self.t95_fn(base, moves)
 
     def _accept(self, deltas: dict[str, float]) -> dict[str, float]:
         """Принимает рекомендованные изменения, не выпуская режим за предел дрейфа."""
@@ -180,10 +215,11 @@ class ClosedLoopSimulator:
 
             steps.append(SimStep(
                 ts=ts,
-                outcome=("отказ" if rec.abstained else
-                         "меняем уставки" if moved else "держим режим"),
+                outcome=rec.outcome(),
+                applied=bool(moved),
                 sulfur_sim=float(self.sulfur),
                 sulfur_hist=hist,
+                t95_sim=self._t95_level(base),
                 offsets=dict(self.offsets),
                 moved=moved,
                 confidence=float(rec.confidence),
@@ -192,13 +228,15 @@ class ClosedLoopSimulator:
         return steps
 
 
-def summarize(steps: list[SimStep], limit: float) -> dict:
+def summarize(steps: list[SimStep], limit: float,
+              t95_limit: float | None = None) -> dict:
     """Сводка замкнутого прогона: устойчивость контура и цена вмешательств."""
     if not steps:
         return {}
     frame = pd.DataFrame([{
         "ts": s.ts, "исход": s.outcome, "сера": s.sulfur_sim,
         "сера_история": s.sulfur_hist,
+        "Т95": s.t95_sim,
         **{f"смещение_{k}": v for k, v in s.offsets.items()},
         **{f"шаг_{k}": v for k, v in s.moved.items()},
     } for s in steps])
@@ -226,6 +264,7 @@ def summarize(steps: list[SimStep], limit: float) -> dict:
         "шагов": len(steps),
         "исходы": frame["исход"].value_counts().to_dict(),
         "вмешательств": int((frame["исход"] == "меняем уставки").sum()),
+        "применено": int(sum(1 for item in steps if item.applied)),
         "сера_сим": {
             "среднее": round(float(sim.mean()), 3) if len(sim) else None,
             "доля выше предела": round(float((sim > limit).mean()), 3) if len(sim) else None,
@@ -235,4 +274,25 @@ def summarize(steps: list[SimStep], limit: float) -> dict:
             "доля выше предела": round(float((hist > limit).mean()), 3) if len(hist) else None,
         },
         "уставки": per_tag,
+        # Второй обязательный показатель. Смотрим на него именно здесь: за один
+        # цикл контур добавляет к Т95 меньше градуса, и поштучно это незаметно, а
+        # за прогон складывается в реальный уход к пределу.
+        "Т95": _t95_summary(frame["Т95"].dropna(), t95_limit),
     }
+
+
+def _t95_summary(series: pd.Series, limit: float | None) -> dict | None:
+    """Куда ушёл Т95 за прогон и подошёл ли он к пределу."""
+    if not len(series):
+        return None
+    out = {
+        "начало": round(float(series.iloc[0]), 2),
+        "конец": round(float(series.iloc[-1]), 2),
+        "максимум": round(float(series.max()), 2),
+        "уход за прогон": round(float(series.iloc[-1] - series.iloc[0]), 2),
+    }
+    if limit is not None:
+        out["предел"] = limit
+        out["доля выше предела"] = round(float((series > limit).mean()), 3)
+        out["минимальный запас"] = round(float(limit - series.max()), 2)
+    return out

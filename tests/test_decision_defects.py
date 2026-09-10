@@ -540,3 +540,50 @@ def test_training_and_serving_clean_data_the_same_way():
     source = pathlib.Path(dataset.__file__).read_text(encoding="utf-8")
     assert "SignalValidity.build" in source
     assert "clean_telemetry(" not in source
+
+
+# --------------------------------------------------------------------------- #
+# 20. лабораторный анализ используется не раньше публикации
+# --------------------------------------------------------------------------- #
+
+def test_lab_result_is_not_used_before_it_could_be_known():
+    """Метка ЛИМС — момент ОТБОРА пробы, результат появляется до 4 часов позже.
+
+    Подтверждено организаторами. Без поправки система использует анализ раньше,
+    чем оператор мог его увидеть, — то есть заглядывает в будущее.
+    """
+    from nefte.data.features import known_from
+
+    idx = pd.DatetimeIndex(["2026-01-01 00:00", "2026-01-01 12:00"], name="date")
+    sampled = pd.Series([8.0, 9.0], index=idx)
+    published = known_from(sampled, 4.0)
+
+    assert published.index[0] == pd.Timestamp("2026-01-01 04:00")
+    # через час после отбора значение ещё недоступно
+    assert published.loc[:"2026-01-01 01:00"].empty
+    # через пять — уже да
+    assert float(published.loc[:"2026-01-01 05:00"].iloc[-1]) == pytest.approx(8.0)
+
+
+def test_zero_delay_changes_nothing():
+    """Поправка отключаема: без задержки ряд обязан остаться прежним."""
+    from nefte.data.features import known_from
+
+    idx = pd.DatetimeIndex(["2026-01-01", "2026-01-02"], name="date")
+    series = pd.Series([1.0, 2.0], index=idx)
+    assert known_from(series, 0.0).index.equals(idx)
+
+
+def test_fact_series_keeps_the_sampling_time():
+    """Факт, с которым сверяются прогоны, сдвигать НЕЛЬЗЯ.
+
+    Превышение спецификации случилось в момент отбора пробы, а не публикации:
+    сдвинув факт, мы сдвинули бы и оценку собственных пропусков.
+    """
+    import inspect
+
+    from nefte.pipeline import StateBuilder
+
+    source = inspect.getsource(StateBuilder.__init__)
+    assert "self.lims_sulfur = clean_lims_sulfur(" in source
+    assert "self.lims_sulfur_known = known_from(" in source

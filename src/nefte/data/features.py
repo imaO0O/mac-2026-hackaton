@@ -52,6 +52,24 @@ def asof_features(index: pd.DatetimeIndex, series: pd.Series, name: str,
     return out.reindex(index)
 
 
+def known_from(series: pd.Series, delay_hours: float) -> pd.Series:
+    """Тот же ряд, но с меткой времени, когда значение стало ИЗВЕСТНО.
+
+    Метка ЛИМС — момент отбора пробы; результат появляется в системе позже
+    (организаторы: до 4 часов). Сдвиг индекса вперёд превращает «когда измерено»
+    в «когда стало видно оператору», и все as-of соединения после этого честны
+    автоматически.
+
+    Применять только ко ВХОДАМ решения. К факту, с которым сверяются прогоны,
+    сдвиг не применяется: превышение спецификации случилось в момент отбора.
+    """
+    if not delay_hours:
+        return series
+    shifted = series.copy()
+    shifted.index = shifted.index + pd.Timedelta(hours=float(delay_hours))
+    return shifted
+
+
 def add_lags(df: pd.DataFrame, columns: list[str], lags_steps: list[int],
              prefix: str = "") -> pd.DataFrame:
     """Лаговые признаки. Шаг = шаг сетки (10 мин), 6 шагов = 1 час."""

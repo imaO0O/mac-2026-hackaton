@@ -53,8 +53,16 @@ def main() -> int:
     for name, share in recipe.fractions.items():
         print(f"  {name:28s} {share * 100:6.2f} %")
     print("\nСвойства смеси:", {k: round(v, 2) for k, v in recipe.properties.items()})
-    print(f"Выпуск: {recipe.throughput_tph:.1f} т/ч; присадка: {recipe.additive_ppm:.0f} ppm")
+    print(f"Выпуск: {recipe.throughput_tph:.1f} т/ч; "
+          f"депрессорная присадка: {recipe.additive_ppm:.0f} ppm; "
+          f"цетаноповышающая: {recipe.cetane_improver_pct:.3f} % массы")
+    print(f"Чистая ценность: {recipe.net_value_tph:.1f} т/ч "
+          f"(выпуск минус стоимость присадки, "
+          f"{recipe.improver_cost_share * 100:.1f} % цены тонны)")
     print(f"Допустима: {'да' if recipe.feasible else 'НЕТ'}")
+    if recipe.uncertified:
+        print("НЕ ПОДТВЕРЖДЕНА по обязательным показателям: "
+              + ", ".join(recipe.uncertified))
     for v in recipe.violations:
         print(f"  нарушение: {v}")
     for n in recipe.notes:
