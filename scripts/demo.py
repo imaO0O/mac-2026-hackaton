@@ -97,6 +97,52 @@ def show_blending(sb: StateBuilder, cfg: dict, ts: str = "2026-02-28 00:00") -> 
     print("  Вывод: единственный рычаг по сере — глубина гидроочистки, "
           "а не рецептура.")
 
+    # Второй рычаг смешения — присадка, и он единственный работающий. Показываем
+    # его вместе с ценой: без цены рецептура выглядит бесплатной.
+    recipe = agent.optimize(components)
+    if recipe.cetane_improver_pct > 0:
+        print(f"\n  Зато цетановое число норматив НЕ проходит: назначена "
+              f"присадка {recipe.cetane_improver_pct:.3f} % массы. Она дороже "
+              f"топлива в 100 раз, поэтому съедает "
+              f"{recipe.improver_cost_share * 100:.1f} % цены тонны: выпуск "
+              f"{recipe.throughput_tph:.1f} т/ч, чистая ценность "
+              f"{recipe.net_value_tph:.1f} т/ч.")
+
+
+def show_cetane(sb: StateBuilder, cfg: dict) -> None:
+    """Сцена: показатель, который уже вне норматива, а мы о нём не знали.
+
+    Самая сильная находка последнего захода, и показывать её надо не таблицей
+    метрик, а одной строкой: обязательный показатель качества падает четыре года
+    подряд и последним анализом вышел за норматив.
+    """
+    from nefte.data.loaders import lims_series, load_lims
+    from nefte.models.cetane import (
+        CETANE_SPEC_MIN,
+        dose_for_deficit,
+        improver_cost_share,
+        trend_per_year,
+    )
+
+    cetane = lims_series("Гидроочистка|2|CetaneNumber", load_lims()).sort_index()
+    by_year = cetane.groupby(cetane.index.year).mean()
+    print("\nЦетановое число — третий обязательный показатель по ответу организаторов.")
+    print("  Среднее по годам:")
+    for year, value in by_year.items():
+        print(f"    {year}  {value:.1f}")
+    last, when = float(cetane.iloc[-1]), cetane.index[-1]
+    print(f"  Последний анализ {when:%d.%m.%Y}: {last:.1f} при нормативе "
+          f"{CETANE_SPEC_MIN}. Тренд {trend_per_year(cetane):+.2f} единиц в год.")
+    print(f"  Анализов всего {len(cetane)} за три с половиной года — раз в месяц. "
+          "Строить по ним прогноз нечестно, и мы не строим: показатель входит "
+          "ограничением по последнему анализу с поправкой на тренд.")
+    print("  Цетановый индекс ASTM D976 на этих данных не работает: корреляция с "
+          "лабораторией 0.03, хуже, чем просто среднее по истории.")
+    dose = dose_for_deficit(max(0.0, CETANE_SPEC_MIN - last))
+    if dose:
+        print(f"  Цена выполнения норматива: {dose:.3f} % присадки = "
+              f"{improver_cost_share(dose) * 100:.1f} % стоимости тонны топлива.")
+
 
 def main() -> int:
     use_utf8_console()
@@ -109,6 +155,7 @@ def main() -> int:
         for scene in SCENES:
             print(f"{scene['key']:22s} {scene['title']}")
         print(f"{'blending':22s} Смешение: предельные доли компонентов")
+        print(f"{'cetane':22s} Цетановое число: показатель уже вне норматива")
         return 0
 
     cfg = load_config()
@@ -117,6 +164,9 @@ def main() -> int:
     # сцена про смешение не трогает модель и агентов — незачем их поднимать
     if args.step == "blending":
         show_blending(sb, cfg)
+        return 0
+    if args.step == "cetane":
+        show_cetane(sb, cfg)
         return 0
 
     scenes = [s for s in SCENES if not args.step or s["key"] == args.step]
@@ -147,6 +197,10 @@ def main() -> int:
         print(f"СЦЕНА {len(scenes) + 1}. Смешение: почему рецептурой серу не вытянуть")
         print("=" * 80)
         show_blending(sb, cfg)
+        print("\n" + "=" * 80)
+        print(f"СЦЕНА {len(scenes) + 2}. Цетановое число: показатель уже вне норматива")
+        print("=" * 80)
+        show_cetane(sb, cfg)
         print("\nПрогоны записаны в reports/runs/ — логику любого решения можно "
               "проверить постфактум.")
     return 0

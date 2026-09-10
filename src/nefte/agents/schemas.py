@@ -209,6 +209,15 @@ class Recommendation(BaseModel):
             status = "допустима" if self.blend.feasible else "НЕДОПУСТИМА"
             text += (f"\n  Смешение ({status}, сумма долей "
                      f"{self.blend.fractions_sum() * 100:.1f} %): {shares}")
+            if self.blend.cetane_improver_pct > 0:
+                # Присадка дороже топлива в сто раз: её доза и её цена — не деталь
+                # рецептуры, а отдельное решение, и прятать его в примечаниях нельзя.
+                text += (f"\n    присадка ЦЧ {self.blend.cetane_improver_pct:.3f} % "
+                         f"массы — {self.blend.improver_cost_share * 100:.1f} % цены "
+                         f"тонны; чистая ценность {self.blend.net_value_tph:.1f} т/ч "
+                         f"при выпуске {self.blend.throughput_tph:.1f}")
+            if self.blend.uncertified:
+                text += "\n    не подтверждено: " + ", ".join(self.blend.uncertified)
             for violation in self.blend.violations:
                 text += f"\n    нарушение: {violation}"
         return text

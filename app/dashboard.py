@@ -201,6 +201,19 @@ def main() -> None:
             st.markdown(f"**Сумма долей:** {rec.blend.fractions_sum() * 100:.1f} % "
                         f"(жёсткое требование ТЗ)")
             st.markdown(f"**Выпуск смеси:** {rec.blend.throughput_tph:.1f} т/ч")
+            if rec.blend.cetane_improver_pct > 0:
+                # Присадка дороже топлива в 100 раз, поэтому её доза и её цена —
+                # не деталь рецептуры, а отдельное экономическое решение.
+                st.markdown(
+                    f"**Цетаноповышающая присадка:** "
+                    f"{rec.blend.cetane_improver_pct:.3f} % массы — минимальная доза "
+                    f"под норматив. Стоит {rec.blend.improver_cost_share * 100:.1f} % "
+                    f"цены тонны, поэтому чистая ценность "
+                    f"**{rec.blend.net_value_tph:.1f} т/ч** при выпуске "
+                    f"{rec.blend.throughput_tph:.1f}.")
+            cetane = rec.blend.properties.get("cetane_number")
+            if cetane is not None:
+                st.markdown(f"**Цетановое число смеси:** {cetane:.1f}")
         with right:
             basis = rec.blend.basis_sulfur_mgkg
             if basis is not None:
@@ -211,6 +224,13 @@ def main() -> None:
                 st.success("Рецептура проходит жёсткие проверки.")
             else:
                 st.error("Допустимой рецептуры нет: " + "; ".join(rec.blend.violations))
+            if rec.blend.uncertified:
+                # «Не посчитали» — это не «годно». Показываем отдельно от нарушений:
+                # там система знает, что плохо, здесь — что не знает вовсе.
+                st.warning("Не подтверждено по обязательным показателям: "
+                           + ", ".join(rec.blend.uncertified)
+                           + ". Анализов у компонентов нет — годной рецептуру "
+                             "называть нельзя, пока их не сделают.")
             for note in rec.blend.notes:
                 st.markdown(f"- {note}")
 
@@ -229,6 +249,11 @@ def main() -> None:
                  "риск (суррогат)": round(c.spec_risk.get("product_sulfur_mgkg",
                                                           float("nan")), 3),
                  "тяжесть": round(c.severity_index or 0, 3),
+                 # Т95 — второй обязательный показатель. Без неё оператор видит
+                 # только половину размена: вариант с лучшей серой может быть
+                 # хуже по разгонке, и выбирать вслепую он не должен.
+                 "Т95": (None if c.predicted_quality.get("product_t95_c") is None
+                         else round(c.predicted_quality["product_t95_c"], 1)),
                  "выпуск": round(c.throughput or 0, 1),
                  "энергия": round(c.energy_proxy or 0, 1),
                  "с запасом": "да" if c.guaranteed else "нет"}
