@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Callable, Protocol
 
 import numpy as np
+import pandas as pd
 
 from nefte.agents.quality import spec_risk_normal
 from nefte.agents.schemas import (
@@ -39,6 +40,10 @@ SAFETY_SIGMAS = 1.0
 # недоминируемыми оказываются 97 % вариантов, и фронт перестаёт что-либо значить.
 # Оператор всё равно различает варианты грубо, поэтому и сравниваем грубо.
 PARETO_EPS = 0.2
+
+# Доля от суммарного допустимого шага за цикл, начиная с которой два варианта
+# считаются РАЗНЫМИ для показа оператору. ДОПУЩЕНИЕ: 0.15 — наш выбор.
+ALTERNATIVE_SPREAD = 0.15
 
 
 class QualitySurrogate(Protocol):
@@ -160,7 +165,7 @@ class OptimizerAgent:
         self.throughput_fn = throughput_fn or default_throughput()
         self.energy_fn = energy_fn or default_energy_proxy()
         self.grid_levels = grid_levels
-        self.rng = np.random.default_rng(self.cfg["optimization"]["random_seed"])
+        self.seed = int(self.cfg["optimization"]["random_seed"])
         # причины отсева последнего прогона — оркестратор объясняет ими отказ
         self._last_violations: list[str] = []
         # оценённый вариант «ничего не делать»: нужен как точка отсчёта даже тогда,
@@ -168,6 +173,22 @@ class OptimizerAgent:
         self._last_hold: Candidate | None = None
 
     # ------------------------------------------------------------------ #
+    def _rng(self, state: ProcessState, stream: int = 0) -> np.random.Generator:
+        """Генератор, привязанный к МОМЕНТУ, а не к порядку вызовов.
+
+        Раньше генератор жил в агенте и продвигался от вызова к вызову: один и
+        тот же срез при повторном прогоне давал ДРУГУЮ рекомендацию. Это ломало
+        обещание воспроизводимости из README и вдобавок портило обе проверки
+        устойчивости — базовый прогон и возмущённые считались при разном
+        состоянии генератора, так что в «чувствительность к весам» попадал ещё и
+        случайный разброс.
+
+        ``stream`` разделяет независимые потоки: сетка кандидатов и локальное
+        уточнение не должны брать одни и те же числа.
+        """
+        moment = int(pd.Timestamp(state.ts).value)
+        return np.random.default_rng([self.seed, moment, stream])
+
     def _severity_for(self, state: ProcessState, reliability: ReliabilityAssessment,
                       moves: dict[str, float]) -> float:
         agent = self.reliability_agent
@@ -234,9 +255,10 @@ class OptimizerAgent:
                                              {tag: float(level)}, bounds))
 
         # комбинации
+        rng = self._rng(state, stream=0)
         n_random = max(n - len(cands), 0)
         for i in range(n_random):
-            moves = {tag: float(self.rng.uniform(lo, hi)) for tag, (lo, hi) in bounds.items()}
+            moves = {tag: float(rng.uniform(lo, hi)) for tag, (lo, hi) in bounds.items()}
             cands.append(self._candidate(f"mix_{i:03d}", current, moves, bounds))
         return cands
 
@@ -245,6 +267,7 @@ class OptimizerAgent:
         """Локальный поиск вокруг лучшего кандидата — уточнение без новых рисков."""
         bounds = self._effective_bounds(state, reliability)
         current = {t: state.telemetry_ht.get(t, state.telemetry_avt.get(t)) for t in bounds}
+        rng = self._rng(state, stream=1)
         out = []
         for i in range(n):
             moves = {}
@@ -253,7 +276,7 @@ class OptimizerAgent:
                 center = best.moves.get(tag, current.get(tag))
                 if center is None:
                     continue
-                moves[tag] = float(np.clip(self.rng.normal(center, span / 2), lo, hi))
+                moves[tag] = float(np.clip(rng.normal(center, span / 2), lo, hi))
             out.append(self._candidate(f"local_{i:03d}", current, moves, bounds))
         return out
 
@@ -393,14 +416,42 @@ class OptimizerAgent:
         """Недоминируемые варианты — то, между чем реально выбирает технолог."""
         return [c for c in cands if c.pareto_rank == 0]
 
-    @staticmethod
-    def diverse_alternatives(cands: list[Candidate], k: int = 3) -> list[Candidate]:
+    def min_alternative_distance(self) -> float:
+        """Насколько альтернативы обязаны различаться, чтобы их стоило показывать.
+
+        Доля от максимального шага за цикл, суммарно по управляющим тегам. Порог
+        1e-3, стоявший здесь раньше, различием не является: на дашборде три
+        «разные» альтернативы отличались в третьем знаке, и график их разброса
+        показывал шум вместо выбора.
+        """
+        steps = self.cfg["limits"]["max_step_per_cycle"]
+        total = 0.0
+        for tag, (lo, hi) in self.bounds.items():
+            if tag.startswith("T"):
+                total += float(steps["temperature_c"])
+            elif tag.startswith("P"):
+                total += float(steps["pressure_mpa"])
+            else:                     # расходы: шаг задан долей от значения
+                total += abs(hi - lo) * float(steps["flow_rel"])
+        return max(total * ALTERNATIVE_SPREAD, 1e-3)
+
+    def diverse_alternatives(self, cands: list[Candidate], k: int = 3,
+                             min_distance: float | None = None) -> list[Candidate]:
         """k различающихся альтернатив: показывать три почти одинаковых бессмысленно."""
+        threshold = (self.min_alternative_distance() if min_distance is None
+                     else min_distance)
         out: list[Candidate] = []
         for c in cands:
             if len(out) >= k:
                 break
-            if all(_distance(c, other) > 1e-3 for other in out):
+            if all(_distance(c, other) > threshold for other in out):
+                out.append(c)
+        # Если настолько разных вариантов нет — это факт, а не повод показывать
+        # похожие: добираем ближайшие, но честно, начиная с лучшего.
+        for c in cands:
+            if len(out) >= k:
+                break
+            if c not in out:
                 out.append(c)
         return out
 

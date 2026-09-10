@@ -72,8 +72,12 @@ class SignalValidity:
             {c: frozen_mask(df[c], min_frozen) for c in df.columns}, index=df.index)
         df = df.mask(frozen)
 
-        # 4. физически невозможные отрицательные расходы
-        nonneg, suspicious = cls._nonnegative_tags(df, unit)
+        # 4. физически невозможные отрицательные расходы. Решение принимается по
+        #    ОБУЧАЮЩЕМУ периоду: «этот тег бывает отрицательным» — такое же
+        #    правило, выведенное из данных, как нормировка severity, и выводить
+        #    его по всей истории значит смотреть в тестовый период.
+        train = tuple(cfg["split"]["train"]) if "split" in cfg else None
+        nonneg, suspicious = cls._nonnegative_tags(df, unit, train)
         negative = pd.DataFrame(False, index=df.index, columns=df.columns)
         if nonneg:
             negative[nonneg] = df[nonneg] < 0
@@ -84,18 +88,29 @@ class SignalValidity:
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _nonnegative_tags(df: pd.DataFrame, unit: str) -> tuple[list[str], dict[str, float]]:
-        """Расходные теги, у которых отрицательное значение — это брак."""
+    def _nonnegative_tags(df: pd.DataFrame, unit: str,
+                          train: tuple[str, str] | None = None
+                          ) -> tuple[list[str], dict[str, float]]:
+        """Расходные теги, у которых отрицательное значение — это брак.
+
+        ``train`` ограничивает период, по которому считается доля отрицательных.
+        """
         try:
             tags = load_tag_dictionary()
-        except Exception:                      # справочник недоступен — не гадаем
+        except (OSError, KeyError, ValueError):
+            # справочника нет или он в другом формате — не гадаем, а признаём,
+            # что физического смысла тегов не знаем. Ловим именно эти ошибки:
+            # широкий except прятал бы и наши собственные опечатки.
             return [], {}
 
         flows = {row.code for row in tags[tags["unit"] == unit].itertuples()
                  if "асход" in str(row.description)}
+        scope = df.loc[train[0]:train[1]] if train else df
+        if not len(scope):
+            scope = df
         nonneg, suspicious = [], {}
         for tag in flows & set(df.columns):
-            share = float((df[tag] < 0).mean())
+            share = float((scope[tag] < 0).mean())
             if share <= SUSPICIOUS_NEGATIVE_SHARE:
                 nonneg.append(tag)
             else:

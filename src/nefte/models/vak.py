@@ -110,7 +110,8 @@ def compile_formulas() -> tuple[list[dict], list[dict]]:
 
 def evaluate(avt: pd.DataFrame, ht: pd.DataFrame,
              lims_context: dict[str, pd.Series] | None = None,
-             check_plausibility: bool = True
+             check_plausibility: bool = True,
+             train_bounds: tuple[str, str] | None = None
              ) -> tuple[pd.DataFrame, list[dict]]:
     """Считает все пригодные формулы на «сырых» тегах.
 
@@ -167,7 +168,10 @@ def evaluate(avt: pd.DataFrame, ht: pd.DataFrame,
         # обнуляется на 4 % отсчётов): бесконечность — это отсутствие значения
         series = series.replace([np.inf, -np.inf], np.nan)
 
-        share, bounds = _plausible_share(item["target"], series)
+        # Правдоподобие формулы — тоже решение об отборе признака, и считать его
+        # надо по обучающему периоду, а не по всей истории вместе с тестом.
+        scope = series.loc[train_bounds[0]:train_bounds[1]] if train_bounds else series
+        share, bounds = _plausible_share(item["target"], scope if len(scope) else series)
         if check_plausibility and share is not None:
             if share < MIN_PLAUSIBLE_SHARE:
                 skipped.append({

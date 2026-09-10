@@ -46,7 +46,7 @@ FEED_SULFUR_SERIES = "Гидроочистка|1|Mass.Sulfur"
 # Версия схемы признаков. Поднимайте её, когда меняете САМ РАСЧЁТ (формулу окна,
 # набор лаговых признаков, способ ресемплинга) — то, что не выражено константами
 # выше. Состав тегов, окна и целевые ряды подставляются в ключ кэша сами.
-FEATURE_VERSION = 1
+FEATURE_VERSION = 2
 
 
 def cache_key(freq: str) -> str:
@@ -101,7 +101,8 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
             continue
         column = asof_features(ht.index, raw_series, key, allow_exact_matches=False)[key]
         lims_ctx[key] = column
-    vak, vak_skipped = evaluate_vak(avt_full, ht, lims_ctx)
+    vak, vak_skipped = evaluate_vak(avt_full, ht, lims_ctx,
+                                   train_bounds=tuple(cfg["split"]["train"]))
     if vak_skipped:
         names = ", ".join(f"{i['target']} ({i['reason']})" for i in vak_skipped)
         print(f"[ВАК] не обсчитаны: {names}")

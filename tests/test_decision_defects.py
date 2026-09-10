@@ -305,3 +305,145 @@ def test_every_suspect_tag_has_a_verdict():
     without = {tag for tag in suspects
                if not any(key.endswith(f":{tag}") for key in verdicts)}
     assert not without, f"без вердикта остались теги: {sorted(without)}"
+
+
+# --------------------------------------------------------------------------- #
+# 12. факт вне спецификации выносится в карточку
+# --------------------------------------------------------------------------- #
+
+def test_card_says_when_the_measurement_is_already_off_spec():
+    """Было: карточка говорила «риск 29 %», хотя лаборатория показала 10.2 мг/кг.
+
+    Нашлось на дашборде: самый тревожный факт из доступных не попадал в карточку
+    вовсе, и она читалась как разговор про будущий риск.
+    """
+    rec = build_system().run(make_state(lims=(10.2, 3.0), pak=(10.1, 0.1)))
+    assert "ФАКТ ВНЕ СПЕЦИФИКАЦИИ" in rec.problem
+    assert "10.20" in rec.problem
+    assert rec.state_summary["sulfur_measured"] == pytest.approx(10.2)
+
+
+def test_card_stays_quiet_when_the_measurement_is_within_spec():
+    rec = build_system().run(make_state(lims=(5.0, 1.0), pak=(5.2, 0.1)))
+    assert "ФАКТ ВНЕ СПЕЦИФИКАЦИИ" not in rec.problem
+    assert rec.state_summary["sulfur_measured"] == pytest.approx(5.0)
+
+
+# --------------------------------------------------------------------------- #
+# 13. альтернативы действительно различаются
+# --------------------------------------------------------------------------- #
+
+def test_alternatives_differ_by_more_than_noise():
+    """Было: порог различия 1e-3, и три «разные» альтернативы отличались в третьем
+    знаке. На дашборде график их разброса показывал шум вместо выбора."""
+    agent = ReliabilityAgent(NORMS)
+    state = make_state(lims=(9.4, 1.0), pak=(9.5, 0.1))
+    optimizer = _optimizer(agent)
+    cands = optimizer.propose(state, QualityAgent().assess(state), agent.assess(state))
+
+    threshold = optimizer.min_alternative_distance()
+    assert threshold > 0.1, "порог обязан быть соизмерим с шагом уставки"
+
+    picked = optimizer.diverse_alternatives(cands, 3)
+    assert len(picked) <= 3
+    spreads = [sum(abs(a.deltas.get(t, 0.0) - b.deltas.get(t, 0.0))
+                   for t in set(a.deltas) | set(b.deltas))
+               for i, a in enumerate(picked) for b in picked[i + 1:]]
+    assert spreads and max(spreads) > threshold
+
+
+# --------------------------------------------------------------------------- #
+# 14. запрещённый вердиктом тег не проходит ни одним путём
+# --------------------------------------------------------------------------- #
+
+def test_banned_tags_do_not_enter_through_vak_formulas():
+    """Вердикт do_not_use соблюдался по договорённости, а не проверкой.
+
+    Список признаков AVT_TAGS тест уже стерёг, но формулы ВАК считаются по СЫРЫМ
+    тегам той же установки и могли протащить запрещённый тег в модель мимо него.
+    Проверять надо с учётом установки: avt:F26 — это пар в К-6 и он запрещён, а
+    ht:F26 — расход сырья, один из управляющих тегов.
+    """
+    import re
+
+    from nefte.config import load_config
+    from nefte.models.vak import compile_formulas
+
+    banned: dict[str, set[str]] = {}
+    for key, verdict in load_config()["telemetry"]["tag_verdicts"].items():
+        if verdict["status"] == "do_not_use":
+            unit, tag = key.split(":")
+            banned.setdefault(unit, set()).add(tag)
+
+    usable, _ = compile_formulas()
+    violations = []
+    for item in usable:
+        used = set(re.findall(r"\b([A-Z]{1,4}[0-9]{1,3})\b", str(item["expr"])))
+        bad = used & banned.get(item["unit"], set())
+        if bad:
+            violations.append(f"{item['target']} ({item['unit']}): {sorted(bad)}")
+    assert not violations, "формулы ВАК используют запрещённые теги: " + "; ".join(violations)
+
+
+# --------------------------------------------------------------------------- #
+# 15. решения об отборе признаков — только по обучающему периоду
+# --------------------------------------------------------------------------- #
+
+def test_negative_share_is_measured_on_train_only():
+    """Было: доля отрицательных считалась по всей истории вместе с тестом.
+
+    Это такое же выведенное из данных правило, как нормировка severity, и
+    выводить его по будущему нельзя.
+    """
+    from nefte.data.validity import SignalValidity
+
+    idx = pd.date_range("2024-01-01", periods=400, freq="1h", name="date")
+    values = np.r_[np.full(200, 5.0), np.full(200, -5.0)]      # брак только «после»
+    raw = pd.DataFrame({"F7": values}, index=idx)
+    cfg = {"telemetry": {"sentinel_values": [307.0], "frozen_min_samples": 10_000,
+                         "dead_tags": []},
+           "split": {"train": ["2024-01-01", "2024-01-08"]}}
+
+    built = SignalValidity.build(raw, unit="avt", cfg=cfg)
+    # в обучающем периоде отрицательных нет — тег считается неотрицательным,
+    # и поздний брак маскируется, а не легализуется задним числом
+    assert built.negative["F7"].iloc[300]
+    assert not built.negative["F7"].iloc[10]
+
+
+# --------------------------------------------------------------------------- #
+# 16. один и тот же момент даёт один и тот же ответ
+# --------------------------------------------------------------------------- #
+
+def test_same_moment_gives_the_same_recommendation():
+    """Было: генератор случайных чисел жил в агенте и продвигался от вызова к вызову.
+
+    Повторный прогон того же среза давал ДРУГУЮ рекомендацию. Это ломало
+    обещание воспроизводимости и портило обе проверки устойчивости: базовый и
+    возмущённый прогоны считались при разном состоянии генератора, так что в
+    «чувствительность к весам» попадал ещё и случайный разброс.
+    """
+    agent = ReliabilityAgent(NORMS)
+    state = make_state(lims=(9.4, 1.0), pak=(9.5, 0.1))
+    optimizer = _optimizer(agent)
+    quality = QualityAgent().assess(state)
+
+    first = optimizer.propose(state, quality, agent.assess(state))[0]
+    second = optimizer.propose(state, quality, agent.assess(state))[0]
+    assert first.id == second.id
+    assert first.deltas == pytest.approx(second.deltas)
+
+
+def test_different_moments_give_different_candidate_sets():
+    """Привязка к моменту не должна выродиться в один и тот же набор на всю историю."""
+    agent = ReliabilityAgent(NORMS)
+    optimizer = _optimizer(agent)
+    early = make_state()
+    late = make_state()
+    late.ts = pd.Timestamp(early.ts) + pd.Timedelta(hours=6)
+
+    a = optimizer.generate(early, agent.assess(early))
+    b = optimizer.generate(late, agent.assess(late))
+    mixes_a = [c.moves for c in a if c.id.startswith("mix_")]
+    mixes_b = [c.moves for c in b if c.id.startswith("mix_")]
+    assert mixes_a and mixes_b and mixes_a[0] != mixes_b[0]

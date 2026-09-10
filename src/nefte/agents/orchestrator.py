@@ -21,7 +21,7 @@ import pandas as pd
 
 from nefte.agents.blending import BlendingAgent
 from nefte.agents.optimizer import OptimizerAgent
-from nefte.agents.quality import QualityAgent
+from nefte.agents.quality import QualityAgent, fuse_sulfur
 from nefte.agents.reliability import ReliabilityAgent
 from nefte.agents.schemas import (
     BlendComponent,
@@ -71,13 +71,28 @@ class Orchestrator:
         freshness = {
             key: m.age_hours for key, m in state.quality.items()
         }
+        measured = fuse_sulfur(state, self.cfg)
+        limit = self.cfg["spec"]["product_sulfur_mgkg"]["max"]
         state_summary = {
             # именно тот источник, по которому принято решение: раньше здесь
             # оказывался первый попавшийся в срезе — например, сера СЫРЬЯ
             "sulfur_source": q.source.value,
+            # само измеренное значение: без него оператор не видит, что факт УЖЕ
+            # вне спецификации, и читает карточку как разговор про будущий риск
+            "sulfur_measured": (None if measured.value is None
+                                else round(float(measured.value), 2)),
             "severity_index": round(r.severity_index, 3),
             "risk_class": r.risk_class,
         }
+        # Факт важнее прогноза: если последнее достоверное измерение уже за
+        # пределом, это и есть главная строка карточки. Раньше система говорила
+        # «риск 29 %», хотя лаборатория показала 10.2 мг/кг при пределе 10.
+        off_spec_now = ""
+        if measured.value is not None and measured.value > limit:
+            age = (f", возраст {measured.age_hours:.0f} ч"
+                   if measured.age_hours is not None else "")
+            off_spec_now = (f"ФАКТ ВНЕ СПЕЦИФИКАЦИИ: {measured.source.value} "
+                            f"{measured.value:.2f} мг/кг при пределе {limit}{age}. ")
 
         # --- отказ 1: установка не в работе -----------------------------
         # Проверяется ПЕРВОЙ: на остановленной установке устаревший ЛИМС и
@@ -115,7 +130,7 @@ class Orchestrator:
             reasons += [n for n in r.notes if n]
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
-                problem=f"Риск нарушения спецификации по сере: {risk:.0%}",
+                problem=off_spec_now + f"Риск нарушения спецификации по сере: {risk:.0%}",
                 abstained=True, confidence=q.confidence,
                 abstain_reason=". ".join(x for x in reasons if x) + ". "
                                "Требуется решение технолога.",
@@ -134,7 +149,7 @@ class Orchestrator:
         if self._too_soon(state.ts) and hold is not None and not already_off_spec:
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
-                problem=f"Риск нарушения спецификации: {risk:.0%}",
+                problem=off_spec_now + f"Риск нарушения спецификации: {risk:.0%}",
                 action=hold, confidence=q.confidence,
                 expected_effect={"сера, мг/кг": round(pred, 2) if pred else "н/д"},
                 checked_constraints=self._constraint_log(),
@@ -151,10 +166,10 @@ class Orchestrator:
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
-                problem=("Режим устойчив, риск выхода за спецификацию "
-                         f"{risk:.0%}" if risk < self.act_risk_threshold / 2 else
-                         f"Риск {risk:.0%} — ниже порога вмешательства "
-                         f"{self.act_risk_threshold:.0%}, режим держим под наблюдением"),
+                problem=off_spec_now + ("Режим устойчив, риск выхода за спецификацию "
+                        f"{risk:.0%}" if risk < self.act_risk_threshold / 2 else
+                        f"Риск {risk:.0%} — ниже порога вмешательства "
+                        f"{self.act_risk_threshold:.0%}, режим держим под наблюдением"),
                 action=hold, confidence=q.confidence,
                 expected_effect=self._effect(hold, hold, r),
                 checked_constraints=self._constraint_log(),
@@ -167,9 +182,8 @@ class Orchestrator:
         # --- есть риск: рекомендуем действие ----------------------------
         rec = Recommendation(
             ts=state.ts, state_summary=state_summary, freshness=freshness,
-            problem=f"Риск нарушения спецификации по сере: {risk:.0%} "
-                    f"(прогноз {pred:.2f} мг/кг при пределе "
-                    f"{self.cfg['spec']['product_sulfur_mgkg']['max']})",
+            problem=off_spec_now + f"Риск нарушения спецификации по сере: {risk:.0%} "
+                    f"(прогноз {pred:.2f} мг/кг при пределе {limit})",
             action=best,
             expected_effect=self._effect(best, hold, r),
             checked_constraints=self._constraint_log(),
