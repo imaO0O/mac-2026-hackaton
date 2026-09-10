@@ -124,6 +124,26 @@ def default_t95_estimator(target: str = "24-2000:GODT:T95"
             values[tag] = moves.get(tag, current.get(tag))
         return evaluator(values)
 
+    # Опорная точка «текущий режим» от варианта не зависит, а оптимизатор зовёт
+    # оценку для каждого из двухсот кандидатов подряд с одним и тем же срезом.
+    # Пересчитывать её каждый раз — ровно вдвое лишней работы, поэтому держим
+    # кэш на одну запись: он попадает почти всегда и не может устареть, потому
+    # что ключ включает сам момент среза.
+    cached_key: tuple | None = None
+    cached_base: float | None = None
+
+    def _base_at(state: ProcessState) -> float | None:
+        nonlocal cached_key, cached_base
+        # Ключ — момент среза И значения тех тегов, которые входят в формулу.
+        # Одного момента мало: имитационная среда подсовывает на тот же момент
+        # смещённый режим, и кэш по времени вернул бы чужое значение.
+        key = (state.ts, tuple(
+            (state.telemetry_ht.get(t, state.telemetry_avt.get(t)))
+            for t in evaluator.tags if not t.startswith("LIMS_")))
+        if key != cached_key:
+            cached_key, cached_base = key, _at(state, {})
+        return cached_base
+
     def _fn(state: ProcessState, moves: dict[str, float]) -> float | None:
         if evaluator is None:
             return None
@@ -132,7 +152,7 @@ def default_t95_estimator(target: str = "24-2000:GODT:T95"
             return None
         if not moves:
             return float(lab.value)
-        base, moved = _at(state, {}), _at(state, moves)
+        base, moved = _base_at(state), _at(state, moves)
         if base is None or moved is None:
             return None
         return float(lab.value) + (moved - base)
