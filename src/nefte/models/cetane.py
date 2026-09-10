@@ -48,6 +48,8 @@ import math
 import numpy as np
 import pandas as pd
 
+from nefte.config import load_config
+
 __all__ = [
     "CETANE_SPEC_MIN", "IMPROVER_MAX_PCT", "IMPROVER_PRICE_RATIO",
     "IMPROVER_PLATEAU", "IMPROVER_HALF_PCT",
@@ -55,13 +57,31 @@ __all__ = [
     "improver_cost_share", "trend_per_year",
 ]
 
+
+def _spec(path: tuple[str, ...], default: float) -> float:
+    """Число из конфига, а не рядом с ним.
+
+    В этом проекте уже был случай, когда вердикты по тегам лежали в конфиге, а
+    код о них не знал: запрещённый тег держался вне признаков исключительно по
+    договорённости. Повторять нельзя. Норматив и цена присадки живут в
+    configs/config.yaml, здесь только запасное значение на случай урезанного
+    конфига, и тест сверяет, что эти два числа совпадают.
+    """
+    node = load_config()
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return default
+        node = node[key]
+    return float(node) if isinstance(node, (int, float)) else default
+
+
 # Норматив. ЕН 590 / ГОСТ 32511 — спецификация в пакете не выдана, это ДОПУЩЕНИЕ
 # того же рода, что и остальные пределы в configs/config.yaml → spec.
-CETANE_SPEC_MIN = 51.0
+CETANE_SPEC_MIN = _spec(("spec", "cetane_number", "min"), 51.0)
 
 # Предел дозировки и цена — ОТВЕТ ОРГАНИЗАТОРОВ, не допущение.
-IMPROVER_MAX_PCT = 3.0            # % массы
-IMPROVER_PRICE_RATIO = 100.0      # цена присадки к цене дизеля, за тонну
+IMPROVER_MAX_PCT = _spec(("economics", "cetane_improver", "max_pct"), 3.0)
+IMPROVER_PRICE_RATIO = _spec(("economics", "cetane_improver", "price_ratio"), 100.0)
 
 # Отклик на дозу: ДОПУЩЕНИЕ. Насыщение — не украшение: без него модель обещала бы
 # линейный рост цетанового числа до +300 единиц при 3 %, и оптимизатор радостно

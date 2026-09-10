@@ -185,3 +185,38 @@ def test_trend_catches_degradation():
     assert slope < 0
     # 0.1 единицы за 30 суток — это примерно 1.2 единицы в год
     assert slope == pytest.approx(-1.22, abs=0.05)
+
+
+# --------------------------------------------------------------------------- #
+# конфиг — единственный источник чисел
+# --------------------------------------------------------------------------- #
+
+def test_numbers_come_from_config_not_from_the_module():
+    """Норматив и цена присадки живут в конфиге, а не рядом с ним.
+
+    В этом проекте уже был случай, когда вердикты по тегам лежали в конфиге, а код
+    о них не знал: запрещённый тег держался вне признаков исключительно по
+    договорённости. Здесь та же ловушка — цену организаторов легко записать в
+    конфиг «для документации» и продолжать считать по константе в модуле.
+    Тест сверяет, что число ровно одно.
+    """
+    from nefte.config import load_config
+
+    cfg = load_config()
+    assert CETANE_SPEC_MIN == cfg["spec"]["cetane_number"]["min"]
+    assert IMPROVER_MAX_PCT == cfg["economics"]["cetane_improver"]["max_pct"]
+    assert improver_cost_share(1.0) == pytest.approx(
+        cfg["economics"]["cetane_improver"]["price_ratio"] / 100.0)
+
+
+def test_improver_price_is_declared_as_a_fact_not_an_assumption():
+    """Цена и предел дозы — ответ организаторов. Пометка обязана это отражать.
+
+    Всё остальное в блоке смешения помечено assumption: true. Если и эти два числа
+    уедут в допущения, на защите пропадёт единственная опора экономики.
+    """
+    from nefte.config import load_config
+
+    block = load_config()["economics"]["cetane_improver"]
+    assert block["assumption"] is False
+    assert "организатор" in block["source"].lower()
