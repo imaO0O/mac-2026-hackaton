@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from nefte.agents.blending import BlendingAgent, components_from_data  # noqa: E
 from nefte.agents.optimizer import OptimizerAgent, linear_surrogate  # noqa: E402
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
 from nefte.agents.quality import QualityAgent  # noqa: E402
-from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
+from nefte.agents.reliability import ReliabilityAgent, regime_anomaly_frame  # noqa: E402
 from nefte.data.loaders import load_lims, load_telemetry  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
@@ -58,7 +59,75 @@ def load_quality_model(horizon: float | None = None) -> SulfurModel | None:
     return None
 
 
-def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
+def load_sequence_model(horizon: float | None = None):
+    """Нейросетевой виртуальный анализатор, если он обучен и torch установлен.
+
+    Инференс идёт на CPU: демо обязано работать на машине без видеокарты
+    (docs/GPU_SETUP.md §6). Обучение при этом было на GPU — см. train_sequence.py.
+    """
+    try:
+        from nefte.models.sequence import SulfurSequenceModel
+    except ImportError:
+        print("[модель] torch не установлен — нейросетевую модель не подключить")
+        return None
+
+    candidates = [p for p in sorted((ROOT / "models").glob("sulfur_seq_*"))
+                  if (p / "meta.json").exists()]
+    if horizon is not None:
+        candidates = [p for p in candidates if p.name.endswith(f"_h{horizon:g}")]
+    if not candidates:
+        print("[модель] обученной нейросетевой модели нет "
+              "(запустите scripts/train_sequence.py)")
+        return None
+
+    def val_mae(path: Path) -> float:
+        """Выбираем конфигурацию по ВАЛИДАЦИИ, а не по алфавиту имени файла."""
+        try:
+            meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+            return float(meta["metrics"]["splits"]["val"]["model"]["MAE"])
+        except (KeyError, ValueError, OSError):
+            return float("inf")
+
+    path = min(candidates, key=val_mae)
+    model = SulfurSequenceModel.load(path).attach(build_feature_matrix())
+    print(f"[модель] последовательность: {path.name}, "
+          f"{len(model.channels)} каналов, окно {model.window} ч, "
+          f"порог тревоги {model.alarm_threshold:.2f} "
+          f"(выбрана по MAE на валидации из {len(candidates)} обученных)")
+    return model
+
+
+def attach_autoencoder(reliability, sb: StateBuilder, cfg: dict) -> bool:
+    """Подменяет детектор аномалий на LSTM-автоэнкодер, если он обучен.
+
+    Автоэнкодер работает на ОКНЕ, а не на срезе, поэтому его оценки считаются
+    заранее по всей истории и передаются агенту рядом — тем же способом, что и
+    скорость изменения режима.
+    """
+    try:
+        from nefte.models.anomaly_ae import LSTMAnomalyDetector
+    except ImportError:
+        print("[аномалии] torch не установлен — остаётся Махаланобис")
+        return False
+
+    path = LSTMAnomalyDetector.default_path()
+    if not (path / "meta.json").exists():
+        print("[аномалии] автоэнкодер не обучен (scripts/train_anomaly_ae.py) — "
+              "остаётся Махаланобис")
+        return False
+
+    detector = LSTMAnomalyDetector.load(path)
+    frame = regime_anomaly_frame(sb.avt, sb.ht)
+    hourly = frame.resample("1h", label="right", closed="right").mean()
+    reliability.anomaly_series = detector.normalized(hourly)
+    reliability.anomaly_parts = detector.contributions_frame(hourly)
+    print(f"[аномалии] LSTM-автоэнкодер: окно {detector.window} ч, "
+          f"порог {detector.threshold:.4f}")
+    return True
+
+
+def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
+                 anomaly_kind: str = "maha") -> Orchestrator:
     # нормировка тяжести режима — только по обучающему периоду, без заглядывания вперёд
     # сырая телеметрия нужна агенту, чтобы увидеть остановы: очистка убирает
     # замороженный на нуле расход сырья вместе с самим фактом останова
@@ -66,7 +135,23 @@ def build_system(sb: StateBuilder, cfg: dict) -> Orchestrator:
                                                raw_ht=load_telemetry("ht"))
     bounds = sb.model_bounds(CONTROL_TAGS, unit="ht")
 
-    model = load_quality_model()
+    if anomaly_kind == "ae":
+        attach_autoencoder(reliability, sb, cfg)
+
+    model = load_sequence_model() if model_kind == "seq" else load_quality_model()
+    if model_kind == "seq" and model is not None:
+        # У сети нет табличного суррогата: она читает окно, а не строку признаков.
+        # Кинетика берёт у модели только уровень серы, и этого достаточно —
+        # так прямо написано в контракте docs/GPU_SETUP.md §3.
+        surrogate = make_kinetic_surrogate(model)
+        optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg)
+        lims = load_lims()
+        return Orchestrator(
+            QualityAgent(model=model, cfg=cfg), reliability, optimizer, cfg=cfg,
+            blending=BlendingAgent(cfg),
+            components_fn=lambda ts: components_from_data(sb, ts, lims=lims),
+        )
+
     if model is not None:
         seen = controllable_features(model, CONTROL_TAGS)
         print(f"[модель] sulfur: {len(model.features)} признаков, порог тревоги "
@@ -98,11 +183,15 @@ def main() -> int:
     ap.add_argument("--ts", help="момент времени, например '2026-04-20 12:00'")
     ap.add_argument("--window", help="имя окна из configs/config.yaml: demo_windows")
     ap.add_argument("--every", default="12h", help="шаг обхода окна")
+    ap.add_argument("--model", choices=("boost", "seq"), default="boost",
+                    help="какой виртуальный анализатор: CatBoost или нейросеть")
+    ap.add_argument("--anomaly", choices=("maha", "ae"), default="maha",
+                    help="детектор аномалий режима: Махаланобис или автоэнкодер")
     args = ap.parse_args()
 
     cfg = load_config()
     sb = StateBuilder(cfg)
-    system = build_system(sb, cfg)
+    system = build_system(sb, cfg, model_kind=args.model, anomaly_kind=args.anomaly)
 
     if args.window:
         lo, hi = cfg["demo_windows"][args.window]
