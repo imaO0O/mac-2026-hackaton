@@ -40,7 +40,7 @@ class Orchestrator:
     def __init__(self, quality: QualityAgent, reliability: ReliabilityAgent,
                  optimizer: OptimizerAgent, cfg: dict | None = None,
                  min_confidence: float = 0.35, act_risk_threshold: float | None = None,
-                 log_runs: bool = True, min_hours_between_actions: float = 4.0,
+                 log_runs: bool = True, min_hours_between_actions: float | None = None,
                  blending: BlendingAgent | None = None,
                  components_fn: Callable[[object], list[BlendComponent]] | None = None,
                  additive_ppm: float = 0.0):
@@ -59,8 +59,16 @@ class Orchestrator:
                                    else getattr(quality, "alarm_threshold", 0.2))
         self.log_runs = log_runs
         # Ограничение частоты воздействий: дёргать уставки каждый цикл нельзя,
-        # отклик качества запаздывает и режим не успевает устояться.
-        self.min_hours_between_actions = min_hours_between_actions
+        # отклик качества запаздывает и режим не успевает устояться. Значение
+        # живёт в конфиге рядом с остальными пределами и опирается на измеренную
+        # постоянную времени канала 4.6 ч (scripts/find_delays.py). Вместе с
+        # limits.max_step_per_cycle оно и задаёт предельную скорость изменения
+        # режима — 0.5 °C/ч, — поэтому прятать его в значении аргумента по
+        # умолчанию было неправильно: главный параметр безопасности не должен
+        # зависеть от того, кто как создал оркестратор.
+        self.min_hours_between_actions = float(
+            self.cfg["limits"].get("min_hours_between_actions", 4.0)
+            if min_hours_between_actions is None else min_hours_between_actions)
         self._last_action_ts = None
 
     # ------------------------------------------------------------------ #

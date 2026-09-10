@@ -13,6 +13,7 @@ from nefte.agents.orchestrator import Orchestrator
 from nefte.agents.quality import QualityAgent
 from nefte.agents.reliability import ReliabilityAgent, SeverityNorms
 from nefte.agents.schemas import QualityAssessment, ReliabilityAssessment
+from nefte.config import load_config
 from tests.test_agents import make_state
 
 BOUNDS = {"T5": (365.0, 375.0), "T11": (360.0, 370.0), "F26": (200.0, 300.0)}
@@ -186,3 +187,35 @@ def test_action_frequency_limit_blocks_immediate_second_move():
     assert second.action is not None
     assert all(abs(d) < 1e-9 for d in second.action.deltas.values())
     assert "ждём отклика" in second.explanation
+
+
+def test_action_interval_comes_from_config_not_from_a_default_argument():
+    """Интервал между воздействиями — параметр безопасности, а не деталь вызова.
+
+    Вместе с limits.max_step_per_cycle он задаёт предельную СКОРОСТЬ изменения
+    режима, а её организаторы в пакете не задавали — значит, выбор наш, и он
+    обязан быть виден в конфиге. Пока значение жило в аргументе по умолчанию,
+    оно менялось у каждого, кто иначе создал оркестратор.
+    """
+    cfg = load_config()
+    norms = SeverityNorms(bounds={"wabt": (350.0, 375.0)})
+    agent = OptimizerAgent(bounds=BOUNDS, surrogate=linear_surrogate({"T5": -0.5}))
+    system = Orchestrator(QualityAgent(), ReliabilityAgent(norms), agent, log_runs=False)
+    assert system.min_hours_between_actions == cfg["limits"]["min_hours_between_actions"]
+
+
+def test_ramp_rate_is_bounded_by_step_and_interval_together():
+    """Предельная скорость изменения режима = шаг за цикл / интервал воздействий.
+
+    Ни одно из двух чисел по отдельности скорость не ограничивает: шаг без
+    интервала позволяет двигать уставку каждый цикл, интервал без шага — двигать
+    редко, но сразу далеко. Тест закрепляет именно произведение, потому что
+    защищает нас оно, а поменять могут любое из двух.
+
+    0.5 °C/ч не взято с потолка: постоянная времени канала серы измерена и равна
+    4.6 ч (scripts/find_delays.py). Двигать быстрее, чем процесс отвечает, значит
+    гоняться за собственным ещё не проявившимся воздействием.
+    """
+    limits = load_config()["limits"]
+    rate = limits["max_step_per_cycle"]["temperature_c"] / limits["min_hours_between_actions"]
+    assert rate == pytest.approx(0.5)

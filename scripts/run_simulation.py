@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
-from nefte.sim import ClosedLoopSimulator, summarize  # noqa: E402
+from nefte.sim import RESPONSE_TAU_HOURS, ClosedLoopSimulator, summarize  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
 
@@ -53,8 +53,9 @@ def main() -> int:
     ap.add_argument("--ts", help="начало прогона; заменяет --window")
     ap.add_argument("--days", type=float, default=14.0, help="длительность при --ts")
     ap.add_argument("--every", default="4h", help="шаг цикла управления")
-    ap.add_argument("--tau", type=float, default=4.0,
-                    help="постоянная времени отклика качества, часов (допущение)")
+    ap.add_argument("--tau", type=float, default=RESPONSE_TAU_HOURS,
+                    help="постоянная времени отклика качества, часов (измерена: "
+                         "scripts/find_delays.py)")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -90,15 +91,23 @@ def main() -> int:
 
     t95 = report.get("Т95")
     if t95:
-        print(f"
-Т95: начало {t95['начало']} °C, конец {t95['конец']} °C, "
+        print(f"\nТ95: начало {t95['начало']} °C, конец {t95['конец']} °C, "
               f"уход за прогон {t95['уход за прогон']:+.2f} °C")
         if "предел" in t95:
             print(f"     предел {t95['предел']} °C, минимальный запас "
                   f"{t95['минимальный запас']:+.2f} °C, выше предела "
                   f"{t95['доля выше предела']:.0%} времени")
-        print("     Это проверка на «починили серу, сломали Т95»: за один цикл "
-              "прибавка меньше градуса, но она копится.")
+    hist95 = report.get("Т95_история")
+    if t95 and hist95 and "предел" in hist95:
+        print(f"     она же без нашего вмешательства: максимум {hist95['максимум']} °C, "
+              f"выше предела {hist95['доля выше предела']:.0%} времени")
+    contrib = report.get("Т95_наш_вклад")
+    if contrib:
+        print(f"     НАШ вклад: в среднем {contrib['средний сдвиг']:+.2f} °C, "
+              f"худший случай {contrib['худший сдвиг']:+.2f} °C, подняли Т95 в "
+              f"{contrib['доля моментов, где мы подняли Т95']:.0%} моментов")
+        print("     Это и есть проверка «починили серу, сломали Т95»: сравнивать "
+              "надо с историей, а не с пределом — Т95 гуляет и без нас.")
 
     if report["уставки"]:
         print("\nЧто система сделала с уставками:")

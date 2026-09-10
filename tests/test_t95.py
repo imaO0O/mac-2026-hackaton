@@ -67,6 +67,37 @@ def test_raising_reactor_temperature_raises_t95():
     assert estimator(state, {"T6": 372.0}) == pytest.approx(360.0, abs=0.05)
 
 
+def test_moving_t5_reaches_t95_through_t6():
+    """Главный дефект, который нашла имитация: T6 — не уставка.
+
+    Оптимизатор двигает T5, а в формулу Т95 входит T6 — температура ниже по
+    потоку. Пока связь не была смоделирована, проверка Т95 была декоративной:
+    «наш вклад в Т95» выходил ровно нулевым во всех точках прогона. Измеренная
+    цепочка: ΔT6 = 0.72·ΔT5, ΔТ95 = 0.50·ΔT6, то есть 0.36 °C на градус T5.
+    """
+    estimator = default_t95_estimator()
+    state = make_state(t95=355.0)
+    t5 = state.telemetry_ht["T5"]
+    moved = estimator(state, {"T5": t5 + 2.0})
+    assert moved is not None
+    assert moved > 355.0, "движение T5 обязано доходить до Т95"
+    assert moved == pytest.approx(355.0 + 0.72 * 2.0 * 0.50, abs=0.05)
+
+
+def test_feed_and_pressure_do_not_move_t95():
+    """Обратная сторона: связь не выдумана шире, чем измерена.
+
+    У расхода сырья и давления коэффициенты в регрессии ΔT6 неотличимы от нуля
+    (0.014 и −0.079 при корреляции разностей 0.08 и −0.01), поэтому через T6 они
+    на Т95 не действуют. Если кто-то припишет им влияние «для полноты», тест это
+    заметит.
+    """
+    estimator = default_t95_estimator()
+    state = make_state(t95=355.0)
+    feed = state.telemetry_ht["F26"]
+    assert estimator(state, {"F26": feed * 1.05}) == pytest.approx(355.0, abs=1e-6)
+
+
 def test_no_lab_analysis_means_unknown_not_zero():
     """Ноль прошёл бы проверку предела, и вариант объявили бы годным."""
     estimator = default_t95_estimator()

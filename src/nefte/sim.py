@@ -23,14 +23,19 @@
 (сырьё, состояние катализатора, работа АВТ) берётся из записанных данных, поэтому
 дрейф и возмущения в эксперименте настоящие, а не выдуманные.
 
+Что среда отслеживает, кроме серы: **Т95**, второй обязательный показатель. За
+один цикл управление добавляет к ней меньше градуса, поштучно это незаметно — а за
+прогон складывается. Считается и то, какой Т95 была бы БЕЗ наших воздействий:
+сравнивать надо с историей, а не с пределом, потому что Т95 гуляет и без нас.
+
 Допущения, которые надо назвать на защите:
 
-* постоянная времени отклика качества 4 часа — типовая для реактора такого
-  объёма, в пакете её нет;
 * уставки удерживаются ровно так, как рекомендовано, мгновенно и без ошибки
   исполнения;
 * взаимное влияние установок (АВТ ↔ гидроочистка) не моделируется: сырьё
-  остаётся историческим.
+  остаётся историческим;
+* постоянная времени отклика качества — единственное, что перестало быть
+  допущением: 4.6 ч измерены по данным (`scripts/find_delays.py`).
 """
 from __future__ import annotations
 
@@ -74,6 +79,10 @@ class SimStep:
     # здесь видно, не чинит ли контур серу за счёт другого обязательного показателя:
     # за один цикл прибавка к Т95 меньше градуса и незаметна, а за прогон копится.
     t95_sim: float | None = None
+    # Т95 БЕЗ наших воздействий — то же, что «сера_история» для серы. Без этой
+    # опорной точки доля времени выше предела ничего не говорит: Т95 гуляет сама
+    # по себе, и приписывать её выход за предел нашему управлению нечестно.
+    t95_hist: float | None = None
     confidence: float = 0.0
 
 
@@ -134,6 +143,19 @@ class ClosedLoopSimulator:
             out.quality["pak_sulfur_ppm"] = Measurement(
                 value=float(value), unit="мг/кг", source=Source.PAK, age_hours=0.0,
                 comment="значение имитационной среды")
+        return out
+
+    def _with_simulated_t95(self, state: ProcessState,
+                            value: float | None) -> ProcessState:
+        """Подменяет лабораторную Т95 смоделированной. См. пояснение в run()."""
+        if value is None or value != value or "lims_t95_c" not in state.quality:
+            return state
+        out = state.model_copy(deep=True)
+        current = out.quality["lims_t95_c"]
+        out.quality["lims_t95_c"] = Measurement(
+            value=float(value), unit=current.unit, source=current.source,
+            age_hours=current.age_hours, is_stale=current.is_stale,
+            comment="значение имитационной среды")
         return out
 
     def _target_level(self, state: ProcessState) -> float | None:
@@ -203,6 +225,16 @@ class ClosedLoopSimulator:
             observed = shifted if self.sulfur != self.sulfur else \
                 self._with_simulated_quality(shifted, self.sulfur)
 
+            # Т95 подменяем ровно по той же причине, что и серу: лабораторный
+            # анализ в истории снят при ИСТОРИЧЕСКОМ режиме и про наши накопленные
+            # смещения ничего не знает. Без подмены оптимизатор считал текущую Т95
+            # равной историческому анализу, то есть не видел собственного ухода и
+            # не мог его остановить. В реальной работе анализ приходит с настоящего
+            # продукта и учитывает всё, что сделал оператор, — здесь это надо
+            # воспроизвести руками.
+            t95_now = self._t95_level(base)
+            observed = self._with_simulated_t95(observed, t95_now)
+
             # лимит частоты воздействий здесь ОСМЫСЛЕН: прогон хронологический
             rec = self.system.run(observed)
             moved = {} if (rec.abstained or rec.action is None) else \
@@ -219,7 +251,8 @@ class ClosedLoopSimulator:
                 applied=bool(moved),
                 sulfur_sim=float(self.sulfur),
                 sulfur_hist=hist,
-                t95_sim=self._t95_level(base),
+                t95_sim=t95_now,
+                t95_hist=self.t95_fn(base, {}),
                 offsets=dict(self.offsets),
                 moved=moved,
                 confidence=float(rec.confidence),
@@ -237,6 +270,7 @@ def summarize(steps: list[SimStep], limit: float,
         "ts": s.ts, "исход": s.outcome, "сера": s.sulfur_sim,
         "сера_история": s.sulfur_hist,
         "Т95": s.t95_sim,
+        "Т95_история": s.t95_hist,
         **{f"смещение_{k}": v for k, v in s.offsets.items()},
         **{f"шаг_{k}": v for k, v in s.moved.items()},
     } for s in steps])
@@ -278,6 +312,27 @@ def summarize(steps: list[SimStep], limit: float,
         # цикл контур добавляет к Т95 меньше градуса, и поштучно это незаметно, а
         # за прогон складывается в реальный уход к пределу.
         "Т95": _t95_summary(frame["Т95"].dropna(), t95_limit),
+        "Т95_история": _t95_summary(frame["Т95_история"].dropna(), t95_limit),
+        # Ответ на единственный вопрос, ради которого Т95 здесь считается:
+        # НАШИ действия ухудшили её или улучшили?
+        "Т95_наш_вклад": _t95_contribution(frame),
+    }
+
+
+def _t95_contribution(frame: pd.DataFrame) -> dict | None:
+    """Разница между Т95 с нашим управлением и Т95 без него.
+
+    Считается по совпадающим моментам: только так видно, что именно добавили мы, а
+    что было в истории и без нас.
+    """
+    both = frame[["Т95", "Т95_история"]].dropna()
+    if not len(both):
+        return None
+    delta = both["Т95"] - both["Т95_история"]
+    return {
+        "средний сдвиг": round(float(delta.mean()), 2),
+        "худший сдвиг": round(float(delta.max()), 2),
+        "доля моментов, где мы подняли Т95": round(float((delta > 1e-9).mean()), 3),
     }
 
 

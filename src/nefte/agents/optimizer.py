@@ -26,6 +26,7 @@ from nefte.agents.schemas import (
     ReliabilityAssessment,
 )
 from nefte.config import load_config
+from nefte.models.regime import implied_t6
 from nefte.models.vak import point_evaluator
 
 # Во сколько σ закладываем запас по качеству: рекомендация должна оставаться
@@ -106,13 +107,21 @@ def default_t95_estimator(target: str = "24-2000:GODT:T95"
     evaluator = point_evaluator(target)
 
     def _at(state: ProcessState, moves: dict[str, float]) -> float | None:
+        current = {**state.telemetry_avt, **state.telemetry_ht}
+        # T6 никто не задаёт уставкой: это температура ниже по потоку, следствие
+        # того, что сделали с T5 и T11. В формулу Т95 входит именно она, поэтому
+        # без модели связи проверка была мёртвой — система двигала T5, формула
+        # этого не видела. Связь измерена: ΔT6 = 0.72·ΔT5 + 0.18·ΔT11.
+        derived = implied_t6(current, moves)
         values: dict[str, float] = {}
         for tag in evaluator.tags:
             if tag.startswith("LIMS_"):
                 values[tag] = 0.0        # в разности сокращается
                 continue
-            values[tag] = moves.get(tag, state.telemetry_ht.get(
-                tag, state.telemetry_avt.get(tag)))
+            if tag == "T6" and derived is not None:
+                values[tag] = derived
+                continue
+            values[tag] = moves.get(tag, current.get(tag))
         return evaluator(values)
 
     def _fn(state: ProcessState, moves: dict[str, float]) -> float | None:
