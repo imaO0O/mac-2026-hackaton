@@ -125,4 +125,7 @@ def make_kinetic_surrogate(model, base_surrogate=None, strength: float = 1.0,
         value = feed_sulfur * math.exp(-tau_new)
         return {"product_sulfur_mgkg": float(value)}
 
+    # Метка для оркестратора: приращение эффекта посчитано по физике, а не
+    # измерено. Оператору это надо сказать, иначе «−3.4 мг/кг» читается как факт.
+    _fn.kind = "kinetic"
     return _fn

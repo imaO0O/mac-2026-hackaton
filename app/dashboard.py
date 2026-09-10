@@ -224,7 +224,10 @@ def main() -> None:
                  "сера": round(c.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
                  # риск и тяжесть режима у каждого варианта СВОИ — именно между
                  # ними и выбирает технолог
-                 "риск": round(c.spec_risk.get("product_sulfur_mgkg", float("nan")), 3),
+                 # «по суррогату» в заголовке не педантизм: в шапке рекомендации
+                 # риск считает калиброванный классификатор, и путать их нельзя
+                 "риск (суррогат)": round(c.spec_risk.get("product_sulfur_mgkg",
+                                                          float("nan")), 3),
                  "тяжесть": round(c.severity_index or 0, 3),
                  "выпуск": round(c.throughput or 0, 1),
                  "энергия": round(c.energy_proxy or 0, 1),

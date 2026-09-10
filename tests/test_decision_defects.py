@@ -16,6 +16,7 @@ from nefte.agents.quality import (
     QualityAgent,
     confidence_parts,
 )
+from nefte.agents.orchestrator import Orchestrator
 from nefte.agents.reliability import ReliabilityAgent, SeverityNorms
 from nefte.agents.schemas import Source
 from nefte.models.dataset import cache_key
@@ -447,3 +448,58 @@ def test_different_moments_give_different_candidate_sets():
     mixes_a = [c.moves for c in a if c.id.startswith("mix_")]
     mixes_b = [c.moves for c in b if c.id.startswith("mix_")]
     assert mixes_a and mixes_b and mixes_a[0] != mixes_b[0]
+
+
+# --------------------------------------------------------------------------- #
+# 17. объяснение не утверждает того, чего не было
+# --------------------------------------------------------------------------- #
+
+def test_no_vak_note_when_the_model_returned_nothing():
+    """Было: «значение получено виртуальным анализатором» писалось и при NaN.
+
+    Момент раньше начала истории — модель возвращает NaN, а примечание утверждало,
+    что значение получено. Объяснение обязано быть верным даже в углу.
+    """
+    class SilentModel:
+        horizon_hours = 0.0
+        alarm_threshold = 0.2
+
+        def predict_with_sigma(self, state):
+            return float("nan"), float("inf")
+
+    out = QualityAgent(model=SilentModel()).assess(make_state(lims=None, pak=None))
+    assert out.source is Source.NONE and out.confidence == 0.0
+    assert not any("ВАК" in note for note in out.notes)
+    assert any("прогноз недоступен" in note for note in out.notes)
+
+
+# --------------------------------------------------------------------------- #
+# 18. происхождение эффекта названо оператору
+# --------------------------------------------------------------------------- #
+
+def test_kinetic_effect_is_declared_as_physics_not_measurement():
+    """«Сера к бездействию −3.4 мг/кг» читается как факт, а это допущение.
+
+    Уровень серы берёт модель, а приращение от изменения уставок считает кинетика
+    с принятой энергией активации. Оператору это надо сказать прямо.
+    """
+    from nefte.models.kinetics import make_kinetic_surrogate
+
+    class LevelModel:
+        horizon_hours = 0.0
+        alarm_threshold = 0.2
+
+        def predict_with_sigma(self, _state):
+            return 9.5, 1.7
+
+    surrogate = make_kinetic_surrogate(LevelModel())
+    assert getattr(surrogate, "kind", None) == "kinetic"
+
+    agent = ReliabilityAgent(NORMS)
+    optimizer = OptimizerAgent(bounds=BOUNDS, surrogate=surrogate,
+                               reliability_agent=agent)
+    system = Orchestrator(QualityAgent(model=LevelModel()), agent, optimizer,
+                          log_runs=False)
+    rec = system.run(make_state(lims=(9.5, 1.0), pak=(9.6, 0.1)))
+    if not rec.abstained:
+        assert "кинетике" in rec.explanation and "допущение" in rec.explanation

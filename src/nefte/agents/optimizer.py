@@ -361,8 +361,13 @@ class OptimizerAgent:
             rng = np.nanmax(arr) - np.nanmin(arr)
             return (arr - np.nanmin(arr)) / rng if rng > 0 else np.full(len(arr), 0.5)
 
-        quality_margin = norm([limit - (c.predicted_quality.get("product_sulfur_mgkg") or limit)
-                               for c in feas])
+        # `or limit` здесь был бы ошибкой того же рода, что и в блендинге: прогноз
+        # ровно 0.0 — валидное число, а не «нет прогноза».
+        def _margin(c: Candidate) -> float:
+            value = c.predicted_quality.get("product_sulfur_mgkg")
+            return 0.0 if value is None else limit - float(value)
+
+        quality_margin = norm([_margin(c) for c in feas])
         throughput = norm([c.throughput or 0.0 for c in feas])
         energy = norm([c.energy_proxy or 0.0 for c in feas])
         severity = norm([c.severity_index or 0.0 for c in feas])

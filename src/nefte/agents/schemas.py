@@ -87,7 +87,11 @@ class Candidate(BaseModel):
     moves: dict[str, float] = Field(description="тег → новое абсолютное значение")
     deltas: dict[str, float] = Field(default_factory=dict, description="тег → изменение")
     predicted_quality: dict[str, float] = {}
-    spec_risk: dict[str, float] = {}
+    # P(нарушение) ПО СУРРОГАТУ, а не по калиброванному классификатору агента
+    # качества. Величины считаются разной машинерией и сравнимы между вариантами,
+    # но НЕ с риском в шапке рекомендации: там классификатор для текущего режима.
+    spec_risk: dict[str, float] = Field(
+        default_factory=dict, description="P(нарушение) по суррогату, для сравнения вариантов")
     throughput: float | None = None
     energy_proxy: float | None = None
     severity_index: float | None = None
