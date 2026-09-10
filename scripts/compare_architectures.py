@@ -124,14 +124,6 @@ def single_agent_decision(quality, threshold: float) -> str:
     return "меняем уставки" if risk >= threshold else "держим режим"
 
 
-def outcome_of(rec) -> str:
-    if rec.abstained:
-        return "отказ"
-    moves = {t: d for t, d in (rec.action.deltas if rec.action else {}).items()
-             if abs(d) > 1e-6}
-    return "меняем уставки" if moves else "держим режим"
-
-
 def effort_of(rec) -> float:
     """Сколько всего система просит подвинуть по реакторным температурам, °C."""
     if rec.abstained or rec.action is None:
@@ -213,7 +205,7 @@ def main() -> int:
             # у неё свой, и переносить его между архитектурами нельзя
             system._last_action_ts = None
             rec = system.run(state)
-            results[name].append({"исход": outcome_of(rec), "усилие": effort_of(rec),
+            results[name].append({"исход": rec.outcome(), "усилие": effort_of(rec),
                                   **facts})
 
         decision = single_agent_decision(quality, full.act_risk_threshold)

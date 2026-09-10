@@ -45,16 +45,6 @@ def perturbed_weights(base: dict[str, float], rng: np.random.Generator,
     return dict(zip(base.keys(), values))
 
 
-def outcome(recommendation) -> str:
-    """Три исхода, которые видит оператор."""
-    if recommendation.abstained:
-        return "отказ"
-    action = recommendation.action
-    if action is None or all(abs(d) < 1e-6 for d in action.deltas.values()):
-        return "держим режим"
-    return "меняем уставки"
-
-
 def main() -> int:
     use_utf8_console()
     ap = argparse.ArgumentParser()
@@ -125,7 +115,7 @@ def main() -> int:
         «меняем уставки».
         """
         system._last_action_ts = None
-        return outcome(system.run(state))
+        return system.run(state).outcome()
 
     base_outcomes = [run_once(s) for s in decision_states]
 

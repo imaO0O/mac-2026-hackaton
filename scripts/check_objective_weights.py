@@ -57,9 +57,9 @@ def action_summary(rec) -> dict[str, float | str | None]:
     """Что именно рекомендовано: исход, шаг по T5 и прогноз серы."""
     if rec.abstained or rec.action is None:
         return {"исход": "отказ", "dT5": None, "сера": None}
-    moves = {t: d for t, d in rec.action.deltas.items() if abs(d) > 1e-6}
     return {
-        "исход": "меняем уставки" if moves else "держим режим",
+        # правило исхода — одно на всю систему, в Recommendation.outcome()
+        "исход": rec.outcome(),
         "dT5": float(rec.action.deltas.get("T5", 0.0)),
         "сера": rec.action.predicted_quality.get("product_sulfur_mgkg"),
     }

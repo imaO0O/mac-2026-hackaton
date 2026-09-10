@@ -587,3 +587,52 @@ def test_fact_series_keeps_the_sampling_time():
     source = inspect.getsource(StateBuilder.__init__)
     assert "self.lims_sulfur = clean_lims_sulfur(" in source
     assert "self.lims_sulfur_known = known_from(" in source
+
+
+# --------------------------------------------------------------------------- #
+# правило исхода: одно на всю систему
+# --------------------------------------------------------------------------- #
+
+def test_outcome_rule_exists_in_exactly_one_place():
+    """«Отказ / меняем уставки / держим режим» считается ровно в одном месте.
+
+    Это правило уже разъезжалось дважды. Оно жило пятью независимыми копиями в
+    прогонах по тесту, в сравнении архитектур, в двух проверках устойчивости и в
+    имитации; копии успели разойтись в мелочах, и сравнивать прогоны с разным
+    определением исхода стало бессмысленно. Свели в `Recommendation.outcome()` —
+    и через один заход появились новые копии, потому что написать три строки
+    быстрее, чем вспомнить про метод.
+
+    Поэтому проверка не логики, а исходников. Ищем именно ПОДПИСЬ дублирования:
+    вывод исхода из дельт кандидата, то есть сравнение `abs(d)` с порогом рядом со
+    словом исхода. Сравнивать готовую строку с «меняем уставки» никто не
+    запрещает — так считают доли и ложные тревоги, и это не копия правила.
+    Отдельно разрешён `single_agent_decision`: одноагентная система решает по
+    порогу риска, у неё правило ДРУГОЕ, и в этом весь смысл сравнения архитектур.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    contract = root / "src" / "nefte" / "agents" / "schemas.py"
+    # abs(...) с порядком 1e-6 и слово исхода в пределах пяти строк друг от друга
+    near = re.compile(r"abs\(\w+\)\s*[<>]\s*1e-6")
+
+    def duplicates_rule(text: str) -> bool:
+        """Есть ли в файле вывод исхода из дельт — в пределах пяти строк."""
+        lines = text.splitlines()
+        marks = [i for i, line in enumerate(lines) if near.search(line)]
+        words = [i for i, line in enumerate(lines) if "меняем уставки" in line]
+        return any(abs(a - b) <= 5 for a in marks for b in words)
+
+    offenders = []
+    for path in [*(root / "scripts").glob("*.py"),
+                 *(root / "src").rglob("*.py")]:
+        if path == contract:
+            continue
+        if duplicates_rule(path.read_text(encoding="utf-8")):
+            offenders.append(str(path.relative_to(root)))
+
+    assert not offenders, (
+        "правило исхода продублировано в " + ", ".join(offenders)
+        + "; используйте Recommendation.outcome()")
