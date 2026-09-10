@@ -41,6 +41,10 @@ class SignalValidity:
     negative: pd.DataFrame
     dead_tags: list[str] = field(default_factory=list)
     suspicious_tags: dict[str, float] = field(default_factory=dict)
+    # Теги, запрещённые вердиктом технолога (configs/config.yaml → tag_verdicts).
+    # До этого вердикты были декоративными: их читал только тест, а код о них не
+    # знал, и запрещённый тег держался вне признаков исключительно по договорённости.
+    banned_tags: dict[str, str] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -83,8 +87,19 @@ class SignalValidity:
             negative[nonneg] = df[nonneg] < 0
             df = df.mask(negative)
 
+        # 5. вердикты: запрещённый тег выбрасывается, а не «не используется по
+        #    договорённости». Маски при этом остаются — они нужны отчёту, чтобы
+        #    было видно, ПОЧЕМУ тег забракован.
+        banned = {tag: str(v.get("reason", "")).strip()
+                  for key, v in (cfg["telemetry"].get("tag_verdicts") or {}).items()
+                  for u, tag in [key.split(":", 1)]
+                  if u == unit and v.get("status") == "do_not_use" and tag in df.columns}
+        if banned:
+            df = df.drop(columns=list(banned))
+
         return cls(unit=unit, clean=df, sentinel=sentinel, frozen=frozen,
-                   negative=negative, dead_tags=dead, suspicious_tags=suspicious)
+                   negative=negative, dead_tags=dead, suspicious_tags=suspicious,
+                   banned_tags=banned)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -132,6 +147,8 @@ class SignalValidity:
                 out.setdefault(tag, []).append(name)
         for tag in self.dead_tags:
             out.setdefault(tag, []).append("датчик не даёт сигнала")
+        for tag in self.banned_tags:
+            out.setdefault(tag, []).append("запрещён вердиктом")
         return out
 
     def summary(self) -> pd.DataFrame:
@@ -144,6 +161,7 @@ class SignalValidity:
         }).round(2)
         out["итого_%"] = out.sum(axis=1).round(2)
         out["мёртвый"] = out.index.isin(self.dead_tags)
+        out["запрещён"] = out.index.isin(self.banned_tags)
         return out.sort_values("итого_%", ascending=False)
 
 

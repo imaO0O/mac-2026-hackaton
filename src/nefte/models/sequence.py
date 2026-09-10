@@ -42,6 +42,7 @@ from nefte.models.quality_model import (
     interval_metrics,
     interval_risk,
     pick_alarm_threshold,
+    pick_threshold_for_budget,
 )
 
 MODELS_DIR = ROOT / "models"
@@ -210,6 +211,7 @@ class SulfurSequenceModel:
     sigma_scale: float = 1.0
     alarm_threshold: float = 0.5
     alarm_reliable: bool = True
+    alarm_threshold_fbeta: float | None = None
     device: str = "cpu"
     pretrained: bool = False
     metrics: dict = field(default_factory=dict)
@@ -408,11 +410,15 @@ class SulfurSequenceModel:
         return self.sigma_scale
 
     def select_alarm_threshold(self, features: pd.DataFrame, y_val: pd.Series,
-                               beta: float = 1.5, min_lift: float = 1.5) -> float:
+                               beta: float = 1.5, min_lift: float = 1.5,
+                               budget: float | None = None) -> float:
+        risk = self.predict_risk(y_val.index, features).to_numpy()
         threshold, reliable = pick_alarm_threshold(
-            self.predict_risk(y_val.index, features).to_numpy(),
-            (y_val > self.limit).to_numpy(), beta=beta, min_lift=min_lift)
-        self.alarm_threshold, self.alarm_reliable = threshold, reliable
+            risk, (y_val > self.limit).to_numpy(), beta=beta, min_lift=min_lift)
+        self.alarm_threshold_fbeta = threshold
+        self.alarm_reliable = reliable
+        self.alarm_threshold = (threshold if budget is None
+                                else pick_threshold_for_budget(risk, budget))
         return self.alarm_threshold
 
     def evaluate(self, features: pd.DataFrame, y: pd.Series,
@@ -472,6 +478,7 @@ class SulfurSequenceModel:
             "limit": self.limit, "sigma_scale": self.sigma_scale,
             "alarm_threshold": self.alarm_threshold,
             "alarm_reliable": self.alarm_reliable, "pretrained": self.pretrained,
+            "alarm_threshold_fbeta": self.alarm_threshold_fbeta,
             "mean": self.mean_.tolist(), "std": self.std_.tolist(),
             "median": self.median_.tolist(),
             "metrics": self.metrics, "history": self.history,
@@ -494,6 +501,7 @@ class SulfurSequenceModel:
                   alarm_threshold=meta["alarm_threshold"],
                   alarm_reliable=meta.get("alarm_reliable", True),
                   pretrained=meta.get("pretrained", False),
+                  alarm_threshold_fbeta=meta.get("alarm_threshold_fbeta"),
                   metrics=meta.get("metrics", {}), history=meta.get("history", []))
         obj.mean_ = np.array(meta["mean"], dtype="float32")
         obj.std_ = np.array(meta["std"], dtype="float32")

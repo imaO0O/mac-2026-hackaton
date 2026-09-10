@@ -56,6 +56,9 @@ def main() -> int:
     ap.add_argument("--hidden", type=int, default=48)
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--seeds", type=int, default=3, help="сколько сидов усреднять")
+    ap.add_argument("--seed-base", type=int, default=42,
+                    help="с какого сида начинать: нужен, чтобы проверить, не шум ли "
+                         "результат — три независимых тройки сидов вместо одной")
     ap.add_argument("--cpu", action="store_true", help="учить на CPU, даже если есть GPU")
     ap.add_argument("--pretrain", action="store_true",
                     help="предобучить на показаниях поточного анализатора "
@@ -87,7 +90,7 @@ def main() -> int:
     model = SulfurSequenceModel(
         horizon_hours=args.horizon, arch=args.arch, window=args.window,
         hidden=args.hidden, epochs=args.epochs, limit=limit,
-        seeds=tuple(42 + i for i in range(args.seeds)),
+        seeds=tuple(args.seed_base + i for i in range(args.seeds)),
     )
     model.fit(feats, parts["train"][1], parts["val"][1], prefer_gpu=not args.cpu,
               pretrain_bounds=tuple(cfg["split"]["train"]) if args.pretrain else None,
@@ -104,9 +107,12 @@ def main() -> int:
 
     scale = model.calibrate(feats, parts["val"][1])
     print(f"      конформная поправка σ: ×{scale:.2f}")
-    thr = model.select_alarm_threshold(feats, parts["val"][1])
-    print(f"      порог тревоги: {thr:.2f}"
-          + ("" if model.alarm_reliable else "  (информативной тревоги на val нет)"))
+    thr = model.select_alarm_threshold(feats, parts["val"][1],
+                                      budget=cfg["quality"].get("alarm_budget"))
+    budget = cfg["quality"].get("alarm_budget")
+    print(f"      порог тревоги {thr:.4f} по бюджету тревог {budget:.0%} "
+          f"(компромисс F1.5 дал бы {model.alarm_threshold_fbeta:.4f})"
+          + ("" if model.alarm_reliable else "; информативной тревоги на val нет"))
 
     print("[4/5] оценка…")
     report = {
@@ -114,7 +120,10 @@ def main() -> int:
         "hidden": args.hidden, "seeds": list(model.seeds), "device": device,
         "pretrained": model.pretrained,
         "channels": model.channels, "sigma_scale": model.sigma_scale,
-        "alarm_threshold": model.alarm_threshold, "history": model.history,
+        "alarm_threshold": model.alarm_threshold,
+        "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
+        "alarm_budget": cfg["quality"].get("alarm_budget"),
+        "history": model.history,
         "splits": {},
     }
     for name in ("train", "val", "test"):
@@ -133,7 +142,8 @@ def main() -> int:
 
     model.metrics = report
     path = model.save()
-    tag = f"{args.arch}{args.window}" + ("_pre" if args.pretrain else "")
+    tag = (f"{args.arch}{args.window}" + ("_pre" if args.pretrain else "")
+           + ("" if args.seed_base == 42 else f"_s{args.seed_base}"))
     out = ROOT / "reports" / f"sequence_metrics_{tag}_h{args.horizon:g}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

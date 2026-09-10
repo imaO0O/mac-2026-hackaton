@@ -86,6 +86,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--every", default="12h", help="шаг обхода тестового периода")
     ap.add_argument("--limit", type=int, default=0, help="взять только первые N моментов")
+    ap.add_argument("--model", choices=("boost", "seq"), default="boost",
+                    help="какой виртуальный анализатор проверяем")
+    ap.add_argument("--seq-horizon", type=float, default=None,
+                    help="горизонт нейросетевой модели (0 или 2)")
+    ap.add_argument("--tag", default="", help="суффикс имени отчёта, чтобы прогоны "
+                                              "разных конфигураций не затирали друг друга")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -93,7 +99,7 @@ def main() -> int:
     lo, hi = cfg["split"]["test"]
 
     sb = StateBuilder(cfg)
-    system = build_system(sb, cfg)
+    system = build_system(sb, cfg, model_kind=args.model, seq_horizon=args.seq_horizon)
     system.log_runs = False        # полугодовой прогон не засоряет журнал демо
     global ACT_THRESHOLD
     ACT_THRESHOLD = system.act_risk_threshold
@@ -204,6 +210,8 @@ def main() -> int:
     summary = {
         "период": [str(lo), str(hi)],
         "шаг": args.every,
+        "модель": args.model,
+        "горизонт сети": args.seq_horizon,
         "моментов": int(len(frame)),
         "исходы": {k: int(v) for k, v in Counter(frame["исход"]).items()},
         "причины отказа": {k: int(v) for k, v in
@@ -249,11 +257,13 @@ def main() -> int:
     print(f"\nСмешение: рецептура посчитана {blend['рецептура посчитана']} раз, "
           f"допустима {blend['допустима']}, недопустима {blend['недопустима']}.")
 
-    REPORT.parent.mkdir(parents=True, exist_ok=True)
-    REPORT.write_text(json.dumps({"summary": summary, "rows": rows},
+    report_path = (REPORT if not args.tag
+                   else REPORT.with_name(f"test_period_{args.tag}.json"))
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps({"summary": summary, "rows": rows},
                                  ensure_ascii=False, indent=2, default=str),
                       encoding="utf-8")
-    print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")
+    print(f"\nОтчёт: {report_path.relative_to(ROOT)}")
     return 0
 
 

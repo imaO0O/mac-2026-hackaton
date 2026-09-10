@@ -22,9 +22,10 @@ import numpy as np
 import pandas as pd
 
 from nefte.config import cache_dir, load_config
-from nefte.data.cleaning import clean_lims_sulfur, clean_telemetry, frozen_mask
+from nefte.data.cleaning import clean_lims_sulfur, frozen_mask
 from nefte.data.features import asof_features
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
+from nefte.data.validity import SignalValidity
 from nefte.models.regime import INSTANT_FEATURES, regime_features
 from nefte.models.vak import evaluate as evaluate_vak
 
@@ -46,7 +47,7 @@ FEED_SULFUR_SERIES = "Гидроочистка|1|Mass.Sulfur"
 # Версия схемы признаков. Поднимайте её, когда меняете САМ РАСЧЁТ (формулу окна,
 # набор лаговых признаков, способ ресемплинга) — то, что не выражено константами
 # выше. Состав тегов, окна и целевые ряды подставляются в ключ кэша сами.
-FEATURE_VERSION = 2
+FEATURE_VERSION = 3
 
 
 def cache_key(freq: str) -> str:
@@ -85,8 +86,15 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
     cfg = load_config()
     # АВТ грузим целиком: формулы ВАК используют теги за пределами отобранного
     # набора. В признаки при этом идёт только подмножество AVT_TAGS.
-    avt_full, _ = clean_telemetry(load_telemetry("avt", None), unit="avt")
-    ht, _ = clean_telemetry(load_telemetry("ht", HT_TAGS), unit="ht")
+    #
+    # Очистка — ЧЕРЕЗ ТОТ ЖЕ SignalValidity, что и в StateBuilder. Раньше здесь
+    # был отдельный путь (cleaning.clean_telemetry), и модель училась на данных,
+    # отличавшихся от тех, что видит оператор: отрицательные расходы в обучении
+    # не маскировались, вердикты по тегам не соблюдались. Расхождение доходило до
+    # 0.9 % значений АВТ и задевало ht:Q21 — самый значимый признак модели.
+    # Две реализации одного правила расходятся всегда, вопрос только когда.
+    avt_full = SignalValidity.build(load_telemetry("avt", None), unit="avt", cfg=cfg).clean
+    ht = SignalValidity.build(load_telemetry("ht", HT_TAGS), unit="ht", cfg=cfg).clean
     avt = avt_full[[c for c in AVT_TAGS if c in avt_full.columns]]
 
     # Виртуальные анализаторы из справочника: экспертные комбинации тех же тегов.

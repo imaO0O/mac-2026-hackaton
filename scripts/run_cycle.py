@@ -132,7 +132,8 @@ def attach_autoencoder(reliability, sb: StateBuilder, cfg: dict) -> bool:
 
 
 def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
-                 anomaly_kind: str = "maha") -> Orchestrator:
+                 anomaly_kind: str = "maha",
+                 seq_horizon: float | None = None) -> Orchestrator:
     # нормировка тяжести режима — только по обучающему периоду, без заглядывания вперёд
     # сырая телеметрия нужна агенту, чтобы увидеть остановы: очистка убирает
     # замороженный на нуле расход сырья вместе с самим фактом останова
@@ -143,7 +144,8 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
     if anomaly_kind == "ae":
         attach_autoencoder(reliability, sb, cfg)
 
-    model = load_sequence_model() if model_kind == "seq" else load_quality_model()
+    model = (load_sequence_model(seq_horizon) if model_kind == "seq"
+             else load_quality_model())
     if model_kind == "seq" and model is not None:
         # У сети нет табличного суррогата: она читает окно, а не строку признаков.
         # Кинетика берёт у модели только уровень серы, и этого достаточно —
@@ -194,11 +196,15 @@ def main() -> int:
                     help="какой виртуальный анализатор: CatBoost или нейросеть")
     ap.add_argument("--anomaly", choices=("maha", "ae"), default="maha",
                     help="детектор аномалий режима: Махаланобис или автоэнкодер")
+    ap.add_argument("--seq-horizon", type=float, default=None,
+                    help="горизонт нейросетевой модели: 0 — виртуальный анализатор, "
+                         "2 — прогноз на 2 часа")
     args = ap.parse_args()
 
     cfg = load_config()
     sb = StateBuilder(cfg)
-    system = build_system(sb, cfg, model_kind=args.model, anomaly_kind=args.anomaly)
+    system = build_system(sb, cfg, model_kind=args.model, anomaly_kind=args.anomaly,
+                          seq_horizon=args.seq_horizon)
 
     if args.window:
         lo, hi = cfg["demo_windows"][args.window]

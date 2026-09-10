@@ -1,0 +1,114 @@
+"""Замкнутый контур: что будет, если оператор выполняет рекомендации.
+
+    python scripts/run_simulation.py                       # окно quality_risk, шаг 4 ч
+    python scripts/run_simulation.py --window stable --every 6h
+    python scripts/run_simulation.py --ts "2026-06-01" --days 20
+
+Все остальные прогоны в проекте разомкнуты: система смотрит на историю и говорит,
+что сделала бы. Здесь её рекомендации ПРИМЕНЯЮТСЯ — уставки сдвигаются, процесс
+отвечает, и на следующем шаге система видит последствия собственного совета.
+
+Что этот прогон может показать и чего не может — надо назвать сразу.
+
+**Не может** проверить, верна ли кинетика: отклик считает та же модель, которой
+пользуется оптимизатор, рассуждение замкнуто само на себя.
+
+**Может** ответить на вопросы, на которые разомкнутый прогон не отвечает вообще:
+
+* устойчив ли контур — не гоняет ли система уставки туда-обратно;
+* не ползёт ли режим в одну сторону бесконечно;
+* сколько всего воздействий на оборудование выходит за период;
+* сколько времени продукт вне спецификации, если советы выполнять, и если не
+  трогать режим вовсе.
+
+Допущения имитации перечислены в `src/nefte/sim.py`; главные — постоянная времени
+отклика 4 часа и то, что сырьё остаётся историческим.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.pipeline import StateBuilder  # noqa: E402
+from nefte.sim import ClosedLoopSimulator, summarize  # noqa: E402
+from nefte.utils import use_utf8_console  # noqa: E402
+from scripts.run_cycle import build_system  # noqa: E402
+
+REPORT = ROOT / "reports" / "simulation.json"
+
+
+def main() -> int:
+    use_utf8_console()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--window", default="quality_risk",
+                    help="имя окна из configs/config.yaml: demo_windows")
+    ap.add_argument("--ts", help="начало прогона; заменяет --window")
+    ap.add_argument("--days", type=float, default=14.0, help="длительность при --ts")
+    ap.add_argument("--every", default="4h", help="шаг цикла управления")
+    ap.add_argument("--tau", type=float, default=4.0,
+                    help="постоянная времени отклика качества, часов (допущение)")
+    args = ap.parse_args()
+
+    cfg = load_config()
+    limit = cfg["spec"]["product_sulfur_mgkg"]["max"]
+    sb = StateBuilder(cfg)
+    system = build_system(sb, cfg)
+    system.log_runs = False
+
+    if args.ts:
+        lo = pd.Timestamp(args.ts)
+        hi = lo + pd.Timedelta(days=args.days)
+    else:
+        lo, hi = (pd.Timestamp(x) for x in cfg["demo_windows"][args.window])
+    stamps = pd.date_range(lo, hi, freq=args.every)
+
+    print(f"\nЗамкнутый контур: {lo:%Y-%m-%d} … {hi:%Y-%m-%d}, шаг {args.every}, "
+          f"{len(stamps)} циклов, постоянная времени {args.tau:g} ч")
+    print("Рекомендации ПРИМЕНЯЮТСЯ: уставки сдвигаются и удерживаются.\n")
+
+    sim = ClosedLoopSimulator(sb, system, system.optimizer.surrogate,
+                              tau_hours=args.tau)
+    steps = sim.run(stamps, hist_sulfur=sb.lims_sulfur)
+    report = summarize(steps, limit)
+
+    print("Исходы:", report["исходы"])
+    print(f"Вмешательств: {report['вмешательств']} из {report['шагов']} циклов")
+    print(f"\nСера в замкнутом контуре: среднее {report['сера_сим']['среднее']}, "
+          f"выше предела {report['сера_сим']['доля выше предела']:.0%} времени")
+    if report["сера_история"]["среднее"] is not None:
+        print(f"Она же по лаборатории без вмешательства: "
+              f"среднее {report['сера_история']['среднее']}, выше предела "
+              f"{report['сера_история']['доля выше предела']:.0%} времени")
+
+    if report["уставки"]:
+        print("\nЧто система сделала с уставками:")
+        table = pd.DataFrame(report["уставки"]).T
+        print(table.to_string())
+        print("\n«Смен направления» — сколько раз система передумала и повела "
+              "уставку в другую сторону. Много смен — раскачка контура.")
+
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    REPORT.write_text(json.dumps({
+        "период": [str(lo), str(hi)], "шаг": args.every, "tau_hours": args.tau,
+        "итог": report,
+        "шаги": [{"ts": str(s.ts), "исход": s.outcome,
+                  "сера": round(s.sulfur_sim, 3),
+                  "сера_история": None if s.sulfur_hist is None else round(s.sulfur_hist, 3),
+                  "смещения": {k: round(v, 3) for k, v in s.offsets.items()},
+                  "шаг": {k: round(v, 3) for k, v in s.moved.items()}}
+                 for s in steps],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

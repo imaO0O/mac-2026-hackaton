@@ -259,8 +259,16 @@ class ReliabilityAgent:
         return float(medium), float(high)
 
     def severity_series(self, frame: pd.DataFrame,
-                        anomaly_frame: pd.DataFrame | None = None) -> pd.Series:
-        """Severity по всей истории — тем же взвешиванием, что и для одного среза."""
+                        anomaly_frame: pd.DataFrame | None = None,
+                        with_factors: bool = False):
+        """Severity по всей истории — тем же взвешиванием, что и для одного среза.
+
+        ``with_factors=True`` возвращает ``(severity, факторы)``. Это нужно
+        бэктесту: раньше он считал severity сам, по четырём факторам из шести —
+        без наработки катализатора и без аномальности, то есть без четверти веса,
+        — и при этом писал в отчёт «тот же расчёт, что в агенте». Числа в отчёте
+        описывали индекс, которым система не пользуется.
+        """
         factors = pd.DataFrame(index=frame.index)
         for key, column in (("wabt", "wabt"), ("dp_r202", self.DP_TAG),
                             ("furnace", self.FURNACE_TAG)):
@@ -284,7 +292,8 @@ class ReliabilityAgent:
         weights = pd.Series({k: self.WEIGHTS[k] for k in factors.columns})
         weighted = (factors * weights).sum(axis=1, min_count=1)
         norm = factors.notna().mul(weights, axis=1).sum(axis=1)
-        return (weighted / norm.where(norm > 0)).clip(0.0, 1.0)
+        severity = (weighted / norm.where(norm > 0)).clip(0.0, 1.0)
+        return (severity, factors) if with_factors else severity
 
     # ------------------------------------------------------------------ #
     def _ramp_at(self, ts) -> float | None:

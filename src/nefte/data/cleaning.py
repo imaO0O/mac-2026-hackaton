@@ -88,7 +88,14 @@ def clean_telemetry(df: pd.DataFrame, unit: str = "avt",
                     drop_dead: bool = True,
                     mask_frozen: bool = True,
                     nonnegative: list[str] | None = None) -> tuple[pd.DataFrame, CleaningReport]:
-    """Полная очистка телеметрии.
+    """Очистка телеметрии с текстовым отчётом.
+
+    .. warning::
+       Рабочий путь очистки в системе один — ``data.validity.SignalValidity``:
+       он же строит срез оператора, он же матрицу признаков. Эта функция осталась
+       для разбора данных и отчётов, где нужен ``CleaningReport``. Не подставляйте
+       её в конвейер: две реализации одного правила разъезжаются, и в прошлый раз
+       разъехались на 0.9 % значений АВТ.
 
     Parameters
     ----------

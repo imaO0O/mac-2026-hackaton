@@ -168,6 +168,8 @@ class OptimizerAgent:
         self.seed = int(self.cfg["optimization"]["random_seed"])
         # причины отсева последнего прогона — оркестратор объясняет ими отказ
         self._last_violations: list[str] = []
+        # требуемый запас по неопределённости с последнего прогона
+        self._required_margin: float = SAFETY_SIGMAS * 1.7
         # оценённый вариант «ничего не делать»: нужен как точка отсчёта даже тогда,
         # когда сам он недопустим (текущий режим уже у предела)
         self._last_hold: Candidate | None = None
@@ -292,6 +294,8 @@ class OptimizerAgent:
         interval = quality.intervals.get("product_sulfur_mgkg")
         sigma = (interval[1] - interval[0]) / (2 * 1.96) if interval else 1.7
         margin = SAFETY_SIGMAS * float(sigma)
+        # запас, дальше которого улучшать качество бессмысленно: он нужен ранжированию
+        self._required_margin = margin
 
         # прогноз для «ничего не делать» — точка отсчёта: если текущий режим уже
         # близок к пределу, отказываться от улучшающего действия неправильно
@@ -363,20 +367,59 @@ class OptimizerAgent:
 
         # `or limit` здесь был бы ошибкой того же рода, что и в блендинге: прогноз
         # ровно 0.0 — валидное число, а не «нет прогноза».
+        #
+        # Запас НАСЫЩАЕТСЯ: как только прогноз ушёл ниже предела на требуемый запас
+        # по неопределённости, дальнейшее углубление очистки ценности не имеет.
+        # Без насыщения критерий качества всегда тянет «ещё чище», и в замкнутом
+        # контуре система шаг за шагом упирала режим в предел допустимого дрейфа:
+        # T5 и T11 уходили на +8 °C, а прогноз серы — к нулю (docs/HARD_CHECKS.md §7).
+        # Поштучно каждый шаг был безопасен, а последовательность — нет.
+        required = getattr(self, "_required_margin", SAFETY_SIGMAS * 1.7)
+
         def _margin(c: Candidate) -> float:
             value = c.predicted_quality.get("product_sulfur_mgkg")
-            return 0.0 if value is None else limit - float(value)
+            if value is None:
+                return 0.0
+            return min(limit - float(value), float(required))
 
         quality_margin = norm([_margin(c) for c in feas])
         throughput = norm([c.throughput or 0.0 for c in feas])
         energy = norm([c.energy_proxy or 0.0 for c in feas])
         severity = norm([c.severity_index or 0.0 for c in feas])
 
+        # Подавление воздействия: при прочих равных меньшее вмешательство лучше.
+        # Стандартный приём промышленных регуляторов (move suppression), и здесь он
+        # нужен по конкретной причине: в замкнутом контуре без него система шаг за
+        # шагом уводила уставки в упор допустимого дрейфа и начинала рыскать —
+        # каждый шаг сам по себе разумен, а последовательность нет
+        # (docs/HARD_CHECKS.md §7).
+        steps = self.cfg["limits"]["max_step_per_cycle"]
+
+        def _effort(c: Candidate) -> float:
+            """Размер воздействия в долях разрешённого шага: теги несравнимы в единицах."""
+            total = 0.0
+            for tag, delta in c.deltas.items():
+                if abs(delta) < 1e-9:
+                    continue
+                if tag.startswith("T"):
+                    scale = float(steps["temperature_c"])
+                elif tag.startswith("P"):
+                    scale = float(steps["pressure_mpa"])
+                else:
+                    base = abs(c.moves.get(tag, 0.0) - delta)
+                    scale = max(base * float(steps["flow_rel"]), 1e-6)
+                total += abs(delta) / scale
+            return total
+
+        effort = norm([_effort(c) for c in feas])
+        move_weight = float(w.get("move_penalty", 0.0))
+
         for i, c in enumerate(feas):
             c.score = float(w["quality_margin"] * quality_margin[i]
                             + w["throughput"] * throughput[i]
                             - w["energy_proxy"] * energy[i]
-                            - w["severity"] * severity[i])
+                            - w["severity"] * severity[i]
+                            - move_weight * effort[i])
 
         # Парето: максимизируем запас и выпуск, минимизируем энергию и тяжесть.
         # Сравниваем не точные числа, а округлённые до PARETO_EPS доли диапазона:

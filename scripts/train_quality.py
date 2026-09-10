@@ -84,9 +84,13 @@ def main() -> int:
     print(f"      источник вероятности: {src}; PR-AUC "
           f"{ {k: round(v, 3) for k, v in getattr(model, 'risk_source_scores', {}).items()} }, "
           f"разброс { {k: round(v, 3) for k, v in getattr(model, 'risk_source_spreads', {}).items()} }")
-    thr = model.select_alarm_threshold(*parts["val"])
+    thr = model.select_alarm_threshold(*parts["val"],
+                                      budget=cfg["quality"].get("alarm_budget"))
+    budget = cfg["quality"].get("alarm_budget")
+    print(f"      порог тревоги {thr:.4f} по бюджету тревог {budget:.0%} "
+          f"(компромисс F1.5 дал бы {model.alarm_threshold_fbeta:.4f})")
     if model.alarm_reliable:
-        print(f"      порог тревоги (F1.5 при precision >= 1.5x базовой частоты): {thr:.2f}")
+        pass
     else:
         print("      ВНИМАНИЕ: на валидации ни один порог не даёт тревогу информативнее "
               "базовой частоты нарушений.")
@@ -97,6 +101,8 @@ def main() -> int:
     report = {"horizon_hours": args.horizon, "n_features": len(model.features),
               "monotone": model.monotone,
               "sigma_scale": model.sigma_scale, "alarm_threshold": model.alarm_threshold,
+              "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
+              "alarm_budget": cfg["quality"].get("alarm_budget"),
               "splits": {}}
     for name in ("train", "val", "test"):
         Xp, yp = parts[name]

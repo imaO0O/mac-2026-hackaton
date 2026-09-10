@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -503,3 +505,38 @@ def test_kinetic_effect_is_declared_as_physics_not_measurement():
     rec = system.run(make_state(lims=(9.5, 1.0), pak=(9.6, 0.1)))
     if not rec.abstained:
         assert "кинетике" in rec.explanation and "допущение" in rec.explanation
+
+
+# --------------------------------------------------------------------------- #
+# 19. модель и оператор видят ОДНИ И ТЕ ЖЕ данные
+# --------------------------------------------------------------------------- #
+
+def test_training_and_serving_clean_data_the_same_way():
+    """Было: два пути очистки. Модель училась на одних данных, оператор видел другие.
+
+    В обучающем пути отрицательные расходы не маскировались, а вердикты по тегам
+    не соблюдались вовсе. Расхождение доходило до 0.9 % значений АВТ и задевало
+    ht:Q21 — самый значимый признак модели.
+    """
+    import nefte.models.dataset as dataset
+    from nefte.data.validity import SignalValidity
+
+    idx = pd.date_range("2024-01-01", periods=300, freq="10min", name="date")
+    raw = pd.DataFrame({"F7": np.r_[np.full(150, 5.0), np.full(150, -5.0)],
+                        "T1": np.linspace(300, 320, 300)}, index=idx)
+    cfg = {"telemetry": {"sentinel_values": [307.0], "frozen_min_samples": 10_000,
+                         "dead_tags": [],
+                         "tag_verdicts": {"avt:T1": {"status": "do_not_use",
+                                                     "reason": "проверка"}}},
+           "split": {"train": ["2024-01-01", "2024-01-01 12:00"]}}
+
+    clean = SignalValidity.build(raw, unit="avt", cfg=cfg).clean
+    # вердикт соблюдён кодом, а не договорённостью
+    assert "T1" not in clean.columns
+    # отрицательные расходы замаскированы
+    assert clean["F7"].isna().iloc[200]
+
+    # и матрица признаков строится ровно этой же функцией
+    source = pathlib.Path(dataset.__file__).read_text(encoding="utf-8")
+    assert "SignalValidity.build" in source
+    assert "clean_telemetry(" not in source

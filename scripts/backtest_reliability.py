@@ -20,48 +20,50 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from nefte.agents.reliability import ReliabilityAgent
-from nefte.models.regime import FEED, RECYCLE_GAS  # noqa: E402
-from nefte.data.loaders import load_telemetry  # noqa: E402
+from nefte.agents.reliability import ReliabilityAgent, regime_anomaly_frame
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
-from nefte.data.loaders import lims_series, load_pak  # noqa: E402
+from nefte.data.loaders import (  # noqa: E402
+    lims_series,
+    load_pak,
+    load_telemetry,  # noqa: E402
+)
 from nefte.data.validity import analyzer_health  # noqa: E402
+from nefte.models.regime import FEED, RECYCLE_GAS  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 
 
 def severity_series(agent: ReliabilityAgent, avt: pd.DataFrame, ht: pd.DataFrame,
                     freq: str = "1h") -> pd.DataFrame:
-    """Векторный расчёт severity по всей истории — тот же расчёт, что в агенте."""
+    """Severity по всей истории — расчётом САМОГО агента, а не копией.
+
+    Здесь была вторая реализация, считавшая четыре фактора из шести: без наработки
+    катализатора и без нетипичности режима, то есть без четверти веса. Отчёт при
+    этом утверждал, что расчёт тот же. Теперь вызывается метод агента, и разойтись
+    им больше негде.
+    """
     temps = [t for t in agent.REACTOR_TEMPS if t in ht.columns]
     grid = ht.resample(freq, label="right", closed="right").last()
     grid_avt = avt.resample(freq, label="right", closed="right").last()
 
-    factors = pd.DataFrame(index=grid.index)
+    frame = pd.DataFrame(index=grid.index)
     if temps:
-        factors["wabt"] = grid[temps].mean(axis=1).map(
-            lambda v: agent.norms.normalize("wabt", None if pd.isna(v) else float(v)))
+        frame["wabt"] = grid[temps].mean(axis=1)
     if agent.DP_TAG in grid.columns:
-        factors["dp_r202"] = grid[agent.DP_TAG].map(
-            lambda v: agent.norms.normalize(agent.DP_TAG, None if pd.isna(v) else float(v)))
+        frame[agent.DP_TAG] = grid[agent.DP_TAG]
     if agent.FURNACE_TAG in grid_avt.columns:
-        factors["furnace"] = grid_avt[agent.FURNACE_TAG].map(
-            lambda v: agent.norms.normalize(agent.FURNACE_TAG, None if pd.isna(v) else float(v)))
-    if agent.ramp_series is not None:
-        factors["ramp"] = agent.ramp_series.resample(
-            freq, label="right", closed="right").max().clip(0, 1)
+        frame[agent.FURNACE_TAG] = grid_avt[agent.FURNACE_TAG]
 
-    weights = pd.Series({k: agent.WEIGHTS[k] for k in factors.columns})
-    mask = factors.notna()
-    total = mask.mul(weights, axis=1).sum(axis=1)
-    severity = (factors.fillna(0).mul(weights, axis=1).sum(axis=1) / total.replace(0, np.nan))
-    factors["severity"] = severity.clip(0, 1)
+    anomaly_frame = (regime_anomaly_frame(avt, ht)
+                     .resample(freq, label="right", closed="right").last())
+    severity, factors = agent.severity_series(frame, anomaly_frame, with_factors=True)
+    factors = factors.copy()
+    factors["severity"] = severity
     return factors
 
 

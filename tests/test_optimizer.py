@@ -99,12 +99,40 @@ def test_guaranteed_flag_separates_margin_from_improvement():
     assert flags == sorted(flags, reverse=True)
 
 
-def test_ranking_prefers_quality_margin():
+def test_ranking_prefers_quality_margin_until_it_is_enough():
+    """Запас по качеству ценен ДО требуемого, дальше решают выпуск и нагрузка.
+
+    Раньше критерий качества всегда тянул «ещё чище», и в замкнутом контуре
+    система шаг за шагом уводила уставки в упор допустимого дрейфа: поштучно
+    каждый шаг разумен, а последовательность — нет. Теперь запас насыщается.
+    """
     state, quality, reliability = _assessments()
-    ranked = _agent().propose(state, quality, reliability)
-    best, worst = ranked[0], ranked[-1]
-    assert (best.predicted_quality["product_sulfur_mgkg"]
-            <= worst.predicted_quality["product_sulfur_mgkg"] + 1e-9)
+    agent = _agent()
+    ranked = agent.propose(state, quality, reliability)
+    limit = agent.cfg["spec"]["product_sulfur_mgkg"]["max"]
+    required = agent._required_margin
+
+    # выбранный вариант обязан иметь достаточный запас…
+    best = ranked[0].predicted_quality["product_sulfur_mgkg"]
+    assert best <= limit - required + 1e-9
+    # …но не обязан быть самым глубоким: за пределом требуемого запаса
+    # решают выпуск, энергия и нагрузка на оборудование
+    deepest = min(c.predicted_quality["product_sulfur_mgkg"] for c in ranked)
+    assert deepest <= best
+
+
+def test_deeper_is_better_while_the_margin_is_not_reached():
+    """Пока запаса не хватает, глубже — лучше: насыщение не должно это ломать."""
+    state, quality, reliability = _assessments()
+    agent = _agent()
+    ranked = agent.propose(state, quality, reliability)
+    limit = agent.cfg["spec"]["product_sulfur_mgkg"]["max"]
+    required = agent._required_margin
+    short = [c for c in ranked if c.predicted_quality["product_sulfur_mgkg"]
+             > limit - required]
+    if len(short) > 1:
+        values = [c.predicted_quality["product_sulfur_mgkg"] for c in short]
+        assert values == sorted(values)
 
 
 def test_pareto_front_is_subset_and_nonempty():

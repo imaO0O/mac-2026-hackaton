@@ -100,6 +100,26 @@ def pick_alarm_threshold(risk, over, beta: float = 1.5,
     return best, True
 
 
+def pick_threshold_for_budget(risk, budget: float) -> float:
+    """Порог, при котором тревога срабатывает не чаще, чем на доле ``budget`` моментов.
+
+    Зачем он нужен рядом с F-beta. Порог по F-beta — это компромисс, который модель
+    выбирает сама, и у разных моделей он даёт РАЗНУЮ частоту вмешательств: у
+    бустинга получилось 30 % моментов, у нейросети 60 %. Сравнивать их после этого
+    нельзя: та, что кричит вдвое чаще, поймает больше превышений просто поэтому.
+
+    Бюджет тревог задаёт рабочую точку явно и одинаково для всех моделей, а сам он
+    — решение технолога («сколько вмешательств в спокойный режим мы готовы
+    терпеть»), а не свойство данных. Поэтому он вынесен в конфиг и помечен
+    допущением.
+    """
+    risk = np.asarray(risk, dtype=float)
+    if len(risk) == 0:
+        return 0.5
+    budget = float(min(max(budget, 1e-3), 1.0))
+    return float(np.quantile(risk, 1.0 - budget))
+
+
 def interval_metrics(pred: pd.DataFrame, y: pd.Series, risk: pd.Series,
                      limit: float, alarm_threshold: float,
                      risk_thresholds: tuple[float, ...] = (0.2, 0.5)) -> dict:
@@ -171,6 +191,8 @@ class SulfurModel:
     # можно ли вообще доверять тревоге: False, если ни один порог на валидации
     # не даёт precision заметно выше базовой частоты нарушений
     alarm_reliable: bool = True
+    # порог, который выбрал бы компромисс F-beta — оставляем в отчёте для сравнения
+    alarm_threshold_fbeta: float | None = None
     # зашивать ли в модель физическое направление отклика
     monotone: bool = True
     metrics: dict = field(default_factory=dict)
@@ -336,7 +358,8 @@ class SulfurModel:
         return None if row is None else float(self.predict_risk(row).iloc[0])
 
     def select_alarm_threshold(self, X_val: pd.DataFrame, y_val: pd.Series,
-                               beta: float = 1.5, min_lift: float = 1.5) -> float:
+                               beta: float = 1.5, min_lift: float = 1.5,
+                               budget: float | None = None) -> float:
         """Порог вероятности, при котором объявляем риск нарушения.
 
         Два требования одновременно:
@@ -351,10 +374,15 @@ class SulfurModel:
         # худший из вариантов: она нарушает требование ТЗ не создавать лишних
         # воздействий. Тогда pick_alarm_threshold возвращает прозрачное правило
         # «сигнал только если сам прогноз выше предела» (P > 0.5 по интервалу).
+        risk = self.predict_risk(X_val).to_numpy()
         threshold, reliable = pick_alarm_threshold(
-            self.predict_risk(X_val).to_numpy(),
-            (y_val > self.limit).to_numpy(), beta=beta, min_lift=min_lift)
-        self.alarm_threshold, self.alarm_reliable = threshold, reliable
+            risk, (y_val > self.limit).to_numpy(), beta=beta, min_lift=min_lift)
+        self.alarm_threshold_fbeta = threshold
+        self.alarm_reliable = reliable
+        # бюджет тревог, если задан, важнее компромисса F-beta: рабочая точка —
+        # решение технолога, а не модели
+        self.alarm_threshold = (threshold if budget is None
+                                else pick_threshold_for_budget(risk, budget))
         return self.alarm_threshold
 
     def discrimination(self, X: pd.DataFrame, y: pd.Series) -> dict:
@@ -429,7 +457,8 @@ class SulfurModel:
             model.save_model(str(path / f"{name}.cbm"))
         if self.clf is not None:
             self.clf.save_model(str(path / "risk.cbm"))
-        meta = {"horizon_hours": self.horizon_hours, "features": self.features,
+        meta = {"alarm_threshold_fbeta": self.alarm_threshold_fbeta,
+                "horizon_hours": self.horizon_hours, "features": self.features,
                 "metrics": self.metrics, "seed": self.seed,
                 "sigma_scale": self.sigma_scale,
                 "alarm_threshold": self.alarm_threshold, "limit": self.limit,
@@ -455,6 +484,7 @@ class SulfurModel:
                   if meta.get("risk_calibration") else None,
                   risk_source=meta.get("risk_source", "classifier"),
                   alarm_reliable=meta.get("alarm_reliable", True),
+                  alarm_threshold_fbeta=meta.get("alarm_threshold_fbeta"),
                   monotone=meta.get("monotone", True))
         for name in ("q50", "q10", "q90"):
             model = CatBoostRegressor()
