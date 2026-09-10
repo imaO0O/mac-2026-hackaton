@@ -7,6 +7,7 @@ import pytest
 
 from nefte.models.kinetics import arrhenius_factor, make_kinetic_surrogate
 from nefte.models.regime import (
+    T6_RESPONSE,
     apply_moves_to_rows,
     history_features,
     instant_features,
@@ -71,10 +72,37 @@ def test_apply_moves_recomputes_derived_features():
 
     moved = apply_moves_to_rows(matrix, {"T5": 2.0}, relative=True)
     assert moved["ht_T5"].iloc[0] == pytest.approx(372.0)
-    assert moved["reg_wabt"].iloc[0] == pytest.approx(365.0 + 2.0 / 3)
     assert moved["reg_kinetic"].iloc[0] > matrix["reg_kinetic"].iloc[0]
     # часовое среднее сдвигается вместе с уставкой: она удерживается
     assert moved["ht_T5_mean6"].iloc[0] == pytest.approx(372.0)
+
+
+def test_wabt_accounts_for_the_temperature_that_follows_t5():
+    """Раньше здесь стояло 2/3 градуса, и это было ошибкой на 40 %.
+
+    WABT — среднее по T5, T6 и T11. Двигают уставками только T5 и T11; T6 (Р-202)
+    никто не задаёт, она отвечает на подъём T5 сама, и отвечает измеримо:
+    ΔT6 = 0.72·ΔT5. Пока это не учитывалось, шаг +2 °C по T5 давал прибавку WABT
+    в 0.67 °C вместо 1.15 — суррогат «режим → качество» и критерий надёжности
+    оба недооценивали эффект подъёма температуры.
+    """
+    ht = _ht(n=50)
+    matrix = pd.concat([ht.add_prefix("ht_"), regime_features(ht)], axis=1)
+    moved = apply_moves_to_rows(matrix, {"T5": 2.0}, relative=True)
+
+    expected = 365.0 + (2.0 + T6_RESPONSE["T5"] * 2.0) / 3
+    assert moved["reg_wabt"].iloc[0] == pytest.approx(expected)
+    # T6 в признаках тоже поднялась: её значение уходит и в другие производные
+    assert moved["ht_T6"].iloc[0] == pytest.approx(
+        matrix["ht_T6"].iloc[0] + T6_RESPONSE["T5"] * 2.0)
+
+
+def test_explicit_t6_wins_over_the_derived_one():
+    """Если T6 задана явно, выводить её из T5 нельзя — это подмена уставки."""
+    ht = _ht(n=50)
+    matrix = pd.concat([ht.add_prefix("ht_"), regime_features(ht)], axis=1)
+    moved = apply_moves_to_rows(matrix, {"T5": 2.0, "T6": 400.0})
+    assert moved["ht_T6"].iloc[0] == pytest.approx(400.0)
 
 
 def test_apply_moves_leaves_history_features_alone():

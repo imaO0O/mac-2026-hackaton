@@ -241,6 +241,27 @@ def apply_moves_to_rows(rows: pd.DataFrame, moves: dict[str, float],
     if not raw:
         return out
 
+    # T6 никто не задаёт уставкой: температура Р-202 — следствие того, что сделали
+    # с T5 и T11. А в признаки режима она входит через WABT (среднее по трём
+    # реакторным температурам), и без пересчёта WABT отвечала на шаг +2 °C по T5
+    # прибавкой 0.67 °C вместо 1.15 — то есть суррогат «режим → качество»
+    # недооценивал эффект подъёма температуры на 40 %. Это главный путь принятия
+    # решения, так что ошибка шла прямо в выбор варианта.
+    #
+    # Пересчитываем только если T6 не задана явно и есть чем: связь измерена
+    # (T6_RESPONSE), но она про ИЗМЕНЕНИЕ, а не про уровень.
+    if "T6" in raw and "T6" not in moves:
+        shift = 0.0
+        for tag, gain in T6_RESPONSE.items():
+            if tag in moves and tag in raw:
+                base = rows[f"{prefix}{tag}"].astype("float64")
+                shift = shift + gain * (raw[tag] - base)
+        if not isinstance(shift, float):
+            raw["T6"] = raw["T6"] + shift
+            column = f"{prefix}T6"
+            if column in out.columns:
+                out[column] = raw["T6"].astype(out[column].dtype)
+
     recomputed = instant_features(pd.DataFrame(raw, index=out.index))
     for column in recomputed.columns:
         if column in out.columns:
