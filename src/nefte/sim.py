@@ -212,9 +212,12 @@ def summarize(steps: list[SimStep], limit: float) -> dict:
         per_tag[tag] = {
             "суммарно, ед.": round(float(series.abs().sum()), 2),
             "итоговое смещение": round(float(steps[-1].offsets.get(tag, 0.0)), 2),
-            # смена знака = система передумала; много смен = раскачка
-            "смен направления": int((signs.diff().fillna(0) != 0).sum() - 1)
-            if len(signs) else 0,
+            # смена знака = система передумала; много смен = раскачка.
+            # fillna(0) уже исключает первое воздействие (сравнивать его не с чем),
+            # поэтому вычитать единицу не нужно: с ней одно-единственное движение
+            # давало «−1 смена направления».
+            "смен направления": (int((signs.diff().fillna(0) != 0).sum())
+                                 if len(signs) else 0),
         }
 
     sim = frame["сера"].dropna()
