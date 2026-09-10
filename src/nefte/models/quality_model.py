@@ -47,6 +47,104 @@ PHYSICS_MONOTONE: dict[str, int] = {
 Z90 = 1.2815515655446004
 
 
+def conformal_sigma_scale(pred: pd.DataFrame, y: pd.Series, target: float = 0.8) -> float:
+    """Во сколько раз растянуть σ, чтобы покрытие на валидации совпало с номиналом.
+
+    Квантильные модели — и бустинг, и нейросеть — систематически дают слишком
+    узкий интервал на новых данных. Поправка берётся из распределения нормированной
+    ошибки |y − q50| / σ. Оркестратор считает риск по σ, поэтому её честность важнее
+    точности точечного прогноза.
+    """
+    norm_err = ((pred["q50"] - y).abs() / pred["sigma"]).replace([np.inf], np.nan).dropna()
+    if norm_err.empty:
+        return 1.0
+    return float(max(norm_err.quantile(target) / Z90, 0.1))
+
+
+def interval_risk(pred: pd.DataFrame, limit: float) -> pd.Series:
+    """P(значение > limit) по прогнозу и σ в нормальном приближении."""
+    return pd.Series(1 - _normal_cdf((limit - pred["q50"]) / pred["sigma"]),
+                     index=pred.index)
+
+
+def pick_alarm_threshold(risk, over, beta: float = 1.5,
+                         min_lift: float = 1.5) -> tuple[float, bool]:
+    """Порог тревоги по валидации: максимум F-beta при достаточной точности.
+
+    Возвращает ``(порог, надёжна ли тревога)``. Второе значение False означает,
+    что ни один порог не даёт precision выше ``min_lift`` от базовой частоты
+    нарушений: тогда единственное честное правило — сигналить, только если сам
+    точечный прогноз выше предела.
+    """
+    risk = np.asarray(risk, dtype=float)
+    over = np.asarray(over, dtype=bool)
+    if len(risk) == 0 or over.sum() == 0:
+        return 0.5, False
+    base_rate = float(over.mean())
+    grid = np.unique(np.quantile(risk, np.linspace(0.40, 0.99, 60)).round(4))
+
+    best, best_f = None, -1.0
+    for thr in grid:
+        alarm = risk > thr
+        tp = int((alarm & over).sum())
+        fp = int((alarm & ~over).sum())
+        fn = int((~alarm & over).sum())
+        if tp == 0:
+            continue
+        precision, recall = tp / (tp + fp), tp / (tp + fn)
+        f = (1 + beta ** 2) * precision * recall / (beta ** 2 * precision + recall)
+        if f > best_f and precision >= min_lift * base_rate:
+            best, best_f = float(thr), f
+    if best is None:
+        return 0.5, False
+    return best, True
+
+
+def interval_metrics(pred: pd.DataFrame, y: pd.Series, risk: pd.Series,
+                     limit: float, alarm_threshold: float,
+                     risk_thresholds: tuple[float, ...] = (0.2, 0.5)) -> dict:
+    """Точность, покрытие интервала и качество тревоги. Общее для всех моделей.
+
+    Решение оператору принимается по ВЕРОЯТНОСТИ превышения, а не по точечному
+    прогнозу, поэтому precision/recall считаются на нескольких порогах.
+    """
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    err = pred["q50"] - y
+    half = Z90 * pred["sigma"]
+    inside = ((y >= pred["q50"] - half) & (y <= pred["q50"] + half)).mean()
+    over_true = y > limit
+
+    out = {
+        "n": int(len(y)),
+        "MAE": float(err.abs().mean()),
+        "RMSE": float(np.sqrt((err ** 2).mean())),
+        "bias": float(err.mean()),
+        "coverage_80": float(inside),
+        "n_over_limit": int(over_true.sum()),
+        "alarm_threshold": float(alarm_threshold),
+    }
+    for thr in tuple(risk_thresholds) + (round(float(alarm_threshold), 2),):
+        alarm = risk > thr
+        tp = int((alarm & over_true).sum())
+        fp = int((alarm & ~over_true).sum())
+        fn = int((~alarm & over_true).sum())
+        out[f"precision@{thr}"] = float(tp / (tp + fp)) if tp + fp else None
+        out[f"recall@{thr}"] = float(tp / (tp + fn)) if tp + fn else None
+
+    if over_true.nunique() > 1:
+        out["roc_auc"] = float(roc_auc_score(over_true.astype(int), risk))
+        out["pr_auc"] = float(average_precision_score(over_true.astype(int), risk))
+    else:
+        out["roc_auc"] = out["pr_auc"] = None
+    out["base_rate"] = float(over_true.mean())
+
+    key = round(float(alarm_threshold), 2)
+    out["spec_precision"] = out.get(f"precision@{key}")
+    out["spec_recall"] = out.get(f"recall@{key}")
+    return out
+
+
 @dataclass
 class SulfurModel:
     """Виртуальный анализатор серы, приведённый к лабораторной шкале."""
@@ -181,9 +279,7 @@ class SulfurModel:
                 logit = np.log(np.clip(score, 1e-6, 1 - 1e-6) / (1 - np.clip(score, 1e-6, 1 - 1e-6)))
                 score = pd.Series(1 / (1 + np.exp(-(a * logit + b))), index=X.index)
             return score
-        pred = self.predict_frame(X)
-        return pd.Series(1 - _normal_cdf((self.limit - pred["q50"]) / pred["sigma"]),
-                         index=X.index)
+        return interval_risk(self.predict_frame(X), self.limit)
 
     def select_risk_source(self, X_val: pd.DataFrame, y_val: pd.Series,
                            min_spread: float = 0.05) -> str:
@@ -251,42 +347,14 @@ class SulfurModel:
           «тревога всегда», а ТЗ прямо требует не создавать лишних воздействий
           в устойчивом режиме.
         """
-        risk = self.predict_risk(X_val).to_numpy()
-        over = (y_val > self.limit).to_numpy()
-        base_rate = float(over.mean())
-
-        # кандидаты берём из самого распределения вероятностей: после калибровки
-        # они лежат в узком диапазоне, и фиксированная сетка 0.05…0.95 промахивается
-        grid = np.unique(np.quantile(risk, np.linspace(0.40, 0.99, 60)).round(4))
-
-        def _score(thr: float) -> tuple[float, float, float]:
-            alarm = risk > thr
-            tp = int((alarm & over).sum())
-            fp = int((alarm & ~over).sum())
-            fn = int((~alarm & over).sum())
-            if tp == 0:
-                return -1.0, 0.0, 0.0
-            precision, recall = tp / (tp + fp), tp / (tp + fn)
-            f = (1 + beta ** 2) * precision * recall / (beta ** 2 * precision + recall)
-            return f, precision, recall
-
-        best, best_f = None, -1.0
-        for thr in grid:
-            f, precision, _ = _score(float(thr))
-            if f > best_f and precision >= min_lift * base_rate:
-                best, best_f = float(thr), f
-        if best is not None:
-            self.alarm_reliable = True
-            self.alarm_threshold = float(best)
-            return self.alarm_threshold
-
-        # Ни один порог не даёт информативной тревоги: превышения на этом горизонте
-        # предсказываются на уровне базовой частоты. Тогда «тревога всегда» — худший
-        # из возможных вариантов, она нарушает требование ТЗ не создавать лишних
-        # воздействий. Переходим на прозрачное правило: сигнал только если сам
-        # точечный прогноз выше предела (P > 0.5 по интервалу).
-        self.alarm_reliable = False
-        self.alarm_threshold = 0.5
+        # Если ни один порог не даёт информативной тревоги, «тревога всегда» —
+        # худший из вариантов: она нарушает требование ТЗ не создавать лишних
+        # воздействий. Тогда pick_alarm_threshold возвращает прозрачное правило
+        # «сигнал только если сам прогноз выше предела» (P > 0.5 по интервалу).
+        threshold, reliable = pick_alarm_threshold(
+            self.predict_risk(X_val).to_numpy(),
+            (y_val > self.limit).to_numpy(), beta=beta, min_lift=min_lift)
+        self.alarm_threshold, self.alarm_reliable = threshold, reliable
         return self.alarm_threshold
 
     def discrimination(self, X: pd.DataFrame, y: pd.Series) -> dict:
@@ -310,11 +378,7 @@ class SulfurModel:
         считает риск по σ, поэтому её честность важнее точности точечного прогноза.
         """
         self.sigma_scale = 1.0
-        pred = self.predict_frame(X_val)
-        norm_err = ((pred["q50"] - y_val).abs() / pred["sigma"]).replace([np.inf], np.nan).dropna()
-        if norm_err.empty:
-            return self.sigma_scale
-        self.sigma_scale = float(max(norm_err.quantile(target) / Z90, 0.1))
+        self.sigma_scale = conformal_sigma_scale(self.predict_frame(X_val), y_val, target)
         return self.sigma_scale
 
     def _row_for(self, state: ProcessState) -> pd.DataFrame | None:
@@ -347,37 +411,9 @@ class SulfurModel:
         прогнозу, поэтому precision/recall считаем на нескольких порогах тревоги:
         при 0.5 модель почти всегда молчит, рабочий порог заметно ниже.
         """
-        pred = self.predict_frame(X)
-        err = pred["q50"] - y
-        half = Z90 * pred["sigma"]
-        inside = ((y >= pred["q50"] - half) & (y <= pred["q50"] + half)).mean()
-
-        over_true = y > limit
-        risk = self.predict_risk(X)
-
-        out = {
-            "risk_source": self.risk_source,
-            "alarm_reliable": self.alarm_reliable,
-            "n": int(len(y)),
-            "MAE": float(err.abs().mean()),
-            "RMSE": float(np.sqrt((err ** 2).mean())),
-            "bias": float(err.mean()),
-            "coverage_80": float(inside),          # ожидаем ~0.8
-            "n_over_limit": int(over_true.sum()),
-        }
-        thresholds = tuple(risk_thresholds) + (round(self.alarm_threshold, 2),)
-        out["alarm_threshold"] = self.alarm_threshold
-        for thr in thresholds:
-            alarm = risk > thr
-            tp = int((alarm & over_true).sum())
-            fp = int((alarm & ~over_true).sum())
-            fn = int((~alarm & over_true).sum())
-            out[f"precision@{thr}"] = float(tp / (tp + fp)) if tp + fp else None
-            out[f"recall@{thr}"] = float(tp / (tp + fn)) if tp + fn else None
-        out.update(self.discrimination(X, y))
-        key = round(self.alarm_threshold, 2)
-        out["spec_precision"] = out.get(f"precision@{key}")
-        out["spec_recall"] = out.get(f"recall@{key}")
+        out = {"risk_source": self.risk_source, "alarm_reliable": self.alarm_reliable}
+        out.update(interval_metrics(self.predict_frame(X), y, self.predict_risk(X),
+                                    limit, self.alarm_threshold, risk_thresholds))
         return out
 
     # ------------------------------------------------------------------ #
