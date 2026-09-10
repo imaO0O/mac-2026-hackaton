@@ -31,7 +31,7 @@ import pandas as pd
 from nefte.agents.schemas import ProcessState, ReliabilityAssessment
 from nefte.config import load_config
 from nefte.models.anomaly import RegimeAnomalyDetector
-from nefte.models.regime import FEED, RECYCLE_GAS, hours_since_outage
+from nefte.models.regime import FEED, RECYCLE_GAS, hours_since_outage, implied_t6
 
 
 def regime_anomaly_frame(avt: pd.DataFrame, ht: pd.DataFrame) -> pd.DataFrame:
@@ -394,6 +394,17 @@ class ReliabilityAgent:
         ht = {**state.telemetry_ht, **moves}
         avt = {**state.telemetry_avt,
                **{k: v for k, v in moves.items() if k in state.telemetry_avt}}
+
+        # T6 — не уставка, а следствие: оптимизатор двигает T5 и T11, а Р-202
+        # отвечает на это измеренным образом (ΔT6 = 0.72·ΔT5 + 0.18·ΔT11,
+        # models/regime.py). Без пересчёта WABT считалась по СТАРОЙ T6 и занижала
+        # тяжесть режима примерно на 40 %: шаг +2 °C по T5 давал прибавку 0.67 °C
+        # вместо 1.15. Критерий надёжности при этом систематически недооценивал
+        # цену подъёма температуры — то есть работал не в ту сторону, ради которой
+        # он в системе и есть.
+        derived = implied_t6(state.telemetry_ht, moves)
+        if derived is not None:
+            ht["T6"] = derived
 
         temps = [ht.get(t) for t in self.REACTOR_TEMPS if ht.get(t) is not None]
         if temps:

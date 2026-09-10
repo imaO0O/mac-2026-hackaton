@@ -69,6 +69,37 @@ def test_raising_reactor_temperature_raises_severity():
     assert hotter > base > cooler
 
 
+def test_severity_accounts_for_the_reactor_temperature_it_cannot_set():
+    """WABT считалась по СТАРОЙ T6 и занижала тяжесть подъёма температуры.
+
+    Оптимизатор двигает T5 и T11, а WABT — среднее по T5, T6 и T11. T6 никто не
+    задаёт уставкой: это температура Р-202, следствие того, что сделали с T5.
+    Пока связь не учитывалась, шаг +2 °C по T5 поднимал WABT на 0.67 °C вместо
+    1.15 — то есть критерий надёжности систематически недооценивал цену подъёма
+    температуры примерно на 40 %. Работал он при этом не в ту сторону, ради
+    которой в системе и нужен.
+
+    Связь измерена: ΔT6 = 0.72·ΔT5 + 0.18·ΔT11 (models/regime.py).
+    """
+    from nefte.models.regime import T6_RESPONSE
+
+    agent = ReliabilityAgent(NORMS)
+    state = make_state()
+    t5 = state.telemetry_ht["T5"]
+    grew = agent.severity_for(state, {"T5": t5 + 2.0}) - agent.severity_for(state, {})
+
+    # то же самое, но с искусственно замороженной связью — так вело себя до правки
+    frozen = dict(T6_RESPONSE)
+    T6_RESPONSE.clear()
+    try:
+        naive = agent.severity_for(state, {"T5": t5 + 2.0}) - agent.severity_for(state, {})
+    finally:
+        T6_RESPONSE.update(frozen)
+
+    assert grew > naive > 0, "учёт отклика T6 обязан УСИЛИВАТЬ реакцию severity"
+    assert grew == pytest.approx(naive * (1 + T6_RESPONSE["T5"]), rel=0.05)
+
+
 def test_severity_falls_back_to_current_without_agent():
     """Без агента надёжности оптимизатор работает, просто критерий не различает."""
     state = make_state()
