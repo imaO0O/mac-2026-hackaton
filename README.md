@@ -85,6 +85,7 @@ python scripts/run_blend_scenarios.py     # десять сценариев «а
 ```bash
 python scripts/check_calibration.py       # честна ли вероятность, по которой решают
 python scripts/check_drift.py             # стареет ли модель и когда переобучать
+python scripts/check_vak_against_lims.py  # формулы справочника против лаборатории
 python scripts/check_cetane.py            # цетановое число: тренд, индекс, цена присадки
 python scripts/find_delays.py             # запаздывание «уставка → сера» по данным
 python scripts/check_tag_meaning.py       # что теги измеряют на самом деле
