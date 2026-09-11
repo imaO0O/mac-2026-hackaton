@@ -89,8 +89,17 @@ python scripts/check_vak_against_lims.py  # формулы справочник�
 python scripts/check_feature_stability.py # устойчив ли отбор признаков к сиду
 python scripts/check_cetane.py            # цетановое число: тренд, индекс, цена присадки
 python scripts/find_delays.py             # запаздывание «уставка → сера» по данным
-python scripts/check_tag_meaning.py       # что теги измеряют на самом деле
+python scripts/check_tag_meaning.py       # что теги измеряют на самом деле (24-2000)
+python scripts/check_avt_formulas.py      # то же для АВТ: сверка формул с лабораторией
+python scripts/check_catalyst_life.py     # дезактивация катализатора и остаток цикла
 ```
+
+Последние две команды закрывают критерий «надёжность оборудования» числами:
+катализатор теряет **0.85 °C/мес** активности (95 % ДИ [0.71, 0.98]), до уровня,
+с которого установку выводили раньше, осталось 16.6 °C, то есть **13–20 месяцев**
+(`docs/CATALYST_LIFE.md`). А четыре формулы справочника, которые «не
+воспроизводятся на выданных тегах», оказались не проблемой тегов: три из них —
+ошибки записи, названные поимённо (`docs/AVT_TAGS.md`).
 
 Жёсткая проверка: «злые» кейсы, тестовый период, замкнутый контур и сравнение
 архитектур (CPU):
@@ -108,7 +117,7 @@ python scripts/train_quality.py --horizon 0 --no-vak   # абляция форм
 
 ```bash
 python scripts/train_sequence.py --arch tcn --window 48 --pretrain  # анализатор серы
-python scripts/train_anomaly_ae.py                                  # аномалии режима
+python scripts/train_anomaly_ae.py                                  # аномалии режима, 3 сида
 python scripts/run_cycle.py --model seq --anomaly ae                # подключить в цикл
 ```
 
@@ -151,6 +160,7 @@ src/nefte/
   models/kinetics.py     кинетический суррогат: уровень от модели, отклик от физики
   models/vak.py          формулы виртуальных анализаторов + проверка правдоподобия
   models/anomaly.py      многомерный детектор аномалий режима (Махаланобис)
+  models/catalyst.py     дезактивация катализатора: нормированная WABT, циклы, ресурс
   models/sequence.py     нейросетевой анализатор серы: TCN/GRU на окне (GPU)
   models/anomaly_ae.py   LSTM-автоэнкодер аномалий режима (GPU)
   agents/reliability.py  агент надёжности: тяжесть режима, ограничения
@@ -173,6 +183,8 @@ scripts/run_simulation.py замкнутый контур: рекомендац�
 scripts/compare_architectures.py сравнение архитектур: что даёт каждый агент
 scripts/train_sequence.py обучение нейросетевого анализатора и сравнение с бустингом
 scripts/train_anomaly_ae.py обучение автоэнкодера и сравнение с Махаланобисом
+scripts/check_catalyst_life.py дезактивация катализатора и остаточный ресурс цикла
+scripts/check_avt_formulas.py формулы АВТ против лаборатории: что сломано и как
 docs/DATA_NOTES.md       разбор данных: ловушки, допущения, окна ← читать первым
 docs/PLAN.md             план на трёх участников
 docs/GPU_SETUP.md        для участника с NVIDIA: что считать на карте и как подключить
@@ -184,6 +196,8 @@ docs/HARD_CHECKS.md      «злые» кейсы и прогон по тесту
 docs/GPU_MODELS.md       нейросети на видеокарте: числа и почему они не в проде
 docs/REGIME_FEATURES.md  признаки режима, монотонные ограничения, кинетика
 docs/VAK_FEATURES.md     формулы справочника как признаки и что с ними не так
+docs/CATALYST_LIFE.md    ресурс катализатора: скорость дезактивации и остаток цикла
+docs/AVT_TAGS.md         теги и формулы АВТ: разбор по значениям и по лаборатории
 tests/                   тесты на утечку из будущего, возраст анализов, отказ
 ```
 
