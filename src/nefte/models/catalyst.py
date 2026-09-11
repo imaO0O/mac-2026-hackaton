@@ -438,3 +438,118 @@ def remaining_by_analogue(frame: pd.DataFrame, cycles: list[Cycle],
             "нижняя граница": cycle.left_censored and day <= 1.0,
         })
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# сравнение циклов на одинаковой наработке
+# --------------------------------------------------------------------------- #
+
+# Полуширина окна, в котором берётся уровень NWABT «на такие-то сутки». Анализы
+# идут примерно раз в сутки, так что ±20 суток — это около сорока точек: хватает
+# на устойчивую медиану и мало по сравнению с длиной цикла.
+LEVEL_WINDOW_DAYS = 20
+
+
+def level_at_runday(frame: pd.DataFrame, cycle: int, day: float,
+                    half_window: int = LEVEL_WINDOW_DAYS, seed: int = 42,
+                    n: int = 4000) -> dict | None:
+    """Уровень активности цикла на заданной наработке, с интервалом.
+
+    Сравнивать циклы по НАКЛОНУ на коротком окне почти бесполезно: интервал
+    наклона по сорока точкам шире самой разницы. Уровень устойчивее — он
+    накапливает всю предысторию цикла, а не последние две недели.
+    """
+    part = frame[(frame["cycle"] == cycle)
+                 & (frame["run_days"] > day - half_window)
+                 & (frame["run_days"] <= day + half_window)]
+    values = part["nwabt"].to_numpy(dtype="float64")
+    if len(values) < 8:
+        return None
+    rng = np.random.default_rng(seed)
+    boots = [float(np.median(rng.choice(values, len(values)))) for _ in range(n)]
+    return {"цикл": cycle, "сутки": round(float(day), 0), "анализов": int(len(values)),
+            "уровень, °C": round(float(np.median(values)), 1),
+            "95% ДИ": [round(float(np.percentile(boots, 2.5)), 1),
+                       round(float(np.percentile(boots, 97.5)), 1)]}
+
+
+def lag_against_reference(frame: pd.DataFrame, cycle: int, reference: int,
+                          days: list[float], half_window: int = LEVEL_WINDOW_DAYS,
+                          seed: int = 42, n: int = 4000) -> list[dict]:
+    """Насколько цикл отстаёт от эталонного на одинаковой наработке.
+
+    Положительное отставание — цикл требует БОЛЬШЕЙ температуры на том же сроке,
+    то есть катализатор слабее. Интервал считается бутстрепом разности медиан:
+    без него разница в пару градусов неотличима от шума лаборатории.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for day in days:
+        pair = {}
+        for name, number in (("эталон", reference), ("цикл", cycle)):
+            part = frame[(frame["cycle"] == number)
+                         & (frame["run_days"] > day - half_window)
+                         & (frame["run_days"] <= day + half_window)]
+            pair[name] = part["nwabt"].to_numpy(dtype="float64")
+        if min(len(v) for v in pair.values()) < 8:
+            continue
+        diff = float(np.median(pair["цикл"]) - np.median(pair["эталон"]))
+        boots = [float(np.median(rng.choice(pair["цикл"], len(pair["цикл"])))
+                       - np.median(rng.choice(pair["эталон"], len(pair["эталон"]))))
+                 for _ in range(n)]
+        low, high = float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
+        rows.append({
+            "сутки": round(float(day), 0),
+            f"цикл {reference}, °C": round(float(np.median(pair["эталон"])), 1),
+            f"цикл {cycle}, °C": round(float(np.median(pair["цикл"])), 1),
+            "отставание, °C": round(diff, 2),
+            "95% ДИ": [round(low, 2), round(high, 2)],
+            "значимо": bool(low > 0 or high < 0),
+        })
+    return rows
+
+
+def remaining_by_lag(frame: pd.DataFrame, cycles: list[Cycle], current: Cycle,
+                     reference: Cycle, rate_c_per_month: float,
+                     half_window: int = LEVEL_WINDOW_DAYS) -> dict | None:
+    """Остаток ресурса через отставание от полностью наблюдённого предшественника.
+
+    Способ отвечает на вопрос иначе, чем ``remaining_by_analogue``, и разница
+    принципиальна. Аналогия сопоставляет циклы по УРОВНЮ активности: «когда
+    предшественник был так же слаб и сколько после этого прожил». Здесь
+    сопоставление по НАРАБОТКЕ: предшественник на том же сроке прожил ещё
+    столько-то, а наш отстаёт на столько-то градусов, то есть на столько-то
+    месяцев наработки — вычитаем.
+
+    Первый способ верен, если ресурс определяется накопленной дезактивацией;
+    второй — если траектория та же, но сдвинутая. Что из этого правда, по двум
+    наблюдённым циклам не решить, поэтому считаем оба и показываем разброс.
+    """
+    if not reference.completed or reference.left_censored:
+        return None
+    day = float(current.days)
+    ours = level_at_runday(frame, current.index, day, half_window)
+    theirs = level_at_runday(frame, reference.index, day, half_window)
+    if ours is None or theirs is None or rate_c_per_month <= 0:
+        return None
+    lag = ours["уровень, °C"] - theirs["уровень, °C"]
+    reference_left = (reference.days - day) / DAYS_IN_MONTH
+    return {
+        "эталонный цикл": reference.index,
+        "наработка, сут": round(day, 0),
+        "эталон прожил ещё, мес": round(reference_left, 1),
+        "отставание, °C": round(lag, 2),
+        "отставание, мес наработки": round(lag / rate_c_per_month, 1),
+        "остаток, мес": round(reference_left - lag / rate_c_per_month, 1),
+    }
+
+
+def local_rate(frame: pd.DataFrame, cycle: int, since_day: float,
+               until_day: float) -> float | None:
+    """Наклон NWABT на участке наработки, °C/мес. None — если точек мало."""
+    part = frame[(frame["cycle"] == cycle) & (frame["run_days"] >= since_day)
+                 & (frame["run_days"] <= until_day)]
+    if len(part) < 20:
+        return None
+    slope = np.polyfit(part["run_days"], part["nwabt"], 1)[0]
+    return float(slope * DAYS_IN_MONTH)

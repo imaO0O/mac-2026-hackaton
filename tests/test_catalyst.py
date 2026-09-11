@@ -15,9 +15,13 @@ import pytest
 from nefte.models.catalyst import (
     RESET_STEP_C,
     Cycle,
+    lag_against_reference,
+    level_at_runday,
+    local_rate,
     normalized_wabt,
     outage_steps,
     remaining_by_analogue,
+    remaining_by_lag,
     sulfur_drift_per_month,
 )
 
@@ -131,3 +135,87 @@ def test_lost_activity_translates_into_rising_sulfur():
     assert 0.5 < drift < 5.0
     # вдвое быстрее теряем активность — вдвое быстрее растёт сера
     assert sulfur_drift_per_month(1.70, 8.0, 9300.0, 365.0) == pytest.approx(2 * drift)
+
+
+def _two_cycles() -> pd.DataFrame:
+    """Два цикла: эталонный выходит на полку, текущий продолжает греться."""
+    days = np.arange(0.0, 200.0, 2.0)
+    reference = pd.DataFrame({
+        "cycle": 1, "run_days": days,
+        # рост до 60-х суток, дальше полка — так вёл себя настоящий цикл 1
+        "nwabt": 355.0 + np.minimum(days, 60.0) * 0.08,
+    }, index=pd.date_range("2024-01-01", periods=len(days), freq="2D"))
+    current = pd.DataFrame({
+        "cycle": 2, "run_days": days,
+        "nwabt": 355.0 + days * 0.08,          # полки нет
+    }, index=pd.date_range("2026-01-01", periods=len(days), freq="2D"))
+    return pd.concat([reference, current])
+
+
+def test_level_at_runday_reports_an_interval_not_just_a_number():
+    frame = _two_cycles()
+    level = level_at_runday(frame, cycle=1, day=100.0, half_window=20)
+    assert level["уровень, °C"] == pytest.approx(359.8, abs=0.2)
+    low, high = level["95% ДИ"]
+    assert low <= level["уровень, °C"] <= high
+
+
+def test_level_at_runday_refuses_to_answer_on_thin_data():
+    """Меньше восьми анализов в окне — ответа нет, а не ответ наугад."""
+    frame = _two_cycles()
+    assert level_at_runday(frame, cycle=1, day=100.0, half_window=1) is None
+
+
+def test_lag_is_called_significant_only_when_the_interval_excludes_zero():
+    """До расхождения траекторий отставание обязано быть незначимым."""
+    frame = _two_cycles()
+    rows = lag_against_reference(frame, cycle=2, reference=1, days=[40.0, 150.0],
+                                 half_window=20)
+    early, late = rows[0], rows[1]
+    assert early["отставание, °C"] == pytest.approx(0.0, abs=0.2)
+    assert not early["значимо"]
+    # на 150-х сутках эталон давно на полке, а текущий всё греется
+    assert late["отставание, °C"] > 5.0
+    assert late["значимо"]
+
+
+def test_remaining_by_lag_subtracts_the_lag_from_what_the_reference_lived():
+    """Способ (г): факт по эталону минус наше отставание, переведённое в месяцы."""
+    frame = _two_cycles()
+    reference = Cycle(index=1, start=pd.Timestamp("2024-01-01"),
+                      end=pd.Timestamp("2025-06-01"), n_points=100, days=500.0,
+                      nwabt_start=355.0, nwabt_end=380.0, rate_c_per_month=1.0,
+                      rate_ci=(0.8, 1.2), completed=True)
+    current = Cycle(index=2, start=pd.Timestamp("2026-01-01"), end=None, n_points=100,
+                    days=150.0, nwabt_start=355.0, nwabt_end=367.0,
+                    rate_c_per_month=2.0, rate_ci=(1.5, 2.5), completed=False)
+    out = remaining_by_lag(frame, [reference, current], current, reference,
+                           rate_c_per_month=1.0)
+    # эталон с 150-х суток прожил ещё 350 суток = 11.5 мес, отставание ~7 °C
+    assert out["эталон прожил ещё, мес"] == pytest.approx(11.5, abs=0.1)
+    assert out["отставание, °C"] > 5.0
+    assert out["остаток, мес"] == pytest.approx(
+        out["эталон прожил ещё, мес"] - out["отставание, мес наработки"], abs=0.1)
+
+
+def test_left_censored_cycle_cannot_be_the_reference():
+    """У левообрезанного цикла нет «тех же суток»: его наработка отсчитана не от пуска."""
+    frame = _two_cycles()
+    censored = Cycle(index=1, start=pd.Timestamp("2024-01-01"),
+                     end=pd.Timestamp("2025-06-01"), n_points=100, days=500.0,
+                     nwabt_start=355.0, nwabt_end=380.0, rate_c_per_month=1.0,
+                     rate_ci=(0.8, 1.2), completed=True, left_censored=True)
+    current = Cycle(index=2, start=pd.Timestamp("2026-01-01"), end=None, n_points=100,
+                    days=150.0, nwabt_start=355.0, nwabt_end=367.0,
+                    rate_c_per_month=2.0, rate_ci=(1.5, 2.5), completed=False)
+    assert remaining_by_lag(frame, [censored, current], current, censored, 1.0) is None
+
+
+def test_local_rate_sees_the_plateau_the_whole_cycle_slope_hides():
+    """Средний наклон по циклу и наклон на полке — разные числа, и это главное."""
+    frame = _two_cycles()
+    whole = local_rate(frame, cycle=1, since_day=0.0, until_day=200.0)
+    plateau = local_rate(frame, cycle=1, since_day=60.0, until_day=200.0)
+    assert whole > 0.5
+    assert plateau == pytest.approx(0.0, abs=0.05)
+    assert local_rate(frame, cycle=1, since_day=195.0, until_day=200.0) is None

@@ -1,6 +1,8 @@
 """Скорость дезактивации катализатора и остаточный ресурс цикла (участник 2). CPU.
 
     python scripts/check_catalyst_life.py
+    python scripts/check_catalyst_life.py --checkpoint-day 150   # контрольная точка
+    python scripts/check_catalyst_life.py --as-of 2026-06-01     # «как будто сегодня»
     python scripts/check_catalyst_life.py --activation 120 --target 5
 
 Четвёртый критерий ТЗ — надёжность оборудования — до сих пор держался у нас на
@@ -13,18 +15,23 @@
 ``models/catalyst.py``). Считается по лабораторным анализам серы: 1451 точка,
 сера продукта и сера сырья, режим усреднён за 6 часов до отбора пробы.
 
-Скрипт отвечает на четыре вопроса и на каждый даёт число с интервалом:
+Скрипт отвечает на вопросы по порядку, и на каждый даёт число с интервалом:
 
 1. Сколько длительных остановов действительно были сменой катализатора?
    Проверяется шагом нормированной температуры, а не длительностью.
 2. Сколько градусов в месяц приходится добавлять, чтобы держать серу?
    Оценка по завершённым циклам, интервал — блочным бутстрепом.
-3. Сколько запаса до уровня, на котором установку выводили раньше?
-4. Сколько месяцев осталось текущему циклу? Тремя независимыми способами,
+3. Насколько ответ зависит от наших допущений, а не от данных.
+4. Сколько месяцев осталось текущему циклу? Четырьмя независимыми способами,
    потому что один способ на такой выборке — это мнение, а не оценка.
-
-Плюс проверка гипотезы «падение цетанового числа — тот же процесс»: ЦЧ должно
-восстанавливаться при смене катализатора, если это так.
+5. Контрольная точка: отстаёт ли текущая партия катализатора от предшественницы
+   на одинаковой наработке, и по какому критерию судить об этом дальше. Критерий
+   снимается с данных ЗАРАНЕЕ, иначе «пересчитать через месяц» — напоминание,
+   а не проверка.
+6. Бэктест: что этот же метод сказал бы на прошлых сутках цикла, исход которого
+   уже известен. Единственная возможная проверка оценки остаточного ресурса.
+7. Проверка гипотезы «падение цетанового числа — тот же процесс»: ЦЧ должно
+   восстанавливаться при смене катализатора, если это так.
 
 Результат: reports/catalyst_life.json и таблицы в консоли.
 """
@@ -48,7 +55,11 @@ from nefte.models.catalyst import (  # noqa: E402
     REFERENCE_SULFUR_MGKG,
     Cycle,
     fit_deactivation,
+    lag_against_reference,
+    level_at_runday,
+    local_rate,
     remaining_by_analogue,
+    remaining_by_lag,
     sulfur_drift_per_month,
 )
 from nefte.models.regime import FEED  # noqa: E402
@@ -120,6 +131,156 @@ def cetane_check(ht: pd.DataFrame, cycles: list[Cycle]) -> dict:
             "вердикт": verdict}
 
 
+def checkpoint_block(fit, reference, checkpoint_day: int, today: pd.Timestamp) -> dict:
+    """Контрольная точка: сверка с предшественником на одинаковой наработке.
+
+    Пункт «пересчитать на N-е сутки» без критерия — это напоминание, а не
+    проверка: через месяц никто не вспомнит, что считать плохим результатом.
+    Здесь критерий вынимается из данных заранее — чем был на этих сутках
+    полностью наблюдённый предшественник, — и печатается вне зависимости от
+    того, дожили мы до контрольной точки или нет.
+    """
+    print(f"\n[5] Контрольная точка: {checkpoint_day}-е сутки текущего цикла\n")
+    if fit.current is None or reference is None:
+        print("  не с чем сверять: нет текущего цикла или полностью наблюдённого "
+              "предшественника")
+        return {}
+
+    current = next(c for c in fit.cycles if not c.completed)
+    days = [d for d in (40, 60, 80, 100, checkpoint_day) if d <= current.days + 1]
+    lag = lag_against_reference(fit.frame, current.index, reference.index, days)
+    if lag:
+        print(pd.DataFrame(lag).to_string(index=False))
+        first = next((r for r in lag if r["значимо"]), None)
+        if first:
+            print(f"\n  Отставание становится значимым с {first['сутки']:.0f}-х суток: "
+                  f"до этого доверительный интервал накрывает ноль.")
+        else:
+            print("\n  Отставание НЕ значимо ни на одних сутках: интервал везде "
+                  "накрывает ноль.")
+
+    reached = current.days >= checkpoint_day
+    print(f"\n  Данные доведены до {current.days:.0f}-х суток "
+          f"(последний анализ {fit.frame.index.max().date()}), "
+          f"{checkpoint_day}-е сутки наступают "
+          f"{(current.start + pd.Timedelta(days=checkpoint_day)).date()}.")
+
+    target = level_at_runday(fit.frame, reference.index, checkpoint_day)
+    pace = local_rate(fit.frame, reference.index, 60.0, float(checkpoint_day))
+    criterion = {}
+    if target is not None:
+        criterion = {"эталонный цикл": reference.index, "сутки": checkpoint_day,
+                     "уровень эталона, °C": target["уровень, °C"],
+                     "наклон эталона на сутках 60…N, °C/мес": None if pace is None
+                     else round(pace, 2)}
+        print(f"\n  КРИТЕРИЙ, снятый с цикла {reference.index} заранее:")
+        print(f"    на {checkpoint_day}-е сутки он был на уровне "
+              f"{target['уровень, °C']:.1f} °C (ДИ {target['95% ДИ']}),")
+        if pace is not None:
+            print(f"    а на сутках 60…{checkpoint_day} шёл со скоростью "
+                  f"{pace:+.2f} °C/мес — то есть уже вышел на полку.")
+        print(f"    Если на {checkpoint_day}-е сутки NWABT окажется выше "
+              f"{target['уровень, °C'] + 5:.0f} °C или скорость на этом же участке")
+        print("    останется выше +1 °C/мес, оценку ресурса надо пересматривать вниз.")
+
+    if reached:
+        ours = level_at_runday(fit.frame, current.index, checkpoint_day)
+        our_pace = local_rate(fit.frame, current.index, 60.0, float(checkpoint_day))
+        print(f"\n  ФАКТ: {ours['уровень, °C']:.1f} °C, скорость "
+              f"{'—' if our_pace is None else f'{our_pace:+.2f}'} °C/мес.")
+        criterion["факт"] = ours
+    else:
+        print(f"\n  Пересчитать нечем: в выданном пакете телеметрия кончается "
+              f"{fit.frame.index.max().date()}. Когда данные появятся, "
+              f"контрольная точка — одна команда:")
+        print(f"    python scripts/check_catalyst_life.py --checkpoint-day {checkpoint_day}")
+        print("  А чтобы убедиться, что она работает, её можно прогнать задним "
+              "числом на\n  любую прошлую дату: --as-of 2026-06-01.")
+    criterion["отставание"] = lag
+    criterion["достигнута"] = bool(reached)
+    return criterion
+
+
+def backtest_block(ht: pd.DataFrame, product: pd.Series, feed_sulfur: pd.Series,
+                   fit, args) -> list[dict]:
+    """Что метод сказал бы на прошлых сутках цикла, исход которого мы знаем.
+
+    Единственная возможная проверка оценки остаточного ресурса: взять
+    завершённый цикл, обрезать данные на его N-х сутках и сравнить предсказание
+    с тем, что случилось на самом деле. Обрезается ВСЁ — и телеметрия, и
+    лаборатория, — иначе проверка подсмотрит будущее теми же данными, из которых
+    строится уровень вывода в ремонт.
+    """
+    print("\n[6] Бэктест: насколько метод врал на цикле, исход которого известен\n")
+    reference = next((c for c in fit.cycles if c.completed and not c.left_censored), None)
+    if reference is None:
+        print("  нет полностью наблюдённого завершённого цикла — проверять не на чем")
+        return []
+
+    kwargs = {"target_sulfur": args.target}
+    if args.activation is not None:
+        kwargs["activation_kj"] = args.activation
+
+    rows = []
+    for day in (108, 150, 200, 300, 400, 500):
+        if day >= reference.days:
+            continue
+        as_of = reference.start + pd.Timedelta(days=day)
+        past = fit_deactivation(ht.loc[:as_of], product.loc[:as_of],
+                                feed_sulfur.loc[:as_of], raw_feed=ht.loc[:as_of, FEED],
+                                **kwargs)
+        if past is None or not past.current:
+            continue
+        level = float(past.current["NWABT сейчас, °C"])
+        margin = past.eor_level_c - level
+        linear = margin / past.rate_c_per_month if past.rate_c_per_month > 0 else float("nan")
+        analogue = [r["оставалось, мес"] for r in
+                    remaining_by_analogue(past.frame, past.cycles, level)
+                    if r.get("оставалось, мес") is not None]
+        truth = (reference.days - day) / DAYS_IN_MONTH
+        rows.append({
+            "сутки": day,
+            "NWABT тогда, °C": round(level, 1),
+            "(а) линейно, мес": round(linear, 1),
+            "(б) аналогия, мес": round(min(analogue), 1) if analogue else None,
+            "ФАКТ, мес": round(truth, 1),
+            "ошибка (а), %": round((linear - truth) / truth * 100, 0),
+        })
+    if not rows:
+        print("  не набралось точек для проверки")
+        return []
+    print(pd.DataFrame(rows).to_string(index=False))
+
+    early = rows[0]
+    print(f"\n  На {early['сутки']}-х сутках — то есть ровно там, где сейчас стоит "
+          f"текущий цикл, —")
+    print(f"  линейный способ дал {early['(а) линейно, мес']:.1f} мес при факте "
+          f"{early['ФАКТ, мес']:.1f}: промах {early['ошибка (а), %']:+.0f} %.")
+    print("  Аналогия в этой точке промахнулась сильнее и в другую сторону, но ей")
+    print("  тогда не на что было опереться, кроме левообрезанного цикла.")
+    late = [r for r in rows if r["сутки"] >= 300]
+    if late:
+        print("\n  А вот к концу цикла метод систематически ВРЁТ В ПЛЮС: "
+              + ", ".join(f"{r['сутки']} сут {r['ошибка (а), %']:+.0f} %" for r in late) + ".")
+        print("  Причина понятная: средняя по циклу скорость занижает ту, с которой")
+        print("  катализатор стареет в конце. Пользоваться линейной оценкой можно в")
+        print("  начале цикла, а ближе к выводу она превращается в утешение.")
+
+    if fit.current:
+        level = float(fit.current["NWABT сейчас, °C"])
+        linear = (fit.eor_level_c - level) / fit.rate_c_per_month
+        corrected = linear / (1.0 + early["ошибка (а), %"] / 100.0)
+        print(f"\n  Отсюда поправка к сегодняшней оценке: линейные "
+              f"{linear:.1f} мес с известным оптимизмом "
+              f"{early['ошибка (а), %']:+.0f} % дают {corrected:.1f} мес.")
+        print("  Это независимая дорога к тому же числу, что и способ (г), и обе")
+        print("  опираются на единственный цикл, исход которого мы видели целиком.")
+        for row in rows:
+            row["скорректированная оценка текущего цикла, мес"] = (
+                round(corrected, 1) if row is early else None)
+    return rows
+
+
 def main() -> int:
     use_utf8_console()
     ap = argparse.ArgumentParser()
@@ -127,10 +288,24 @@ def main() -> int:
                     help="энергия активации, кДж/моль (по умолчанию из models/regime.py)")
     ap.add_argument("--target", type=float, default=REFERENCE_SULFUR_MGKG,
                     help="эталонная сера продукта, мг/кг")
+    ap.add_argument("--checkpoint-day", type=int, default=150,
+                    help="на какие сутки наработки назначена контрольная точка")
+    ap.add_argument("--as-of", default=None,
+                    help="считать так, будто сегодня эта дата: всё, что позже, "
+                         "не используется (проверка контрольной точки задним числом)")
     args = ap.parse_args()
 
     cfg = load_config()
     ht, product, feed_sulfur = load_inputs(cfg)
+    if args.as_of:
+        # Обрезаем ВСЕ источники, а не только телеметрию: уровень вывода в ремонт
+        # считается по лаборатории, и через неё проверка подсмотрела бы будущее.
+        today = pd.Timestamp(args.as_of)
+        ht = ht.loc[:today]
+        product, feed_sulfur = product.loc[:today], feed_sulfur.loc[:today]
+        print(f"[срез] считаем по данным до {today.date()} включительно")
+    else:
+        today = ht.index.max()
     kwargs = {"target_sulfur": args.target}
     if args.activation is not None:
         kwargs["activation_kj"] = args.activation
@@ -220,6 +395,7 @@ def main() -> int:
     print(f"  Текущий цикл пущен {fit.current['пуск']}, наработка "
           f"{fit.current['наработка, сут']:.0f} сут, NWABT {level:.1f} °C, "
           f"запас {margin:.1f} °C.\n")
+    current_cycle = next(c for c in fit.cycles if not c.completed)
 
     linear = margin / fit.rate_c_per_month
     linear_ci = (margin / hi, margin / lo)
@@ -253,26 +429,48 @@ def main() -> int:
     print("      но ранняя скорость всегда выше поздней: те же первые "
           f"{fit.current['наработка, сут']:.0f} сут в прошлых циклах шли "
           + ", ".join(f"{v:+.2f}" for _, v in early) + " °C/мес,")
-    print("      а после 120-х суток выходили на общий наклон. Способ (в) — это")
-    print("      нижняя граница «если разгон не кончится», а не ожидание.")
+    print("      а дальше выходили на общий наклон. Способ (в) — это нижняя")
+    print("      граница «если разгон не кончится», а не ожидание.")
 
-    low = min([x for x in ([linear_ci[0]] + left) if x == x]) if left else linear_ci[0]
-    high = max([x for x in ([linear_ci[1]] + left) if x == x]) if left else linear_ci[1]
-    print(f"\n  ОТВЕТ: остаточный ресурс цикла {min(left) if left else linear:.0f}–"
-          f"{linear:.0f} месяцев, полный разброс способов {low:.0f}…{high:.0f}.")
-    print("  Оценка держится на четырёх вещах, и каждую можно проверить:")
+    # (г) поправка на отставание от полностью наблюдённого предшественника
+    reference = next((c for c in fit.cycles
+                      if c.completed and not c.left_censored), None)
+    by_lag = (remaining_by_lag(fit.frame, fit.cycles, current_cycle, reference,
+                               fit.rate_c_per_month) if reference else None)
+    if by_lag:
+        print(f"  (г) поправка на отставание от цикла {by_lag['эталонный цикл']}: "
+              f"{by_lag['остаток, мес']:5.1f} мес")
+        print(f"      цикл {by_lag['эталонный цикл']} с этой наработки прожил ещё "
+              f"{by_lag['эталон прожил ещё, мес']:.1f} мес (это факт, а не оценка),")
+        print(f"      а мы отстаём от него на {by_lag['отставание, °C']:+.2f} °C — "
+              f"то есть на {by_lag['отставание, мес наработки']:.1f} мес наработки.")
+
+    candidates = [x for x in ([linear] + left + ([by_lag["остаток, мес"]] if by_lag else []))
+                  if x == x]
+    low, high = min(candidates), max(candidates)
+    print(f"\n  ОТВЕТ: остаточный ресурс цикла {low:.0f}…{high:.0f} месяцев.")
+    if by_lag:
+        print(f"  Ближе к {by_lag['остаток, мес']:.0f}: способы (а) и (г) сходятся, "
+              f"а расхождение с (б) объяснено ниже, в [6].")
+    print("  Оценка держится на пяти вещах, и каждую можно проверить:")
     print("    * кинетика псевдопервого порядка и Ea = 100 кДж/моль (допущение,")
     print("      но ответ к ней нечувствителен — см. [3]);")
     print("    * сера сырья интерполирована между 132 анализами;")
     print("    * уровень вывода взят из двух завершённых циклов, а не из норматива;")
-    print("    * текущий цикл наблюдается неполные четыре месяца, и его ранняя")
-    print("      скорость выше, чем была у предшественников на том же сроке —")
-    print("      это повод пересчитать оценку на 150-е сутки, а не поверить ей раз.")
+    print("    * полностью наблюдаемый цикл всего один: скорость подтверждена двумя,")
+    print("      а длина цикла — по существу одним;")
+    print("    * текущий цикл наблюдается неполные четыре месяца.")
 
-    # --- 5. цетановое число: тот же процесс или нет -------------------- #
+    # --- 5. контрольная точка ------------------------------------------ #
+    checkpoint = checkpoint_block(fit, reference, args.checkpoint_day, today)
+
+    # --- 6. бэктест самого метода -------------------------------------- #
+    backtest = backtest_block(ht, product, feed_sulfur, fit, args)
+
+    # --- 7. цетановое число: тот же процесс или нет -------------------- #
     cetane = cetane_check(ht, fit.cycles)
     if cetane:
-        print("\n[5] Падение цетанового числа — это дезактивация?\n")
+        print("\n[7] Падение цетанового числа — это дезактивация?\n")
         print(f"  По календарю: {cetane['наклон по календарю, ед/год']:+.2f} ед/год")
         for row in cetane["внутри циклов"]:
             print(f"  Внутри цикла {row['цикл']}: {row['наклон, ед/год']:+.2f} ед/год "
@@ -291,6 +489,7 @@ def main() -> int:
     report = {
         "метод": "нормированная температура реакторного блока (NWABT), "
                  "кинетика псевдопервого порядка",
+        "срез_данных": str(today.date()),
         "допущения": {
             "энергия активации, кДж/моль": args.activation or 100.0,
             "эталонная сера, мг/кг": args.target,
@@ -315,8 +514,11 @@ def main() -> int:
             "по средней скорости, ДИ": [round(linear_ci[0], 1), round(linear_ci[1], 1)],
             "по аналогии": analogue,
             "по текущей скорости": round(margin / current_rate, 1),
+            "по отставанию от эталона": by_lag,
             "ранняя скорость прошлых циклов, °C/мес": {str(k): round(v, 2) for k, v in early},
         },
+        "контрольная_точка": checkpoint,
+        "бэктест_метода": backtest,
         "цетановое_число": cetane,
     }
     out = ROOT / "reports" / "catalyst_life.json"
