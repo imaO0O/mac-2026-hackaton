@@ -109,12 +109,19 @@ def main() -> int:
     print(f"      конформная поправка σ: ×{scale:.2f} "
           f"(калибровка по val, честное покрытие смотрим на test)")
 
-    a, b = model.calibrate_risk(*parts["val"])
-    print(f"      калибровка вероятности (Платт): a={a:.2f}, b={b:.2f}")
+    # Порядок важен: сначала выбираем источник вероятности, потом калибруем ЕГО.
+    # В обратном порядке поправка настраивалась на классификатор, а решения
+    # принимались по интервалу, и она не применялась вообще.
     src = model.select_risk_source(*parts["val"])
     print(f"      источник вероятности: {src}; PR-AUC "
           f"{ {k: round(v, 3) for k, v in getattr(model, 'risk_source_scores', {}).items()} }, "
           f"разброс { {k: round(v, 3) for k, v in getattr(model, 'risk_source_spreads', {}).items()} }")
+    train_rate = float((parts["train"][1] > limit).mean())
+    a, b = model.calibrate_risk(*parts["val"], train_base_rate=train_rate)
+    if model.risk_calibration_note:
+        print(f"      калибровка вероятности: {model.risk_calibration_note}")
+    else:
+        print(f"      калибровка вероятности (Платт) для «{src}»: a={a:.2f}, b={b:.2f}")
     thr = model.select_alarm_threshold(*parts["val"],
                                       budget=cfg["quality"].get("alarm_budget"))
     budget = cfg["quality"].get("alarm_budget")

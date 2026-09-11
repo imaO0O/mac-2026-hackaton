@@ -209,8 +209,10 @@ class SulfurModel:
     limit: float = 10.0
     # порог тревоги подбирается по валидации, а не берётся «на глаз»
     alarm_threshold: float = 0.5
-    # калибровка Платта: сырой скор классификатора → честная вероятность
+    # калибровка Платта: сырой скор источника риска → честная вероятность
     risk_calibration: tuple[float, float] | None = None
+    # почему поправка не применена, если не применена: пустая строка — применена
+    risk_calibration_note: str = ""
     # чем считаем вероятность нарушения: "classifier" или "interval" (выбор по val)
     risk_source: str = "classifier"
     # можно ли вообще доверять тревоге: False, если ни один порог на валидации
@@ -328,22 +330,34 @@ class SulfurModel:
         out["sigma"] = ((out["q90"] - out["q10"]) / (2 * Z90)).clip(lower=0.1) * self.sigma_scale
         return out
 
-    def predict_risk(self, X: pd.DataFrame, raw: bool = False) -> pd.Series:
-        """P(сера > предела). Классификатор, если обучен, иначе — из интервала.
-
-        Классификатор обучен с балансировкой классов, поэтому его сырой выход
-        смещён к 0.5 и вероятностью не является. Поправка Платта, подобранная на
-        валидации, возвращает величину, которую можно показывать оператору как
-        вероятность и сравнивать с порогом.
-        """
+    def _raw_risk(self, X: pd.DataFrame) -> pd.Series:
+        """Вероятность до поправки — от того источника, который выбран."""
         if self.clf is not None and self.risk_source == "classifier":
-            score = pd.Series(self.clf.predict_proba(X[self.features])[:, 1], index=X.index)
-            if self.risk_calibration and not raw:
-                a, b = self.risk_calibration
-                logit = np.log(np.clip(score, 1e-6, 1 - 1e-6) / (1 - np.clip(score, 1e-6, 1 - 1e-6)))
-                score = pd.Series(1 / (1 + np.exp(-(a * logit + b))), index=X.index)
-            return score
+            return pd.Series(self.clf.predict_proba(X[self.features])[:, 1], index=X.index)
         return interval_risk(self.predict_frame(X), self.limit)
+
+    def predict_risk(self, X: pd.DataFrame, raw: bool = False) -> pd.Series:
+        """P(показатель > предела). Классификатор, если выбран, иначе — из интервала.
+
+        Поправка Платта применяется к ЛЮБОМУ источнику, а не только к
+        классификатору. Так было не всегда, и разница оказалась не теоретической:
+        рабочая модель выбирает источником интервал, поправка подбиралась на
+        скоре классификатора и не применялась НИКОГДА. В отчёте при этом лежало
+        поле `risk_calibration`, из которого следовало обратное.
+
+        Почему поправка нужна и интервалу. Вероятность из интервала — это
+        нормальное приближение по q50 и σ. Приближение грубое: хвосты у ошибки
+        прогноза тяжелее нормальных, и в середине шкалы вероятность
+        систематически завышается. Оператору же показывается именно она, и по ней
+        же сравнивается порог вмешательства.
+        """
+        score = self._raw_risk(X)
+        if raw or not self.risk_calibration:
+            return score
+        a, b = self.risk_calibration
+        clipped = np.clip(score, 1e-6, 1 - 1e-6)
+        logit = np.log(clipped / (1 - clipped))
+        return pd.Series(1 / (1 + np.exp(-(a * logit + b))), index=X.index)
 
     def select_risk_source(self, X_val: pd.DataFrame, y_val: pd.Series,
                            min_spread: float = 0.05) -> str:
@@ -378,13 +392,45 @@ class SulfurModel:
             self.alarm_reliable = False
         return self.risk_source
 
-    def calibrate_risk(self, X_val: pd.DataFrame, y_val: pd.Series) -> tuple[float, float]:
-        """Калибровка Платта на валидации: логистическая регрессия по логиту скора."""
+    def calibrate_risk(self, X_val: pd.DataFrame, y_val: pd.Series,
+                       train_base_rate: float | None = None,
+                       max_base_rate_shift: float = 0.2) -> tuple[float, float]:
+        """Калибровка Платта на валидации: логистическая регрессия по логиту скора.
+
+        Вызывать ПОСЛЕ ``select_risk_source``: поправка подбирается под тот
+        источник, который будет работать. В обратном порядке она настраивалась на
+        классификатор, а решения принимались по интервалу.
+
+        **Поправка применяется не всегда, и это главное в этом методе.** Платт —
+        преобразование, сдвигающее УРОВЕНЬ вероятности к частоте событий на том
+        окне, где он подобран. Если частота на валидации нетипична, поправка
+        переносит в рабочую модель артефакт периода, а не свойство модели.
+
+        На наших данных так и вышло: превышений на обучении 15.1 %, на валидации
+        19.5 % — на треть больше. Поправка, подобранная на валидации, поднимает
+        вероятность под эти 19.5 % и на следующем периоде завышает её.
+
+        Поэтому перед подбором сравниваем частоты. Расхождение больше
+        ``max_base_rate_shift`` (относительных) — поправка НЕ применяется, причина
+        записывается в ``risk_calibration_note``. Правило сформулировано по train и
+        val, тест в решении не участвует.
+        """
         from sklearn.linear_model import LogisticRegression
 
-        if self.clf is None:
-            return (1.0, 0.0)
         self.risk_calibration = None
+        self.risk_calibration_note = ""
+
+        over_val = float((y_val > self.limit).mean())
+        if train_base_rate and over_val > 0:
+            shift = abs(over_val - train_base_rate) / max(train_base_rate, 1e-9)
+            if shift > max_base_rate_shift:
+                self.risk_calibration_note = (
+                    f"поправка не применена: частота превышений на валидации "
+                    f"{over_val:.1%} против {train_base_rate:.1%} на обучении "
+                    f"(расхождение {shift:.0%}), подгонка уровня перенесла бы "
+                    f"свойство периода, а не модели")
+                return (1.0, 0.0)
+
         score = self.predict_risk(X_val, raw=True).to_numpy()
         score = np.clip(score, 1e-6, 1 - 1e-6)
         logit = np.log(score / (1 - score)).reshape(-1, 1)
@@ -481,9 +527,11 @@ class SulfurModel:
         прогнозу, поэтому precision/recall считаем на нескольких порогах тревоги:
         при 0.5 модель почти всегда молчит, рабочий порог заметно ниже.
         """
+        risk = self.predict_risk(X)
         out = {"risk_source": self.risk_source, "alarm_reliable": self.alarm_reliable}
-        out.update(interval_metrics(self.predict_frame(X), y, self.predict_risk(X),
+        out.update(interval_metrics(self.predict_frame(X), y, risk,
                                     limit, self.alarm_threshold, risk_thresholds))
+        out.update(probability_metrics(risk, (y > limit).astype(int)))
         return out
 
     # ------------------------------------------------------------------ #
@@ -508,6 +556,7 @@ class SulfurModel:
                 "monotone": self.monotone, "target": self.target,
                 "y_offset": self.y_offset,
                 "risk_calibration": list(self.risk_calibration) if self.risk_calibration else None,
+                "risk_calibration_note": self.risk_calibration_note,
                 "risk_source": self.risk_source, "alarm_reliable": self.alarm_reliable}
         (path / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                                         encoding="utf-8")
@@ -526,6 +575,7 @@ class SulfurModel:
                   limit=meta.get("limit", 10.0),
                   risk_calibration=tuple(meta["risk_calibration"])
                   if meta.get("risk_calibration") else None,
+                  risk_calibration_note=meta.get("risk_calibration_note", ""),
                   risk_source=meta.get("risk_source", "classifier"),
                   alarm_reliable=meta.get("alarm_reliable", True),
                   alarm_threshold_fbeta=meta.get("alarm_threshold_fbeta"),
@@ -553,6 +603,44 @@ class SulfurModel:
 def _normal_cdf(z):
     from scipy.special import ndtr
     return ndtr(z)
+
+
+def probability_metrics(risk: pd.Series, over: pd.Series, bins: int = 5) -> dict:
+    """Честна ли вероятность как ВЕРОЯТНОСТЬ, а не как порядок.
+
+    ROC-AUC и PR-AUC меряют различение: умение упорядочить моменты по опасности.
+    Модель может прекрасно ранжировать и при этом систематически завышать
+    вероятность вдвое — по этим двум метрикам не видно ничего. А оркестратор
+    сравнивает вероятность с порогом, и бюджет тревог задан в тех же единицах, то
+    есть всё решающее правило стоит на предположении, что 0.2 означает «примерно
+    один случай из пяти».
+
+    * ``brier`` — средний квадрат ошибки вероятности;
+    * ``brier_base`` — то же у «всегда базовая частота». Проигрыш константе
+      означает, что как вероятность выход использовать нельзя;
+    * ``ece`` — средний по бинам разрыв «заявлено против наблюдалось»;
+    * ``calibration_shift`` — перекос уровня: средняя заявленная минус фактическая
+      частота. Именно он уезжает, когда меняется частота событий.
+    """
+    if not len(risk) or over.nunique() < 2:
+        return {}
+    base = float(over.mean())
+    frame = pd.DataFrame({"p": risk.to_numpy(), "y": over.to_numpy()})
+    try:
+        frame["bin"] = pd.qcut(frame["p"], bins, duplicates="drop")
+        grouped = frame.groupby("bin", observed=True).agg(n=("y", "size"),
+                                                          p=("p", "mean"),
+                                                          y=("y", "mean"))
+        ece = float((grouped["n"] / grouped["n"].sum()
+                     * (grouped["y"] - grouped["p"]).abs()).sum())
+    except ValueError:
+        ece = float("nan")
+    return {
+        "brier": float(((frame["p"] - frame["y"]) ** 2).mean()),
+        "brier_base": float(((base - frame["y"]) ** 2).mean()),
+        "ece": None if ece != ece else ece,
+        "calibration_shift": float(frame["p"].mean() - base),
+    }
 
 
 def baseline_metrics(pred: pd.Series, y: pd.Series, limit: float = 10.0) -> dict:
