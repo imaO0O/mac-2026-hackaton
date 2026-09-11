@@ -97,8 +97,8 @@
 
     python scripts/train_quality.py --horizon 0            # рабочая модель
     python scripts/train_quality.py --horizon 0 --no-vak   # без справочника
-    python scripts/train_quality.py --horizon 2 --no-monotone
-    python scripts/train_quality.py --horizon 2 --no-monotone --no-vak
+    python scripts/train_quality.py --horizon 2
+    python scripts/train_quality.py --horizon 2 --no-vak
 
 Абляционный прогон пишется в отдельную модель и отдельный отчёт (`_novak`), чтобы
 не затирать рабочие: их числа идут в документацию. Тест — 2026 год, в подборе

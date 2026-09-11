@@ -1,0 +1,145 @@
+{
+  "horizon_hours": 1.0,
+  "target": "sulfur",
+  "limit": 10.0,
+  "n_features": 55,
+  "monotone": true,
+  "sigma_scale": 1.325767062425631,
+  "alarm_threshold": 0.16619812184129068,
+  "alarm_threshold_fbeta": 0.2312,
+  "alarm_budget": 0.3,
+  "splits": {
+    "train": {
+      "model": {
+        "risk_source": "interval",
+        "alarm_reliable": true,
+        "n": 983,
+        "MAE": 1.4608015953069715,
+        "RMSE": 2.2720615173522,
+        "bias": 0.053137098264097786,
+        "coverage_80": 0.7945066124109867,
+        "n_over_limit": 148,
+        "alarm_threshold": 0.16619812184129068,
+        "precision@0.2": 0.11194029850746269,
+        "recall@0.2": 0.10135135135135136,
+        "precision@0.5": null,
+        "recall@0.5": 0.0,
+        "precision@0.17": 0.13333333333333333,
+        "recall@0.17": 0.21621621621621623,
+        "roc_auc": 0.5224955494416572,
+        "pr_auc": 0.14807562094637894,
+        "base_rate": 0.150559511698881,
+        "spec_precision": 0.13333333333333333,
+        "spec_recall": 0.21621621621621623
+      },
+      "baseline_pak": {
+        "n": 983,
+        "MAE": 1.4992100247698301,
+        "RMSE": 2.4319934329235644,
+        "bias": 0.1751471838003379,
+        "coverage_80": null,
+        "n_over_limit": 148,
+        "spec_precision": 0.38620689655172413,
+        "spec_recall": 0.3783783783783784
+      },
+      "baseline_lims_prev": {
+        "n": 982,
+        "MAE": 1.7942973409310863,
+        "RMSE": 2.872699634452162,
+        "bias": -0.11547861274051084,
+        "coverage_80": null,
+        "n_over_limit": 148,
+        "spec_precision": 0.265625,
+        "spec_recall": 0.22972972972972974
+      }
+    },
+    "val": {
+      "model": {
+        "risk_source": "interval",
+        "alarm_reliable": true,
+        "n": 221,
+        "MAE": 1.5448480339641113,
+        "RMSE": 3.506275420358533,
+        "bias": -0.6668738096507185,
+        "coverage_80": 0.8009049773755657,
+        "n_over_limit": 43,
+        "alarm_threshold": 0.16619812184129068,
+        "precision@0.2": 0.29411764705882354,
+        "recall@0.2": 0.11627906976744186,
+        "precision@0.5": null,
+        "recall@0.5": 0.0,
+        "precision@0.17": 0.16071428571428573,
+        "recall@0.17": 0.20930232558139536,
+        "roc_auc": 0.5096681473739222,
+        "pr_auc": 0.21929306163604712,
+        "base_rate": 0.19457013574660634,
+        "spec_precision": 0.16071428571428573,
+        "spec_recall": 0.20930232558139536
+      },
+      "baseline_pak": {
+        "n": 221,
+        "MAE": 2.0555256686059598,
+        "RMSE": 4.187940671835436,
+        "bias": -1.4627400706796085,
+        "coverage_80": null,
+        "n_over_limit": 43,
+        "spec_precision": 0.14285714285714285,
+        "spec_recall": 0.023255813953488372
+      },
+      "baseline_lims_prev": {
+        "n": 221,
+        "MAE": 1.8665157917937543,
+        "RMSE": 3.694798866983588,
+        "bias": -0.3461538483114803,
+        "coverage_80": null,
+        "n_over_limit": 43,
+        "spec_precision": 0.18421052631578946,
+        "spec_recall": 0.16279069767441862
+      }
+    },
+    "test": {
+      "model": {
+        "risk_source": "interval",
+        "alarm_reliable": true,
+        "n": 249,
+        "MAE": 1.6211320610957345,
+        "RMSE": 2.43204106086592,
+        "bias": 0.17670617740075376,
+        "coverage_80": 0.751004016064257,
+        "n_over_limit": 36,
+        "alarm_threshold": 0.16619812184129068,
+        "precision@0.2": 0.10909090909090909,
+        "recall@0.2": 0.16666666666666666,
+        "precision@0.5": null,
+        "recall@0.5": 0.0,
+        "precision@0.17": 0.1188118811881188,
+        "recall@0.17": 0.3333333333333333,
+        "roc_auc": 0.4581377151799687,
+        "pr_auc": 0.14052578996756804,
+        "base_rate": 0.14457831325301204,
+        "spec_precision": 0.1188118811881188,
+        "spec_recall": 0.3333333333333333
+      },
+      "baseline_pak": {
+        "n": 249,
+        "MAE": 1.775356922612851,
+        "RMSE": 2.5704446504619733,
+        "bias": -0.445860964377003,
+        "coverage_80": null,
+        "n_over_limit": 36,
+        "spec_precision": 0.2857142857142857,
+        "spec_recall": 0.16666666666666666
+      },
+      "baseline_lims_prev": {
+        "n": 249,
+        "MAE": 1.9345381359857727,
+        "RMSE": 2.941183808776391,
+        "bias": -0.048594370185132005,
+        "coverage_80": null,
+        "n_over_limit": 36,
+        "spec_precision": 0.14285714285714285,
+        "spec_recall": 0.1111111111111111
+      }
+    }
+  }
+}
