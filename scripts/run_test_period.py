@@ -249,8 +249,16 @@ def main() -> int:
     print(f"\nСмешение: рецептура посчитана {blend['рецептура посчитана']} раз, "
           f"допустима {blend['допустима']}, недопустима {blend['недопустима']}.")
 
-    report_path = (REPORT if not args.tag
-                   else REPORT.with_name(f"test_period_{args.tag}.json"))
+    # Прогон НЕ рабочей модели не должен затирать отчёт рабочей: его числа идут в
+    # документацию, и подмена осталась бы незамеченной. Механизм --tag для этого
+    # уже был, но требовал, чтобы о нём помнили; теперь суффикс проставляется сам.
+    # Ровно та же ошибка уже случилась с абляцией признаков справочника.
+    tag = args.tag
+    if not tag and args.model != "boost":
+        horizon = args.seq_horizon if args.seq_horizon is not None else 0
+        tag = f"{args.model}_h{horizon:g}"
+    report_path = (REPORT if not tag
+                   else REPORT.with_name(f"test_period_{tag}.json"))
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps({"summary": summary, "rows": rows},
                                  ensure_ascii=False, indent=2, default=str),
