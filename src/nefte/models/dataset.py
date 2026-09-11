@@ -22,7 +22,11 @@ import numpy as np
 import pandas as pd
 
 from nefte.config import cache_dir, load_config
-from nefte.data.cleaning import clean_lims_sulfur, frozen_mask
+from nefte.data.cleaning import (
+    clean_lims_distillation,
+    clean_lims_sulfur,
+    frozen_mask,
+)
 from nefte.data.features import asof_features, known_from
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
 from nefte.data.validity import SignalValidity
@@ -43,6 +47,45 @@ ROLL_WINDOWS = [6, 36, 144]
 
 TARGET_SERIES = "Гидроочистка|2|Mg.Sulfur"
 FEED_SULFUR_SERIES = "Гидроочистка|1|Mass.Sulfur"
+
+# Целевые показатели, которые умеет прогнозировать агент качества. Организаторы
+# назвали обязательными три: серу, Т95 и цетановое число. Здесь первые два —
+# цетановое число сюда не попало намеренно: 42 анализа за три года это не
+# обучающая выборка, и почему мы его не моделируем, написано в models/cetane.py.
+#
+# Ключ "cleaner" важен: у серы и у разгонки разный брак. Сера чистится порогом
+# выброса, Т95 — проверкой физического диапазона (в ЛИМС встречается Т95 = 0).
+QUALITY_TARGETS: dict[str, dict] = {
+    "sulfur": {
+        "series": TARGET_SERIES,
+        "cleaner": "sulfur",
+        "unit": "мг/кг",
+        "limit_key": ("spec", "product_sulfur_mgkg", "max"),
+        "side": "above",
+        "name": "сера продукта",
+    },
+    "t95": {
+        "series": "Гидроочистка|2|95%.T",
+        "cleaner": "distillation",
+        "unit": "°C",
+        "limit_key": ("spec", "t95_c", "max"),
+        "side": "above",
+        "name": "Т95 продукта",
+    },
+}
+
+
+def target_series(target: str = "sulfur") -> pd.Series:
+    """Очищенный целевой ряд по имени показателя.
+
+    Одно место, где решается, что считать фактом по каждому показателю. Раньше
+    целевой ряд собирался прямо в build_training_table, и добавить второй
+    показатель было некуда, кроме как копированием.
+    """
+    spec = QUALITY_TARGETS[target]
+    raw = lims_series(spec["series"])
+    return (clean_lims_sulfur(raw) if spec["cleaner"] == "sulfur"
+            else clean_lims_distillation(raw))
 
 # Версия схемы признаков. Поднимайте её, когда меняете САМ РАСЧЁТ (формулу окна,
 # набор лаговых признаков, способ ресемплинга) — то, что не выражено константами
@@ -188,7 +231,8 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
 
 def build_training_table(horizon_hours: float = 2.0,
                          features: pd.DataFrame | None = None,
-                         train_bounds: tuple[str, str] | None = None
+                         train_bounds: tuple[str, str] | None = None,
+                         target: str = "sulfur"
                          ) -> tuple[pd.DataFrame, pd.Series]:
     """Обучающая таблица: X — признаки за ``horizon_hours`` ДО анализа, y — анализ.
 
@@ -201,7 +245,11 @@ def build_training_table(horizon_hours: float = 2.0,
     настоящая: состав признаков зависит от будущего.
     """
     feats = build_feature_matrix() if features is None else features
-    y = clean_lims_sulfur(lims_series(TARGET_SERIES))
+    y = target_series(target)
+    # Дубли меток времени встречаются в ЛИМС и по сере, и по разгонке. Оставляем
+    # последний: повторный анализ той же пробы — это уточнение, а не второе
+    # наблюдение, и считать его отдельной строкой значит дважды учесть один факт.
+    y = y[~y.index.duplicated(keep="last")]
 
     # для каждого анализа берём признаки, доступные за H часов до него
     lag = pd.Timedelta(hours=horizon_hours)
@@ -226,17 +274,32 @@ def build_training_table(horizon_hours: float = 2.0,
     return X, y
 
 
-def persistence_baselines(X: pd.DataFrame, y: pd.Series) -> dict[str, pd.Series]:
+def persistence_baselines(X: pd.DataFrame, y: pd.Series,
+                          target: str = "sulfur") -> dict[str, pd.Series]:
     """Базовые «модели», которые обязана побить обученная.
 
     * ``pak`` — текущее показание поточного анализатора (то, чем пользуются сейчас);
     * ``lims_prev`` — предыдущий лабораторный результат;
+    * ``vak`` — формула виртуального анализатора из справочника. Для Т95 это
+      главный конкурент, а не формальность: именно на ней показатель держался до
+      появления модели, и если модель её не бьёт, менять ничего не надо;
     * ``const`` — медиана обучающего периода.
     """
     out = {}
-    if "pak_sulfur" in X:
-        out["pak"] = X["pak_sulfur"]
-    if "lims_sulfur_prev" in X:
-        out["lims_prev"] = X["lims_sulfur_prev"]
+    if target == "sulfur":
+        if "pak_sulfur" in X:
+            out["pak"] = X["pak_sulfur"]
+        if "lims_sulfur_prev" in X:
+            out["lims_prev"] = X["lims_sulfur_prev"]
+    elif target == "t95":
+        # Признак ВАК считается по тем же тегам и уже лежит в матрице — берём его
+        # как есть, без пересчёта: сравнение должно идти с тем, что реально
+        # использовалось, а не с улучшенной версией формулы.
+        if "vak_24_2000_GODT_T95" in X:
+            out["vak"] = X["vak_24_2000_GODT_T95"]
+        # персистенция: предыдущий анализ того же показателя
+        prev = y.shift(1)
+        if prev.notna().any():
+            out["lims_prev"] = prev
     out["const"] = pd.Series(np.full(len(y), np.nan), index=y.index)
     return out

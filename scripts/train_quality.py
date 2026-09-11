@@ -2,10 +2,20 @@
 
     python scripts/train_quality.py                 # горизонт 2 ч
     python scripts/train_quality.py --horizon 6     # прогноз на 6 часов вперёд
+    python scripts/train_quality.py --target t95 --horizon 0   # второй показатель
 
-Пишет модель в models/sulfur/ и отчёт в reports/quality_metrics.json.
-Сравнение всегда с базовыми: показание ПАК и предыдущий лабораторный анализ.
-Модель, которая их не бьёт, в систему не идёт.
+Пишет модель в models/<показатель>_h<горизонт>/ и отчёт в
+reports/quality_metrics_*.json. Сравнение всегда с базовыми: показание ПАК,
+предыдущий лабораторный анализ, а для Т95 ещё и формула виртуального анализатора
+из справочника. Модель, которая их не бьёт, в систему не идёт.
+
+**Про Т95.** Организаторы назвали его обязательным показателем наравне с серой.
+До сих пор он держался на формуле ВАК: она даёт верный УРОВЕНЬ (смещение −0.8 °C),
+но MAE 5.5 °C и корреляцию 0.30 — на таком числе жёсткий предел 360 °C был бы
+ложной точностью, поэтому оптимизатор брал от формулы только приращение. Между тем
+лабораторных анализов Т95 на обучающем периоде **900** — столько же, сколько по
+сере. То есть показатель можно моделировать полноценно, и главная проверка здесь
+одна: бьёт ли модель формулу справочника.
 """
 from __future__ import annotations
 
@@ -21,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.features import time_split  # noqa: E402
 from nefte.models.dataset import (  # noqa: E402
+    QUALITY_TARGETS,
     build_feature_matrix,
     build_training_table,
     persistence_baselines,
@@ -53,10 +64,17 @@ def main() -> int:
                     help="выбросить признаки vak_* — абляция вклада формул справочника")
     ap.add_argument("--tag", default="",
                     help="суффикс имени модели и отчёта: чтобы абляция не затирала рабочую модель")
+    ap.add_argument("--target", default="sulfur", choices=sorted(QUALITY_TARGETS),
+                    help="какой показатель прогнозируем")
     args = ap.parse_args()
 
     cfg = load_config()
-    limit = cfg["spec"]["product_sulfur_mgkg"]["max"]
+    spec = QUALITY_TARGETS[args.target]
+    node = cfg
+    for key in spec["limit_key"]:
+        node = node[key]
+    limit = float(node)
+    print(f"показатель: {spec['name']} ({spec['unit']}), предел {limit:g}")
 
     print("[1/4] матрица признаков…")
     feats = build_feature_matrix()
@@ -71,7 +89,8 @@ def main() -> int:
 
     print(f"[2/4] обучающая таблица, горизонт {args.horizon} ч…")
     X, y = build_training_table(horizon_hours=args.horizon, features=feats,
-                                train_bounds=tuple(cfg["split"]["train"]))
+                                train_bounds=tuple(cfg["split"]["train"]),
+                                target=args.target)
     masks = time_split(X.index, cfg)
     parts = {k: (X[m.to_numpy()], y[m.to_numpy()]) for k, m in masks.items()}
     for name, (xx, _) in parts.items():
@@ -79,7 +98,8 @@ def main() -> int:
 
     print("[3/4] обучение CatBoost (CPU)…")
     model = SulfurModel(horizon_hours=args.horizon, iterations=args.iterations,
-                        monotone=not args.no_monotone)
+                        monotone=not args.no_monotone, limit=limit,
+                        target=args.target)
     model.fit(*parts["train"], *parts["val"], top_features=args.top_features or None,
               must_keep=CONTROL_COLUMNS)
     print(f"      признаков после отбора: {len(model.features)}; "
@@ -109,7 +129,8 @@ def main() -> int:
               f"(источник риска: {model.risk_source}, порог {thr:.2f}).")
 
     print("[4/4] оценка…")
-    report = {"horizon_hours": args.horizon, "n_features": len(model.features),
+    report = {"horizon_hours": args.horizon, "target": args.target,
+              "limit": limit, "n_features": len(model.features),
               "monotone": model.monotone,
               "sigma_scale": model.sigma_scale, "alarm_threshold": model.alarm_threshold,
               "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
@@ -120,7 +141,7 @@ def main() -> int:
         if not len(yp):
             continue
         block = {"model": model.evaluate(Xp, yp, limit)}
-        for bname, bpred in persistence_baselines(Xp, yp).items():
+        for bname, bpred in persistence_baselines(Xp, yp, args.target).items():
             if bpred.notna().any():
                 block[f"baseline_{bname}"] = baseline_metrics(bpred, yp, limit)
         report["splits"][name] = block
@@ -130,9 +151,10 @@ def main() -> int:
     # числа попадают в документацию, и подмена «модели без справочника» на месте
     # рабочей осталась бы незамеченной.
     suffix = args.tag or ("_novak" if args.no_vak else "")
-    path = model.save(model.default_path(args.horizon).with_name(
-        model.default_path(args.horizon).name + suffix) if suffix else None)
-    out = ROOT / "reports" / f"quality_metrics_h{args.horizon:g}{suffix}.json"
+    base = model.default_path(args.horizon, args.target)
+    path = model.save(base.with_name(base.name + suffix) if suffix else None)
+    stem = "" if args.target == "sulfur" else f"_{args.target}"
+    out = ROOT / "reports" / f"quality_metrics{stem}_h{args.horizon:g}{suffix}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -144,7 +166,7 @@ def main() -> int:
                 v = m.get(key)
                 return None if v is None else round(v, 3)
             rows.append({"split": split, "модель": who, "n": m["n"],
-                         ">10": m.get("n_over_limit"),
+                         f">{limit:g}": m.get("n_over_limit"),
                          "MAE": round(m["MAE"], 3), "RMSE": round(m["RMSE"], 3),
                          "bias": round(m["bias"], 3),
                          "покрытие80": _r("coverage_80"),

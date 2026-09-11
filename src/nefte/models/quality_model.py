@@ -43,6 +43,31 @@ PHYSICS_MONOTONE: dict[str, int] = {
     # катализатор стареет — при тех же условиях сера растёт
     "reg_run_hours": 1,
 }
+# Направление влияния для Т95 — ВТОРОГО обязательного показателя.
+#
+# Знаки взяты не из общих соображений: исправленная организаторами формула
+# виртуального анализатора `24-2000:GODT:T95` содержит температуру Р-202 с
+# коэффициентом +0.50, то есть глубже режим — тяжелее хвост разгонки. По данным
+# направление то же: корреляция Т95 с T5 +0.14, с расходом сырья +0.21.
+#
+# Знаков здесь МЕНЬШЕ, чем у серы, и это намеренно. По сере физика гидроочистки
+# известна по каждому каналу; по Т95 уверенно известен только знак температуры и
+# нагрузки, а остальное — догадки. Зашивать догадку в ограничение модели хуже,
+# чем оставить признак свободным: ограничение нельзя переучить данными.
+PHYSICS_MONOTONE_T95: dict[str, int] = {
+    # выше температура реактора — тяжелее продукт
+    "ht_T5": 1, "ht_T6": 1, "ht_T11": 1,
+    "reg_wabt": 1, "reg_wabt_mean36": 1, "reg_wabt_mean144": 1,
+    # выше нагрузка — хуже отпарка лёгких, хвост уходит вверх
+    "ht_F26": 1,
+}
+
+# Наборы знаков по показателям: модель выбирает свой по имени цели.
+PHYSICS_BY_TARGET: dict[str, dict[str, int]] = {
+    "sulfur": PHYSICS_MONOTONE,
+    "t95": PHYSICS_MONOTONE_T95,
+}
+
 # 90 % интервал: σ = (q90 - q10) / (2 * 1.2816)
 Z90 = 1.2815515655446004
 
@@ -195,6 +220,15 @@ class SulfurModel:
     alarm_threshold_fbeta: float | None = None
     # зашивать ли в модель физическое направление отклика
     monotone: bool = True
+    # какой показатель прогнозируем: от этого зависят знаки физики и имя файла
+    target: str = "sulfur"
+    # Сдвиг цели при обучении. НЕ косметика: с монотонными ограничениями CatBoost
+    # теряет автоматическое начальное приближение и начинает подъём от нуля. На
+    # сере (уровень 8.5) это стоило смещения −0.28 мг/кг, а на Т95 (уровень 347)
+    # модель не доезжала до уровня вовсе — MAE 90 против 5.3. Учим на отклонении
+    # от медианы обучающей выборки и возвращаем сдвиг при прогнозе; физика в
+    # ограничениях от этого не меняется, а начальная точка перестаёт быть нулём.
+    y_offset: float = 0.0
     metrics: dict = field(default_factory=dict)
     # матрица признаков на регулярной сетке; нужна, чтобы отдать прогноз по ProcessState
     feature_matrix: pd.DataFrame | None = None
@@ -211,7 +245,8 @@ class SulfurModel:
         """
         if top_features:
             probe = SulfurModel(iterations=self.iterations, learning_rate=self.learning_rate,
-                                depth=self.depth, seed=self.seed, limit=self.limit)
+                                depth=self.depth, seed=self.seed, limit=self.limit,
+                                target=self.target, monotone=self.monotone)
             probe.fit(X, y, X_val, y_val)
             imp = probe.feature_importance(top_features)
             keep = list(imp[imp > 0].index) or list(X.columns[:top_features])
@@ -226,8 +261,13 @@ class SulfurModel:
         from catboost import CatBoostRegressor
 
         self.features = list(X.columns)
-        eval_set = (X_val[self.features], y_val) if X_val is not None else None
         constraints = self._monotone_constraints()
+        # сдвиг считаем ТОЛЬКО по обучающей выборке: медиана валидации — это уже
+        # подглядывание, пусть и слабое
+        self.y_offset = float(np.median(y)) if constraints else 0.0
+        y_fit = y - self.y_offset
+        eval_set = ((X_val[self.features], y_val - self.y_offset)
+                    if X_val is not None else None)
 
         for name, loss in [("q50", "Quantile:alpha=0.5"),
                            ("q10", "Quantile:alpha=0.1"),
@@ -238,7 +278,7 @@ class SulfurModel:
                 random_seed=self.seed, verbose=False, allow_writing_files=False,
                 task_type="CPU", monotone_constraints=constraints,
             )
-            model.fit(X, y, eval_set=eval_set, use_best_model=eval_set is not None)
+            model.fit(X, y_fit, eval_set=eval_set, use_best_model=eval_set is not None)
             self.models[name] = model
 
         self._fit_classifier(X, y, X_val, y_val)
@@ -253,7 +293,8 @@ class SulfurModel:
         """
         if not self.monotone:
             return None
-        constraints = [PHYSICS_MONOTONE.get(f, 0) for f in self.features]
+        physics = PHYSICS_BY_TARGET.get(self.target, PHYSICS_MONOTONE)
+        constraints = [physics.get(f, 0) for f in self.features]
         return constraints if any(constraints) else None
 
     def _fit_classifier(self, X, y, X_val=None, y_val=None) -> None:
@@ -282,7 +323,8 @@ class SulfurModel:
     def predict_frame(self, X: pd.DataFrame) -> pd.DataFrame:
         """Прогноз для таблицы признаков: ``q50, q10, q90, sigma``."""
         Xf = X[self.features]
-        out = pd.DataFrame({k: m.predict(Xf) for k, m in self.models.items()}, index=X.index)
+        out = pd.DataFrame({k: m.predict(Xf) + self.y_offset
+                            for k, m in self.models.items()}, index=X.index)
         out["sigma"] = ((out["q90"] - out["q10"]) / (2 * Z90)).clip(lower=0.1) * self.sigma_scale
         return out
 
@@ -446,12 +488,13 @@ class SulfurModel:
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def default_path(horizon_hours: float) -> Path:
-        """Модели разных горизонтов не перетирают друг друга."""
-        return MODELS_DIR / f"sulfur_h{horizon_hours:g}"
+    def default_path(horizon_hours: float, target: str = "sulfur") -> Path:
+        """Модели разных горизонтов и показателей не перетирают друг друга."""
+        stem = "sulfur" if target == "sulfur" else target
+        return MODELS_DIR / f"{stem}_h{horizon_hours:g}"
 
     def save(self, path: Path | None = None) -> Path:
-        path = path or self.default_path(self.horizon_hours)
+        path = path or self.default_path(self.horizon_hours, self.target)
         path.mkdir(parents=True, exist_ok=True)
         for name, model in self.models.items():
             model.save_model(str(path / f"{name}.cbm"))
@@ -462,7 +505,8 @@ class SulfurModel:
                 "metrics": self.metrics, "seed": self.seed,
                 "sigma_scale": self.sigma_scale,
                 "alarm_threshold": self.alarm_threshold, "limit": self.limit,
-                "monotone": self.monotone,
+                "monotone": self.monotone, "target": self.target,
+                "y_offset": self.y_offset,
                 "risk_calibration": list(self.risk_calibration) if self.risk_calibration else None,
                 "risk_source": self.risk_source, "alarm_reliable": self.alarm_reliable}
         (path / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
@@ -485,7 +529,9 @@ class SulfurModel:
                   risk_source=meta.get("risk_source", "classifier"),
                   alarm_reliable=meta.get("alarm_reliable", True),
                   alarm_threshold_fbeta=meta.get("alarm_threshold_fbeta"),
-                  monotone=meta.get("monotone", True))
+                  monotone=meta.get("monotone", True),
+                  target=meta.get("target", "sulfur"),
+                  y_offset=meta.get("y_offset", 0.0))
         for name in ("q50", "q10", "q90"):
             model = CatBoostRegressor()
             model.load_model(str(path / f"{name}.cbm"))
