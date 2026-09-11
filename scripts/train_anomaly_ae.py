@@ -57,6 +57,8 @@ def main() -> int:
     ap.add_argument("--latent", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44],
+                    help="сиды обучения; сохраняется модель ПЕРВОГО")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -76,16 +78,27 @@ def main() -> int:
     maha_score = pd.Series(maha.distance(hourly) / maha.threshold, index=hourly.index)
     maha_flag = maha_score > 1.0
 
-    print(f"[3/4] LSTM-автоэнкодер (окно {args.window} ч)…")
-    ae = LSTMAnomalyDetector.fit(hourly, list(hourly.columns), train=train,
-                                 window=args.window, hidden=args.hidden,
-                                 latent=args.latent, epochs=args.epochs,
-                                 prefer_gpu=not args.cpu)
-    if not ae.fitted:
-        print("      не удалось обучить: слишком мало полных окон")
+    print(f"[3/4] LSTM-автоэнкодер (окно {args.window} ч), сиды {args.seeds}…")
+    # Один прогон сети ничего не доказывает: обучение зависит от сида, а порог
+    # берётся из её же ошибки восстановления. Поэтому обучаем несколько раз и
+    # смотрим на РАЗБРОС вывода, а не на одно число. Махаланобис такой проверки
+    # не требует по построению — он детерминирован, и это само по себе довод.
+    fitted = []
+    for seed in args.seeds:
+        model = LSTMAnomalyDetector.fit(hourly, list(hourly.columns), train=train,
+                                        window=args.window, hidden=args.hidden,
+                                        latent=args.latent, epochs=args.epochs,
+                                        seed=seed, prefer_gpu=not args.cpu)
+        if not model.fitted:
+            print(f"      сид {seed}: не удалось обучить, слишком мало полных окон")
+            continue
+        print(f"      сид {seed}: {model.history['epochs']} эпох на "
+              f"{model.history['n_windows']} окнах, устройство "
+              f"{model.history['device']}, MSE {model.history['val_mse']:.4f}")
+        fitted.append(model)
+    if not fitted:
         return 1
-    print(f"      {ae.history['epochs']} эпох на {ae.history['n_windows']} окнах, "
-          f"устройство {ae.history['device']}, MSE {ae.history['val_mse']:.4f}")
+    ae = fitted[0]
     ae_score = ae.normalized(hourly)
     ae_flag = (ae_score > 1.0).fillna(False)
     path = ae.save()
@@ -111,21 +124,40 @@ def main() -> int:
     # и на событиях даст около 4 %. Поэтому рядом считаем ЛИФТ — во сколько раз
     # чаще детектор срабатывает на событии, чем вообще на тестовом периоде.
     # Лифт около 1 означает «сигнала нет», как бы ни выглядел сам процент.
-    rows = []
-    for name, detector_flag in (("Махаланобис", maha_flag), ("автоэнкодер", ae_flag)):
+    events = (("остановы", down), ("зависший ПАК", pak_frozen),
+              ("часы превышений", over_hourly))
+
+    def metrics(name: str, detector_flag: pd.Series) -> dict:
         row = {"детектор": name}
         for split, bounds in windows.items():
             row[f"нетипично {split}, %"] = round(share(detector_flag, bounds) * 100, 2)
         base = share(detector_flag, windows["test"])
-        for label, mask in (("остановы", down), ("зависший ПАК", pak_frozen),
-                            ("часы превышений", over_hourly)):
+        for label, mask in events:
             value = float(detector_flag[mask].mean()) if mask.any() else float("nan")
             row[f"{label}, %"] = round(value * 100, 2)
             row[f"{label}, лифт"] = round(value / base, 2) if base else None
-        rows.append(row)
+        return row
+
+    rows = [metrics("Махаланобис", maha_flag)]
+    per_seed = []
+    for model in fitted:
+        flag = (model.normalized(hourly) > 1.0).fillna(False)
+        row = metrics(f"автоэнкодер, сид {model.seed}", flag)
+        row["эпох"] = model.history["epochs"]
+        row["MSE"] = round(float(model.history["val_mse"]), 4)
+        per_seed.append(row)
+    rows.extend(per_seed)
     table = pd.DataFrame(rows)
     print()
     print(table.to_string(index=False))
+
+    if len(per_seed) > 1:
+        print("\nРазброс по сидам (то, чего у детерминированного детектора нет):")
+        for key in ("нетипично test, %", "зависший ПАК, лифт", "часы превышений, лифт"):
+            values = [r[key] for r in per_seed if r.get(key) is not None]
+            if values:
+                print(f"  {key:22s} {min(values):6.2f} … {max(values):6.2f}  "
+                      f"(Махаланобис {rows[0][key]})")
 
     both = maha_flag & ae_flag
     either = maha_flag | ae_flag
@@ -142,7 +174,10 @@ def main() -> int:
     print(f"\nСогласие на тесте: {agreement}")
 
     report = {
+        "условия": "пересчёт ПОСЛЕ задержки публикации ЛИМС (4 ч) и поправок "
+                   "организаторов к формулам справочника",
         "window_hours": args.window, "hidden": args.hidden, "latent": args.latent,
+        "seeds": list(args.seeds),
         "device": ae.history.get("device"), "ae_history": ae.history,
         "columns": list(hourly.columns),
         "thresholds": {"mahalanobis": maha.threshold, "autoencoder": ae.threshold},
@@ -154,15 +189,25 @@ def main() -> int:
                    encoding="utf-8")
 
     # --- вердикт ------------------------------------------------------- #
-    maha_row, ae_row = rows[0], rows[1]
+    maha_row, ae_row = rows[0], per_seed[0]
     drift_maha = maha_row["нетипично test, %"] - maha_row["нетипично train, %"]
     drift_ae = ae_row["нетипично test, %"] - ae_row["нетипично train, %"]
     print("\nВердикт:")
     print(f"  сдвиг доли аномалий train→test: Махаланобис {drift_maha:+.2f} п.п., "
           f"автоэнкодер {drift_ae:+.2f} п.п. — оба реагируют на смену периода.")
     for label in ("остановы", "зависший ПАК", "часы превышений"):
+        lifts = [r[f"{label}, лифт"] for r in per_seed
+                 if r.get(f"{label}, лифт") is not None]
+        span = (f"{min(lifts)}…{max(lifts)}" if len(lifts) > 1
+                else str(lifts[0] if lifts else "—"))
         print(f"  {label}: лифт Махаланобиса {maha_row[f'{label}, лифт']}, "
-              f"автоэнкодера {ae_row[f'{label}, лифт']}  (1.0 — сигнала нет)")
+              f"автоэнкодера {span}  (1.0 — сигнала нет)")
+    best_pak = max((r["зависший ПАК, лифт"] for r in per_seed
+                    if r.get("зависший ПАК, лифт") is not None), default=0.0)
+    if maha_row["зависший ПАК, лифт"] and best_pak < maha_row["зависший ПАК, лифт"]:
+        print("  На единственном событии, где вообще есть сигнал (зависание ПАК),")
+        print("  Махаланобис сильнее ЛЮБОГО из обученных сидов: вывод прошлого")
+        print("  захода подтверждён в новых условиях, а не унаследован.")
     print(f"  согласие детекторов на тесте слабое: жаккар {agreement['жаккар']}, "
           f"корреляция оценок {agreement['корреляция оценок']}. Они видят РАЗНОЕ, "
           f"и складывать их в один индекс без разметки нельзя.")
