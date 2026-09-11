@@ -145,6 +145,33 @@ def pick_threshold_for_budget(risk, budget: float) -> float:
     return float(np.quantile(risk, 1.0 - budget))
 
 
+def rolling_budget_threshold(risk: pd.Series, budget: float,
+                             window_days: int = 30,
+                             min_periods: int = 20) -> pd.Series:
+    """Порог тревоги по бюджету, пересчитываемый на скользящем окне.
+
+    Зачем он нужен вместо одного числа с валидации. Порог по бюджету — это
+    квантиль РАСПРЕДЕЛЕНИЯ РИСКА, и он осмыслен ровно настолько, насколько это
+    распределение стабильно. У бустинга оно стабильно (средний риск 0.143 на
+    валидации и 0.150 на тесте), и фиксированный порог держит бюджет: 29.9 % и
+    30.5 % моментов с тревогой. А у нейросети средний риск на тесте УДВАИВАЕТСЯ
+    (0.148 → 0.325), и тот же приём даёт 68.7 % вместо 30 % — система вмешивается
+    в две трети спокойных моментов.
+
+    Скользящий порог считается по собственному выходу модели за прошедшее окно и
+    **не требует меток**: лаборатория приходит раз в сутки с задержкой, а квантиль
+    риска известен сразу. Поэтому приём применим в эксплуатации, а не только в
+    отчёте.
+
+    ``shift(1)`` обязателен: порог для момента t считается по риску СТРОГО до t.
+    Без сдвига текущее значение участвует в собственном пороге — утечка того же
+    рода, что ловилась в признаках.
+    """
+    quantile = 1.0 - float(min(max(budget, 1e-3), 1.0))
+    return (risk.rolling(f"{int(window_days)}D", min_periods=min_periods)
+            .quantile(quantile).shift(1))
+
+
 def interval_metrics(pred: pd.DataFrame, y: pd.Series, risk: pd.Series,
                      limit: float, alarm_threshold: float,
                      risk_thresholds: tuple[float, ...] = (0.2, 0.5)) -> dict:
@@ -168,6 +195,11 @@ def interval_metrics(pred: pd.DataFrame, y: pd.Series, risk: pd.Series,
         "coverage_80": float(inside),
         "n_over_limit": int(over_true.sum()),
         "alarm_threshold": float(alarm_threshold),
+        # Доля моментов с тревогой — то, что бюджет и обещает. Без этого числа
+        # нельзя заметить, что порог, выбранный на валидации, на другом периоде
+        # означает другую частоту вмешательств. У нейросети на горизонте 2 ч он
+        # означал 68.7 % вместо обещанных 30 %, и увидеть это было негде.
+        "alarm_rate": float((risk > alarm_threshold).mean()),
     }
     for thr in tuple(risk_thresholds) + (round(float(alarm_threshold), 2),):
         alarm = risk > thr
