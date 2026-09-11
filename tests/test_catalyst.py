@@ -15,6 +15,7 @@ import pytest
 from nefte.models.catalyst import (
     RESET_STEP_C,
     Cycle,
+    feed_normalized_wabt,
     lag_against_reference,
     level_at_runday,
     local_rate,
@@ -219,3 +220,53 @@ def test_local_rate_sees_the_plateau_the_whole_cycle_slope_hides():
     assert whole > 0.5
     assert plateau == pytest.approx(0.0, abs=0.05)
     assert local_rate(frame, cycle=1, since_day=195.0, until_day=200.0) is None
+
+
+def test_feed_normalized_wabt_removes_the_load_effect_and_needs_no_laboratory():
+    """Прокси для severity: считается по телеметрии, лаборатория не нужна.
+
+    Установка, которая держит ТУ ЖЕ температуру при БОЛЬШЕЙ нагрузке, работает
+    лучше — времени контакта меньше. Приведение к опорной нагрузке обязано это
+    показать, опустив приведённую температуру.
+    """
+    index = pd.date_range("2026-01-01", periods=3, freq="D")
+    wabt = pd.Series([365.0, 365.0, 365.0], index=index)
+    feed = pd.Series([200.0, 250.0, 300.0], index=index)
+    out = feed_normalized_wabt(wabt, feed, feed_reference=250.0)
+    assert out.iloc[0] > out.iloc[1] > out.iloc[2]
+    # на опорной нагрузке поправлять нечего
+    assert out.iloc[1] == pytest.approx(365.0, abs=1e-6)
+
+
+def test_feed_normalized_wabt_survives_a_shutdown_without_infinities():
+    """На останове расход падает в ноль: логарифм нуля — пропуск, а не значение."""
+    index = pd.date_range("2026-01-01", periods=3, freq="D")
+    out = feed_normalized_wabt(pd.Series([365.0, 365.0, 20.0], index=index),
+                               pd.Series([250.0, 0.0, -0.3], index=index),
+                               feed_reference=250.0)
+    assert out.iloc[0] == pytest.approx(365.0, abs=1e-6)
+    assert out.iloc[1:].isna().all()
+
+
+def test_two_normalizations_answer_two_different_questions():
+    """Полная и нагрузочная нормировки НЕ взаимозаменяемы, и это надо помнить.
+
+    Полная отвечает «какая температура дала бы эталонную серу» и требует
+    лабораторию. Нагрузочная отвечает «какая была бы температура при опорном
+    расходе» и считается по телеметрии. Совпадают они только там, где сера и так
+    эталонная.
+    """
+    index = pd.date_range("2026-01-01", periods=1, freq="D")
+    args = dict(feed_reference=250.0, target_sulfur=8.0)
+    same = normalized_wabt(pd.Series([365.0], index=index), pd.Series([250.0], index=index),
+                           pd.Series([8.0], index=index), pd.Series([9300.0], index=index),
+                           **args)
+    load_only = feed_normalized_wabt(pd.Series([365.0], index=index),
+                                     pd.Series([250.0], index=index), feed_reference=250.0)
+    assert same.iloc[0] == pytest.approx(load_only.iloc[0], abs=1e-6)
+
+    # а при неэталонной сере расходятся: полная её учитывает, нагрузочная нет
+    worse = normalized_wabt(pd.Series([365.0], index=index), pd.Series([250.0], index=index),
+                            pd.Series([20.0], index=index), pd.Series([9300.0], index=index),
+                            **args)
+    assert worse.iloc[0] > load_only.iloc[0] + 1.0
