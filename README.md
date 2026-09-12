@@ -90,6 +90,7 @@ python scripts/check_feature_stability.py # устойчив ли отбор п�
 python scripts/check_t95_sigma.py         # разброс Т95 как функция возраста анализа
 python scripts/check_alarm_budget.py --horizon 2 --model seq --arch tcn --window 48 --pretrain
                                           # держится ли бюджет тревог и что даёт скользящий порог
+python scripts/check_run_safety.py train_quality.py  # заденут ли правки идущий прогон
 python scripts/check_cetane.py            # цетановое число: тренд, индекс, цена присадки
 python scripts/find_delays.py             # запаздывание «уставка → сера» по данным
 python scripts/check_tag_meaning.py       # что теги измеряют на самом деле (24-2000)
