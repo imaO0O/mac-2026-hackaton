@@ -98,7 +98,31 @@ def _safe_ratio(num: pd.Series, den: pd.Series) -> pd.Series:
     return num / den
 
 
-def instant_features(ht: pd.DataFrame) -> pd.DataFrame:
+def reference_feed(feed: pd.Series, train_bounds: tuple[str, str] | None = None) -> float:
+    """Опорный расход сырья, от которого считаются пороги останова и нормировки.
+
+    Берётся медиана, и вопрос только в том, по какому куску истории. По ВСЕЙ —
+    значит определение признака зависит от будущего: порог, по которому мы в 2024
+    году решаем «установка стоит», посчитан в том числе по 2026-му. Это тот же
+    вид утечки, который уже исправляли в нормировке severity.
+
+    Величину измерили, прежде чем чинить: медиана по всей истории 256.24 против
+    252.56 по обучающему периоду, расхождение 1.5 %, и вердикт «останов» меняется
+    ровно у ОДНОГО отсчёта из 189 217. То есть утечка настоящая, а последствий у
+    неё нет. Чиним ради правила, а не ради чисел — при другом пороге или другой
+    установке разница может оказаться не такой безобидной.
+
+    Без ``train_bounds`` поведение прежнее: это нужно вызывающим, у которых нет
+    конфига под рукой.
+    """
+    scope = feed if train_bounds is None else feed.loc[train_bounds[0]:train_bounds[1]]
+    if not len(scope) or not scope.notna().any():
+        scope = feed
+    return float(scope.median())
+
+
+def instant_features(ht: pd.DataFrame,
+                     train_bounds: tuple[str, str] | None = None) -> pd.DataFrame:
     """Признаки, полностью определяемые мгновенными значениями тегов.
 
     Именно они пересчитываются, когда оптимизатор пробует новую уставку.
@@ -115,7 +139,8 @@ def instant_features(ht: pd.DataFrame) -> pd.DataFrame:
     if feed is not None:
         # На остановах и провалах нагрузки отношения к расходу сырья не имеют
         # смысла: делить на почти ноль — значит породить выброс, а не признак.
-        floor = float(feed.median()) * 0.1 if feed.notna().any() else 0.0
+        floor = (reference_feed(feed, train_bounds) * 0.1
+                 if feed.notna().any() else 0.0)
         feed = feed.where(feed > max(floor, 1e-6))
         if RECYCLE_GAS in ht.columns:
             out["reg_h2_oil"] = _safe_ratio(ht[RECYCLE_GAS], feed)
@@ -138,7 +163,8 @@ def instant_features(ht: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def history_features(ht: pd.DataFrame, steps_per_hour: int = 6) -> pd.DataFrame:
+def history_features(ht: pd.DataFrame, steps_per_hour: int = 6,
+                     train_bounds: tuple[str, str] | None = None) -> pd.DataFrame:
     """Признаки, требующие истории: наработка и дрейф режима.
 
     Разметки остановов и замен катализатора в пакете нет, поэтому останов
@@ -151,7 +177,8 @@ def history_features(ht: pd.DataFrame, steps_per_hour: int = 6) -> pd.DataFrame:
         return out
 
     out["reg_run_hours"] = hours_since_outage(ht[FEED], min_outage_hours=6,
-                                              steps_per_hour=steps_per_hour)
+                                              steps_per_hour=steps_per_hour,
+                                              train_bounds=train_bounds)
 
     temps = [t for t in REACTOR_TEMPS if t in ht.columns]
     if temps:
@@ -224,7 +251,8 @@ def normalized_wabt(wabt: pd.Series, known_sulfur: pd.Series,
 
 def outage_mask(feed: pd.Series, min_outage_hours: float = 6.0,
                 steps_per_hour: int = 6, level: float = 0.2,
-                retrospective: bool = False) -> pd.Series:
+                retrospective: bool = False,
+                train_bounds: tuple[str, str] | None = None) -> pd.Series:
     """Маска останова: расход сырья ниже ``level`` от медианы дольше заданного срока.
 
     Считать нужно по СЫРОМУ сигналу. Детектор достоверности справедливо убирает
@@ -249,7 +277,7 @@ def outage_mask(feed: pd.Series, min_outage_hours: float = 6.0,
     Исправлено не ради метрик, а чтобы правило не выстрелило при другом пороге или
     другой сетке.
     """
-    down = feed < feed.median() * level
+    down = feed < reference_feed(feed, train_bounds) * level
     block = (down != down.shift()).cumsum()
     needed = min_outage_hours * steps_per_hour
     grouped = down.groupby(block)
@@ -259,9 +287,11 @@ def outage_mask(feed: pd.Series, min_outage_hours: float = 6.0,
 
 
 def hours_since_outage(feed: pd.Series, min_outage_hours: float = 6.0,
-                       steps_per_hour: int = 6) -> pd.Series:
+                       steps_per_hour: int = 6,
+                       train_bounds: tuple[str, str] | None = None) -> pd.Series:
     """Часы с последнего останова заданной длительности."""
-    shutdown = outage_mask(feed, min_outage_hours, steps_per_hour)
+    shutdown = outage_mask(feed, min_outage_hours, steps_per_hour,
+                           train_bounds=train_bounds)
     index = feed.index.to_series()
     marks = index.where(shutdown).ffill()
     since = (index - marks).dt.total_seconds() / 3600
@@ -269,11 +299,13 @@ def hours_since_outage(feed: pd.Series, min_outage_hours: float = 6.0,
 
 
 def regime_features(ht: pd.DataFrame, with_history: bool = True,
-                    steps_per_hour: int = 6) -> pd.DataFrame:
+                    steps_per_hour: int = 6,
+                    train_bounds: tuple[str, str] | None = None) -> pd.DataFrame:
     """Все признаки режима по «сырым» тегам установки 24-2000."""
-    parts = [instant_features(ht)]
+    parts = [instant_features(ht, train_bounds=train_bounds)]
     if with_history:
-        parts.append(history_features(ht, steps_per_hour))
+        parts.append(history_features(ht, steps_per_hour,
+                                      train_bounds=train_bounds))
     return pd.concat(parts, axis=1).astype("float32")
 
 

@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.features import time_split  # noqa: E402
 from nefte.models.dataset import (  # noqa: E402
+    FEATURE_VERSION,
     build_feature_matrix,
     build_training_table,
     persistence_baselines,
@@ -123,6 +124,13 @@ def main() -> int:
         "alarm_threshold": model.alarm_threshold,
         "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
         "alarm_budget": cfg["quality"].get("alarm_budget"),
+        # Версия матрицы признаков и разбиение — чтобы отчёт сети попадал под тот
+        # же контракт свежести, что и отчёты бустинга. Без них числа нейросетей
+        # могли устареть молча, а сравнение «сеть против бустинга» — незаметно
+        # превратиться в сравнение двух разных сборок.
+        "feature_version": FEATURE_VERSION,
+        "split": {k: list(v) for k, v in cfg["split"].items()
+                  if isinstance(v, (list, tuple))},
         "history": model.history,
         "splits": {},
     }

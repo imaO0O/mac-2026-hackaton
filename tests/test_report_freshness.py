@@ -18,7 +18,11 @@ import pytest
 from nefte.config import ROOT, load_config
 from nefte.models.dataset import FEATURE_VERSION
 
-REPORTS = sorted((ROOT / "reports").glob("quality_metrics_*.json"))
+# Контракт покрывает и бустинг, и нейросети: сравнение «сеть против бустинга»
+# осмысленно, только если обе стороны считаны на одной матрице. Раньше отчёты
+# сетей были вне проверки и могли устареть молча.
+REPORTS = sorted(list((ROOT / "reports").glob("quality_metrics_*.json"))
+                 + list((ROOT / "reports").glob("sequence_metrics_*.json")))
 
 
 def _load(path: Path) -> dict:
