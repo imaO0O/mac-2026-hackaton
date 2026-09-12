@@ -106,32 +106,61 @@ def changed_definitions(path: pathlib.Path, since: str | None) -> set[str]:
         return set()
 
     touched: set[int] = set()
+    removed: set[int] = set()
     for line in diff.splitlines():
         if not line.startswith("@@"):
             continue
-        # @@ -12,3 +12,5 @@ — берём номера НОВОГО файла
+        # @@ -12,3 +12,5 @@ — слева номера СТАРОГО файла, справа НОВОГО
         try:
-            head = line.split("+", 1)[1].split("@@", 1)[0].strip()
-            start, _, count = head.partition(",")
-            start, count = int(start), int(count or 1)
+            body = line.split("@@")[1]
+            minus, plus = body.split("+")
+            o_start, _, o_count = minus.strip().lstrip("-").partition(",")
+            n_start, _, n_count = plus.strip().partition(",")
+            o_start, o_count = int(o_start), int(o_count or 1)
+            n_start, n_count = int(n_start), int(n_count or 1)
         except (IndexError, ValueError):
             continue
-        touched.update(range(start, start + max(count, 1)))
-    if not touched:
-        return set()
+        if n_count:
+            touched.update(range(n_start, n_start + n_count))
+        if o_count:
+            # чистое удаление: в новом файле строк нет, разбирать надо СТАРЫЙ.
+            # Иначе инструмент отвечает «не разобрать» и тревожит на всякий
+            # случай — та же ложная тревога, ради устранения которой он писался.
+            removed.update(range(o_start, o_start + o_count))
 
+    names: set[str] = set()
+    names |= _definitions_at(path.read_text(encoding="utf-8"), touched)
+    if removed:
+        names |= _definitions_at(_old_text(path, since), removed)
+    return names
+
+
+def _old_text(path: pathlib.Path, since: str | None) -> str:
+    """Содержимое файла до правки: из ревизии или из индекса."""
+    ref = f"{since}:{path.relative_to(ROOT).as_posix()}" if since         else f":{path.relative_to(ROOT).as_posix()}"
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
+        return subprocess.run(["git", "show", ref], cwd=ROOT, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              check=True).stdout or ""
+    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
+        return ""
+
+
+def _definitions_at(source: str, lines: set[int]) -> set[str]:
+    """Определения верхнего уровня, попавшие на указанные строки."""
+    if not source or not lines:
+        return set()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
         return set()
     names = set()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            lo = node.lineno
-            hi = getattr(node, "end_lineno", node.lineno)
-            if any(lo <= n <= hi for n in touched):
+            lo, hi = node.lineno, getattr(node, "end_lineno", node.lineno)
+            if any(lo <= n <= hi for n in lines):
                 names.add(node.name)
-        elif touched & {getattr(node, "lineno", -1)}:
+        elif getattr(node, "lineno", -1) in lines:
             names.add("<верхний уровень модуля>")
     return names
 

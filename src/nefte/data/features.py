@@ -70,22 +70,21 @@ def known_from(series: pd.Series, delay_hours: float) -> pd.Series:
     return shifted
 
 
-def add_lags(df: pd.DataFrame, columns: list[str], lags_steps: list[int],
-             prefix: str = "") -> pd.DataFrame:
-    """Лаговые признаки. Шаг = шаг сетки (10 мин), 6 шагов = 1 час."""
-    out = {f"{prefix}{c}_lag{l}": df[c].shift(l) for c in columns for l in lags_steps}
-    return pd.concat([df, pd.DataFrame(out, index=df.index)], axis=1)
-
-
-def add_rollings(df: pd.DataFrame, columns: list[str], windows_steps: list[int],
-                 stats: tuple[str, ...] = ("mean", "std")) -> pd.DataFrame:
-    """Скользящие статистики — сглаживают шум КИП и дают «память» о режиме."""
-    frames = [df]
-    for w in windows_steps:
-        roll = df[columns].rolling(w, min_periods=max(2, w // 3))
-        for stat in stats:
-            frames.append(getattr(roll, stat)().add_suffix(f"_{stat}{w}"))
-    return pd.concat(frames, axis=1)
+# Здесь лежали ещё три помощника — ``add_lags``, ``add_rollings`` и
+# ``make_supervised``. Все три не вызывались ниоткуда, и все три дублировали то,
+# что матрица признаков делает у себя (`models/dataset.py`).
+#
+# Удалены не за мёртвость, а за то, что дублирование в этом файле уже один раз
+# выстрелило: ``wabt`` нормировала веса по полному набору столбцов и при отказе
+# датчика давала 233 °C вместо 350, пока живой расчёт агентов считал правильно.
+#
+# У ``make_supervised`` был отдельный повод. Она сдвигала ЦЕЛЬ вперёд
+# (``y.shift(-h)``), то есть помечала строку моментом признаков. Матрица делает
+# обратное: строка помечается моментом АНАЛИЗА, а признаки берутся за H часов до
+# него. Разница не косметическая — при делении на train/val/test одна и та же
+# пара «признаки, анализ» оказывается по разные стороны границы. Соглашение
+# выбрано и записано (docs/PLAN.md, «горизонт сдвигает признаки назад, а не цель
+# вперёд»), и держать рядом функцию с противоположным значило оставлять грабли.
 
 
 def wabt(temps: pd.DataFrame, weights: list[float] | None = None) -> pd.Series:
@@ -144,13 +143,3 @@ def time_split(index: pd.DatetimeIndex, cfg: dict | None = None) -> dict[str, pd
     }
 
 
-def make_supervised(features: pd.DataFrame, target: pd.Series,
-                    horizon_steps: int = 0) -> tuple[pd.DataFrame, pd.Series]:
-    """Выравнивает X и y с горизонтом прогноза.
-
-    ``horizon_steps`` — на сколько шагов вперёд предсказываем (запаздывание
-    отклика качества на изменение режима). y(t + h) объясняется X(t).
-    """
-    y = target.shift(-horizon_steps) if horizon_steps else target
-    common = features.index.intersection(y.dropna().index)
-    return features.loc[common], y.loc[common]

@@ -107,3 +107,20 @@ def test_git_output_in_russian_does_not_break_the_check(module):
     assert isinstance(names, set)
     assert "QualityAgent" in names or not names, (
         "разбор диффа вернул мусор — проверьте кодировку вызова git")
+
+
+def test_a_pure_deletion_is_resolved_by_name(module):
+    """Удаление функции должно называться по имени, а не «не разобрать правку».
+
+    Чистое удаление не оставляет строк в новом файле, и разбор по нему даёт
+    пустоту. Инструмент тогда тревожил на всякий случай — ровно та ложная
+    тревога, ради устранения которой он и писался. Имена берутся из старой
+    ревизии.
+    """
+    names = module.changed_definitions(
+        ROOT / "src" / "nefte" / "data" / "features.py", "HEAD")
+    if not names:
+        pytest.skip("features.py не правлен относительно HEAD")
+    assert "<не разобрать правку>" not in names
+    assert {"add_lags", "add_rollings", "make_supervised"} & names, (
+        f"удалённые функции не опознаны, вернулось {sorted(names)}")
