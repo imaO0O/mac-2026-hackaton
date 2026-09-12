@@ -54,3 +54,30 @@ def test_the_answer_barely_moves_with_the_threshold(missing_shares):
         "разница выросла, число перестало быть безразличным")
     assert 0.10 < MAX_MISSING_SHARE < 0.30, (
         "рабочий порог обязан стоять внутри проверенного провала")
+
+
+def test_the_lims_outlier_cut_also_stands_in_a_gap():
+    """Обрезка лабораторных выбросов — тот же случай: число назначено, промежуток пуст.
+
+    Значения серы идут плотно до 46 мг/кг, дальше скачок на 107, 120, 2120.
+    Порог 50 стоит в пустоте между ними, поэтому любое значение из [47, 106]
+    отбрасывает ровно те же три точки. Проверяется именно пустота промежутка, а
+    не само число: если в него попадут новые анализы, выбор снова станет важным.
+    """
+    pytest.importorskip("pandas")
+    from nefte.data.loaders import lims_series, load_lims
+
+    cfg = load_config()
+    raw = lims_series(cfg["quality"]["target"]["lims_source"], load_lims()).dropna()
+    raw = raw[raw > 0]
+    cut = float(cfg["quality"]["lims_sulfur_outlier_above"])
+
+    in_gap = int(((raw > 46.0) & (raw < 107.0)).sum())
+    assert in_gap == 0, (
+        f"в промежутке (46, 107) появилось {in_gap} анализов — порог обрезки "
+        "перестал быть безразличным и требует обоснования")
+    assert 46.0 < cut < 107.0, "рабочий порог обязан стоять внутри пустого промежутка"
+
+    dropped = int((raw > cut).sum())
+    assert dropped == int((raw > 80.0).sum()) == 3, (
+        "число отброшенных точек изменилось: данные поехали, разбор устарел")
