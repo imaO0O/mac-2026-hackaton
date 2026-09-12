@@ -81,9 +81,24 @@ def make_kinetic_surrogate(model, base_surrogate=None, strength: float = 1.0,
         решение зависит от силы допущения.
     """
 
+    # Уровень серы от модели зависит ТОЛЬКО от момента среза: строка признаков
+    # выбирается по времени, а уставки кандидата в неё не попадают — на то и
+    # разделение «уровень от модели, приращение от физики». Оптимизатор же зовёт
+    # суррогат для каждого из двухсот вариантов подряд с одним и тем же срезом,
+    # то есть двести раз считает одно и то же число тремя бустингами.
+    #
+    # Кэш на одну запись по метке времени: попадает почти всегда, устареть не
+    # может (ключ — сам момент), а длинные прогоны ускоряет в разы.
+    cached_ts = None
+    cached_level = float("nan")
+
     def _model_level(state: ProcessState) -> float:
-        mean, _ = model.predict_with_sigma(state)
-        return float(mean)
+        nonlocal cached_ts, cached_level
+        ts = state.ts
+        if ts != cached_ts:
+            mean, _ = model.predict_with_sigma(state)
+            cached_ts, cached_level = ts, float(mean)
+        return cached_level
 
     def _fn(state: ProcessState, moves: dict[str, float]) -> dict[str, float]:
         level = _model_level(state)
