@@ -132,9 +132,15 @@ class StateBuilder:
         if self.lims_feed_sulfur is not None:
             feed_val, feed_age = self._last(self.lims_feed_sulfur, ts)
             if feed_val is not None:
+                # Порог для сырья — СВОЙ, а не кратный порогу продукта. Продукт
+                # анализируют раз в сутки (95 % промежутков ровно 24 ч), сырьё —
+                # по совсем другому расписанию: медиана 48 ч, 90-й процентиль
+                # 715 ч. Прежний множитель ×7 зажигал флаг в 56 % срезов, и в
+                # 36 % это была ЕДИНСТВЕННАЯ жалоба в stale_sources — то есть
+                # список «чему нельзя верить» горел из-за нормального расписания.
                 quality["lims_feed_sulfur_mgkg"] = Measurement(
                     value=feed_val, unit="мг/кг", source=Source.LIMS, age_hours=feed_age,
-                    is_stale=feed_age > stale["lims"] * 7,
+                    is_stale=feed_age > stale["lims_feed"],
                     comment="сера сырья гидроочистки")
         if self.lims_t95_known is not None:
             t95_val, t95_age = self._last(self.lims_t95_known, ts)
