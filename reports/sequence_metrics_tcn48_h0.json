@@ -38,6 +38,21 @@
   "alarm_threshold": 0.24105793237686157,
   "alarm_threshold_fbeta": 0.2309,
   "alarm_budget": 0.3,
+  "feature_version": 7,
+  "split": {
+    "train": [
+      "2023-01-01",
+      "2025-06-30"
+    ],
+    "val": [
+      "2025-07-01",
+      "2025-12-31"
+    ],
+    "test": [
+      "2026-01-01",
+      "2026-08-07"
+    ]
+  },
   "history": [
     {
       "seed": 42,

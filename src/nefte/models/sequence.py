@@ -434,6 +434,30 @@ class SulfurSequenceModel:
     # контракт с QualityAgent
     # ------------------------------------------------------------------ #
     def attach(self, feature_matrix: pd.DataFrame) -> "SulfurSequenceModel":
+        """Присоединяет матрицу признаков, проверяя, что модели есть чем питаться.
+
+        Проверка здесь, а не «как получится» глубже. Сохранённая модель хранит
+        СПИСОК КАНАЛОВ, с которыми обучалась, и матрица с тех пор могла уехать.
+        Так и вышло: после перевода серы сырья в мг/кг колонка сменила имя
+        (``lims_feed_sulfur`` → ``lims_feed_sulfur_mgkg``), и модель на горизонте
+        2 ч, обученная до этого, падала внутри ``build_windows`` с
+        ``KeyError: ['lims_feed_sulfur'] not in index`` — из середины подготовки
+        окон, где ни модели, ни причины не видно.
+
+        Устаревший артефакт модели — не то же, что устаревший отчёт. Отчёт даёт
+        неверные числа, и это ловит контракт свежести; модель ПАДАЕТ, и падает
+        так, что причину надо раскапывать. Поэтому отказ должен называть и
+        модель, и недостающие каналы, и что с этим делать.
+        """
+        missing = [c for c in self.channels if c not in feature_matrix.columns]
+        if missing:
+            raise RuntimeError(
+                f"модель обучена на каналах, которых в матрице больше нет: "
+                f"{', '.join(missing)}. Матрица признаков изменилась с момента "
+                f"обучения — переобучите: scripts/train_sequence.py "
+                f"--horizon {self.horizon_hours:g} --arch {self.arch} "
+                f"--window {self.window}"
+                + (" --pretrain" if self.pretrained else ""))
         self.feature_matrix = feature_matrix
         return self
 

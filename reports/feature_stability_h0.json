@@ -1,4 +1,19 @@
 {
+  "feature_version": 7,
+  "split": {
+    "train": [
+      "2023-01-01",
+      "2025-06-30"
+    ],
+    "val": [
+      "2025-07-01",
+      "2025-12-31"
+    ],
+    "test": [
+      "2026-01-01",
+      "2026-08-07"
+    ]
+  },
   "горизонт": 0.0,
   "показатель": "sulfur",
   "сидов": 5,
@@ -64,7 +79,7 @@
     "ht_T16_std144",
     "ht_T5",
     "ht_W4_std6",
-    "lims_feed_sulfur",
+    "lims_feed_sulfur_mgkg",
     "lims_sulfur_prev",
     "reg_drive",
     "reg_dt_react",
@@ -94,7 +109,7 @@
     "ht_P3_mean144",
     "ht_W4_std144",
     "ht_W7_std6",
-    "lims_feed_sulfur_age_h",
+    "lims_feed_sulfur_mgkg_age_h",
     "pak_sulfur",
     "pak_sulfur_mean6",
     "vak_AVT6_350_I350"
@@ -161,8 +176,8 @@
     "ht_W4_std144": 1,
     "ht_W4_std6": 5,
     "ht_W7_std6": 1,
-    "lims_feed_sulfur": 5,
-    "lims_feed_sulfur_age_h": 1,
+    "lims_feed_sulfur_mgkg": 5,
+    "lims_feed_sulfur_mgkg_age_h": 1,
     "lims_sulfur_prev": 5,
     "pak_sulfur": 1,
     "pak_sulfur_d6h": 2,

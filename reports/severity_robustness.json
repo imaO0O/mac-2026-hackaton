@@ -1,5 +1,20 @@
 {
-  "spread": 0.2,
+  "feature_version": 7,
+  "split": {
+    "train": [
+      "2023-01-01",
+      "2025-06-30"
+    ],
+    "val": [
+      "2025-07-01",
+      "2025-12-31"
+    ],
+    "test": [
+      "2026-01-01",
+      "2026-08-07"
+    ]
+  },
+  "spread": 0.5,
   "weights": {
     "wabt": 0.3,
     "dp_r202": 0.2,
@@ -11,18 +26,18 @@
   "risk_class": {
     "draws": 100,
     "stamps": 24,
-    "mean_stability": 0.995,
-    "worst_stability": 0.92,
-    "severity_range_mean": 0.042
+    "mean_stability": 0.94,
+    "worst_stability": 0.72,
+    "severity_range_mean": 0.107
   },
   "decision": {
     "draws": 10,
     "stamps": 8,
-    "mean_stability": 1.0,
-    "worst_stability": 1.0,
+    "mean_stability": 0.988,
+    "worst_stability": 0.9,
     "base_outcomes": {
-      "держим режим": 6,
-      "меняем уставки": 2
+      "держим режим": 7,
+      "меняем уставки": 1
     },
     "per_stamp": [
       {
@@ -42,13 +57,13 @@
       {
         "момент": "2026-03-04 06:51",
         "базовый исход": "держим режим",
-        "устойчивость": 1.0,
+        "устойчивость": 0.9,
         "severity": 0.74,
         "risk_class": "medium"
       },
       {
         "момент": "2026-04-04 10:17",
-        "базовый исход": "меняем уставки",
+        "базовый исход": "держим режим",
         "устойчивость": 1.0,
         "severity": 0.65,
         "risk_class": "medium"
