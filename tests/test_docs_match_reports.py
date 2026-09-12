@@ -92,3 +92,46 @@ def test_the_table_is_still_there():
     assert len(rows) >= 5, (
         f"в таблице {DOC.name} опознано строк: {len(rows)} — разметка изменилась, "
         "и сверка перестала что-либо проверять")
+
+
+def _readme_quality_bullet() -> str:
+    """Абзац README про агента качества — тот, который читают первым."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    start = text.find("Виртуальный анализатор на")
+    assert start > 0, "абзац про виртуальный анализатор пропал из README"
+    end = text.find("\n* ", start)
+    return text[start:end if end > 0 else len(text)]
+
+
+def test_readme_headline_numbers_match_the_report():
+    """Заголовочные числа README сверяются с отчётом, а не живут своей жизнью.
+
+    README читают первым, и именно его числа звучат на защите. Проверяются ровно
+    те пять, что в нём названы: MAE модели и поточного анализатора, ROC-AUC,
+    покрытие интервала и полнота тревоги против ПАК.
+
+    Сверка по строкам, а не по разбору фразы: формулировка может меняться, а
+    числа — нет. Если число уехало, тест называет и старое, и новое.
+    """
+    path = ROOT / "reports" / "quality_metrics_h0.json"
+    if not path.exists():
+        pytest.skip("нет отчёта quality_metrics_h0.json")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("feature_version") != FEATURE_VERSION:
+        pytest.skip("отчёт снят на другой матрице — об этом говорит test_report_freshness")
+
+    test = report["splits"]["test"]
+    expected = {
+        "MAE модели": f'{test["model"]["MAE"]:.2f}',
+        "MAE поточного анализатора": f'{test["baseline_pak"]["MAE"]:.2f}',
+        "ROC-AUC": f'{test["model"]["roc_auc"]:.2f}',
+        "покрытие интервала": f'{test["model"]["coverage_80"]:.2f}',
+        "полнота тревоги": f'{test["model"]["spec_recall"]:.2f}',
+        "полнота тревоги у ПАК": f'{test["baseline_pak"]["spec_recall"]:.2f}',
+    }
+    bullet = _readme_quality_bullet()
+    missing = {name: value for name, value in expected.items() if value not in bullet}
+    assert not missing, (
+        "в README нет этих чисел из отчёта: "
+        + ", ".join(f"{k} = {v}" for k, v in missing.items())
+        + f"\nабзац:\n{bullet[:400]}")
