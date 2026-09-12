@@ -135,3 +135,64 @@ def test_readme_headline_numbers_match_the_report():
         "в README нет этих чисел из отчёта: "
         + ", ".join(f"{k} = {v}" for k, v in missing.items())
         + f"\nабзац:\n{bullet[:400]}")
+
+
+HORIZON_DOC = ROOT / "docs" / "QUALITY_AGENT.md"
+# порядок колонок таблицы горизонтов
+HORIZON_COLUMNS = ["MAE", "baseline_pak.MAE", "coverage_80",
+                   "spec_precision", "spec_recall", "roc_auc"]
+
+
+def _horizon_rows() -> dict[int, list[float | None]]:
+    """Строки таблицы «Весь заявленный диапазон горизонтов»."""
+    text = HORIZON_DOC.read_text(encoding="utf-8")
+    start = text.find("### Весь заявленный диапазон горизонтов")
+    assert start > 0, "раздел с таблицей горизонтов пропал из QUALITY_AGENT.md"
+    block = text[start:start + 2000]
+    out: dict[int, list[float | None]] = {}
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        name = cells[0].replace("*", "").strip()
+        if not name.endswith("ч"):
+            continue
+        try:
+            horizon = int(name.split()[0])
+        except (ValueError, IndexError):
+            continue
+        if len(cells) >= 7:
+            out[horizon] = [_numbers_in(c) for c in cells[1:7]]
+    return out
+
+
+@pytest.mark.parametrize("horizon", [0, 1, 2, 3])
+def test_horizon_table_matches_its_report(horizon: int):
+    """Таблица горизонтов сверяется с отчётами всех четырёх моделей.
+
+    Повод конкретный: она простояла устаревшей ДВЕ сборки подряд, и разошлась
+    именно в столбце ROC-AUC — 0.71 против 0.40 на горизонте 1 ч, то есть больше,
+    чем всё расстояние от монетки до рабочей модели. MAE и покрытие в тех же
+    сборках держались на сотых, поэтому глазами расхождение не бросалось.
+    """
+    path = ROOT / "reports" / f"quality_metrics_h{horizon}.json"
+    if not path.exists():
+        pytest.skip(f"нет отчёта для горизонта {horizon}")
+    report = json.loads(path.read_text(encoding="utf-8"))
+    if report.get("feature_version") != FEATURE_VERSION:
+        pytest.skip("отчёт снят на другой матрице — об этом говорит test_report_freshness")
+
+    rows = _horizon_rows()
+    assert horizon in rows, f"строка горизонта {horizon} пропала из таблицы"
+    test = report["splits"]["test"]
+
+    for key, claimed in zip(HORIZON_COLUMNS, rows[horizon]):
+        if claimed is None:
+            continue
+        actual = (test["baseline_pak"]["MAE"] if key == "baseline_pak.MAE"
+                  else test["model"].get(key))
+        if actual is None:
+            continue
+        assert claimed == pytest.approx(actual, abs=0.005), (
+            f"горизонт {horizon}, {key}: в документации {claimed}, в отчёте "
+            f"{actual:.4f}")
