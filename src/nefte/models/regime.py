@@ -223,18 +223,39 @@ def normalized_wabt(wabt: pd.Series, known_sulfur: pd.Series,
 
 
 def outage_mask(feed: pd.Series, min_outage_hours: float = 6.0,
-                steps_per_hour: int = 6, level: float = 0.2) -> pd.Series:
+                steps_per_hour: int = 6, level: float = 0.2,
+                retrospective: bool = False) -> pd.Series:
     """Маска останова: расход сырья ниже ``level`` от медианы дольше заданного срока.
 
     Считать нужно по СЫРОМУ сигналу. Детектор достоверности справедливо убирает
     замороженный на нуле расход как «не живое измерение», но именно этот
     замороженный ноль и есть факт останова: на очищенных данных из десяти
     остановов виден один.
+
+    ``retrospective`` различает два РАЗНЫХ вопроса, которые до сих пор считались
+    одинаково:
+
+    * **что известно в момент t** (по умолчанию) — останов объявляется, когда
+      порог длительности набран по прошлому. Так и только так маска годится для
+      признаков и для среза оператора;
+    * **какие отсчёты относились к останову** (``retrospective=True``) — весь
+      эпизод целиком, включая первые часы. Так правильно ОТСЕИВАТЬ остановы из
+      разбора истории: те отсчёты и правда были остановом.
+
+    Раньше был только второй вариант, и он же шёл в признаки. Влияние измерено и
+    оказалось нулевым: расхождение задевает 315 отсчётов из 189 217 (0.17 %), и НИ
+    ОДИН лабораторный анализ в эту зону не попадает — во время останова пробы не
+    отбирают. То есть утечка была настоящей, но до обучающих строк не доходила.
+    Исправлено не ради метрик, а чтобы правило не выстрелило при другом пороге или
+    другой сетке.
     """
     down = feed < feed.median() * level
     block = (down != down.shift()).cumsum()
-    long_enough = down.groupby(block).transform("size") >= min_outage_hours * steps_per_hour
-    return down & long_enough
+    needed = min_outage_hours * steps_per_hour
+    grouped = down.groupby(block)
+    length = (grouped.transform("size") if retrospective
+              else grouped.cumcount() + 1)
+    return down & (length >= needed)
 
 
 def hours_since_outage(feed: pd.Series, min_outage_hours: float = 6.0,

@@ -138,3 +138,30 @@ def test_frozen_detection_does_not_depend_on_what_comes_after():
     short = frozen_mask(pd.Series(prefix + [3.0]), min_samples=5)
     long = frozen_mask(pd.Series(prefix + [7.0] * 20), min_samples=5)
     assert list(short.iloc[:len(prefix)]) == list(long.iloc[:len(prefix)])
+
+
+def test_outage_detection_is_causal_by_default():
+    """Останов тоже нельзя объявить раньше, чем набрана длительность.
+
+    Влияние этой утечки измерено и оказалось нулевым: она задевает 0.17 %
+    отсчётов, и ни один лабораторный анализ в них не попадает — во время останова
+    пробы не отбирают. Исправлено не ради метрик, а чтобы правило не выстрелило
+    при другом пороге или другой сетке.
+    """
+    from nefte.models.regime import outage_mask
+
+    feed = pd.Series([100.0] * 5 + [1.0] * 10 + [100.0] * 5)
+    causal = outage_mask(feed, min_outage_hours=1, steps_per_hour=6)
+    assert not causal.iloc[:10].any(), "порог 6 отсчётов набирается только к 11-му"
+    assert causal.iloc[10:15].all()
+
+
+def test_outage_retrospective_covers_the_whole_episode():
+    """Для ОТСЕВА истории нужен весь эпизод: те отсчёты и правда были остановом."""
+    from nefte.models.regime import outage_mask
+
+    feed = pd.Series([100.0] * 5 + [1.0] * 10 + [100.0] * 5)
+    whole = outage_mask(feed, min_outage_hours=1, steps_per_hour=6,
+                        retrospective=True)
+    assert whole.iloc[5:15].all()
+    assert not whole.iloc[:5].any() and not whole.iloc[15:].any()

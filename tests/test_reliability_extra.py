@@ -36,8 +36,15 @@ def test_short_dip_is_not_an_outage():
 
 def test_long_dip_is_an_outage():
     feed = _feed(outages=[(500, 60)])         # 10 часов
+    # Маска причинная: останов объявляется, когда длительность набрана по прошлому.
+    # Раньше тест требовал `mask.iloc[500:560].all()`, то есть признания останова с
+    # первого же низкого отсчёта — а это заглядывание вперёд.
+    threshold = 6 * 6                          # 6 часов по 10-минутным отсчётам
     mask = outage_mask(feed, min_outage_hours=6)
-    assert mask.any() and mask.iloc[500:560].all()
+    assert not mask.iloc[500:500 + threshold - 1].any()
+    assert mask.iloc[500 + threshold - 1:560].all()
+    # Ретроспективный режим по-прежнему видит эпизод целиком — он для отсева истории
+    assert outage_mask(feed, min_outage_hours=6, retrospective=True).iloc[500:560].all()
 
 
 def test_catalyst_age_ignores_short_outages():
@@ -53,7 +60,11 @@ def test_catalyst_age_ignores_short_outages():
 def test_hours_since_outage_grows_after_restart():
     feed = _feed(n=2000, outages=[(500, 60)])
     run = hours_since_outage(feed, min_outage_hours=6)
-    assert run.iloc[520] == pytest.approx(0.0, abs=0.2)     # внутри останова
+    # Внутри останова счётчик обнуляется НЕ сразу, а когда длительность набрана:
+    # в первые шесть часов система ещё не знает, что это останов, а не провал
+    # расхода. Раньше тест проверял индекс 520 — то есть требовал знания заранее.
+    assert run.iloc[520] > 1.0                              # ещё не распознан
+    assert run.iloc[555] == pytest.approx(0.0, abs=0.2)     # уже распознан
     assert run.iloc[560] < run.iloc[900]                    # после пуска растёт
 
 

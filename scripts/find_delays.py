@@ -97,7 +97,9 @@ def prepare(smooth_steps: int) -> tuple[pd.DataFrame, pd.Series]:
     # брак: останов установки и залипший анализатор
     bad = pd.Series(False, index=grid)
     if FEED in ht.columns:
-        bad |= outage_mask(ht[FEED]).reindex(grid).fillna(True)
+        # отсеиваем ЭПИЗОД целиком: те отсчёты и правда были остановом,
+        # а задним числом это известно
+        bad |= outage_mask(ht[FEED], retrospective=True).reindex(grid).fillna(True)
     bad |= frozen_mask(pak).reindex(grid).fillna(True)
 
     masks = time_split(grid, cfg)

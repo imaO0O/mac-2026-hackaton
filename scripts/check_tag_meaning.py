@@ -91,7 +91,9 @@ def main() -> int:
 
     lab = clean_lims_sulfur(lims_series(cfg["quality"]["target"]["lims_source"]))
     pak = load_pak()["sulfur_ppm"].reindex(ht.index)
-    down = (outage_mask(ht[FEED]) if FEED in ht.columns
+    # ретроспективный разбор: нужен весь эпизод останова, а не то, что было
+    # известно в моменте
+    down = (outage_mask(ht[FEED], retrospective=True) if FEED in ht.columns
             else pd.Series(False, index=ht.index))
 
     # лабораторный анализ сопоставляем с последним предшествующим отсчётом
