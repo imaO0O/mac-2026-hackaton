@@ -93,13 +93,31 @@ def wabt(temps: pd.DataFrame, weights: list[float] | None = None) -> pd.Series:
 
     Прямой разметки состояния катализатора в пакете нет, поэтому используем
     общепринятый прокси. Это ДОПУЩЕНИЕ, оно объявлено в docs/DATA_NOTES.md.
+
+    Веса нормируются по ДОСТУПНЫМ значениям, а не по всем столбцам. Раньше здесь
+    стоял ``np.nansum(values * w)`` с весами, нормированными по полному набору:
+    пропущенная температура входила в сумму нулём, а её вес из знаменателя не
+    уходил. На трёх датчиках отказ одного давал 233 °C вместо 350 — ошибку в
+    117 °C, и не в виде пропуска, а в виде правдоподобного числа.
+
+    Вживую это не стреляло: и признаки режима, и индекс тяжести считают WABT
+    своим ``ht[temps].mean(axis=1)``, который пропуски пересчитывает правильно.
+    Но функция лежала в ``data/features.py`` и выглядела канонической.
     """
+    values = temps.to_numpy(dtype=float)
     if weights is None:
-        weights = [1.0 / temps.shape[1]] * temps.shape[1]
-    w = np.asarray(weights, dtype=float)
-    w = w / w.sum()
-    values = np.nansum(temps.to_numpy() * w, axis=1)
-    return pd.Series(values, index=temps.index, name="wabt")
+        w = np.full(values.shape[1], 1.0 / values.shape[1])
+    else:
+        w = np.asarray(weights, dtype=float)
+        w = w / w.sum()
+
+    known = ~np.isnan(values)
+    # знаменатель — сумма весов ТОЛЬКО доступных столбцов в каждой строке
+    denom = (known * w).sum(axis=1)
+    numer = np.nansum(np.where(known, values, 0.0) * w, axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(denom > 0, numer / denom, np.nan)
+    return pd.Series(out, index=temps.index, name="wabt")
 
 
 def time_split(index: pd.DatetimeIndex, cfg: dict | None = None) -> dict[str, pd.Series]:

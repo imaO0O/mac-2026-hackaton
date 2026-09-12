@@ -85,14 +85,98 @@ def closure(entry: pathlib.Path) -> set[pathlib.Path]:
     return files
 
 
+def changed_definitions(path: pathlib.Path, since: str | None) -> set[str]:
+    """Имена функций и классов верхнего уровня, тронутых правкой в этом файле.
+
+    Нужно, чтобы отличать «задет файл» от «задета вызываемая функция». Файл
+    попадает в замыкание целиком, и без этого различения инструмент кричит на
+    правку мёртвой функции так же громко, как на правку рабочей.
+    """
+    cmd = (["git", "diff", "-U0", since, "--", str(path)] if since
+           else ["git", "diff", "-U0", "--", str(path)])
+    try:
+        # Кодировку задаём ЯВНО. Без неё Python берёт cp1251 (Windows), git отдаёт
+        # UTF-8, поток чтения падает с UnicodeDecodeError в фоновом треде, а
+        # stdout молча оказывается None. Наши коммиты и докстринги по-русски,
+        # поэтому это не редкий случай, а обычный.
+        diff = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              check=True).stdout or ""
+    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
+        return set()
+
+    touched: set[int] = set()
+    for line in diff.splitlines():
+        if not line.startswith("@@"):
+            continue
+        # @@ -12,3 +12,5 @@ — берём номера НОВОГО файла
+        try:
+            head = line.split("+", 1)[1].split("@@", 1)[0].strip()
+            start, _, count = head.partition(",")
+            start, count = int(start), int(count or 1)
+        except (IndexError, ValueError):
+            continue
+        touched.update(range(start, start + max(count, 1)))
+    if not touched:
+        return set()
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return set()
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            lo = node.lineno
+            hi = getattr(node, "end_lineno", node.lineno)
+            if any(lo <= n <= hi for n in touched):
+                names.add(node.name)
+        elif touched & {getattr(node, "lineno", -1)}:
+            names.add("<верхний уровень модуля>")
+    return names
+
+
+def is_called_within(names: set[str], files: set[pathlib.Path],
+                     home: pathlib.Path) -> set[str]:
+    """Какие из имён реально ВЫЗЫВАЮТСЯ или импортируются в замыкании прогона.
+
+    Считаются только вызовы и импорты. Простое упоминание имени не в счёт: в
+    ``models/regime.py`` есть локальная переменная ``wabt``, и по упоминаниям
+    мёртвая функция ``features.wabt`` выглядела вызываемой. Инструмент, который
+    ошибается в сторону тревоги на каждом совпадении имён, перестают читать —
+    а тогда он не ловит и настоящие случаи.
+
+    ``home`` — файл, где имя определено; вызовы ВНУТРИ него не считаются: они
+    ничего не говорят о том, дойдёт ли правка до прогона.
+    """
+    used: set[str] = set()
+    for path in files:
+        if path == home:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                found = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+                if found in names:
+                    used.add(found)
+            elif isinstance(node, ast.ImportFrom):
+                used.update(a.name for a in node.names if a.name in names)
+    return used
+
+
 def changed_files(since: str | None) -> list[pathlib.Path]:
     """Что изменено: незакоммиченное, либо всё начиная с ревизии."""
     cmd = (["git", "diff", "--name-only", since] if since
            else ["git", "status", "--porcelain"])
     try:
         raw = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
-                             check=True).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
+                             encoding="utf-8", errors="replace",
+                             check=True).stdout or ""
+    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as exc:
         print(f"не удалось спросить git: {exc}")
         return []
     out = []
@@ -135,12 +219,35 @@ def main() -> int:
                                  for p in changed + config_changed) or "ничего")
     print()
     if clash:
-        print("ПЕРЕСЕЧЕНИЕ — прогон затронут:")
+        print("ПЕРЕСЕЧЕНИЕ по файлам:")
+        live, dead = [], []
         for path in clash:
-            print("   ", path.relative_to(ROOT).as_posix())
-        print("Числа поедут. Идущий прогон надо повторить, будущий — запускать после правок.")
-    else:
-        print("пересечения нет: правки не входят в зависимости прогона")
+            names = changed_definitions(path, args.since)
+            # Точку входа включаем в поиск: скрипт зовёт StateBuilder напрямую,
+            # и без неё инструмент ЗАНИЖАЕТ — а занижение тут опаснее завышения.
+            reachable = is_called_within(names, deps | {entry}, path)
+            rel = path.relative_to(ROOT).as_posix()
+            if not names:
+                live.append((rel, {"<не разобрать правку>"}))
+            elif reachable:
+                live.append((rel, reachable))
+            else:
+                dead.append((rel, names))
+            print(f"    {rel}: тронуто {sorted(names) or '?'}, "
+                  f"вызывается из прогона {sorted(reachable) or 'ничего'}")
+        print()
+        if live:
+            print("ЧИСЛА ПОЕДУТ — тронуто вызываемое:")
+            for rel, names in live:
+                print("   ", rel, "->", ", ".join(sorted(names)))
+            print("Идущий прогон надо повторить, будущий — запускать после правок.")
+        else:
+            print("Файлы задеты, но НИ ОДНА тронутая функция из прогона не "
+                  "вызывается — числа не поедут.")
+            for rel, names in dead:
+                print("   ", rel, "->", ", ".join(sorted(names)), "(на этом пути мёртвые)")
+        return 1 if live else 0
+    print("пересечения нет: правки не входят в зависимости прогона")
     if config_changed:
         print()
         print("конфиг тронут — проверьте отдельно, читает ли прогон изменённые ключи:")
@@ -148,7 +255,7 @@ def main() -> int:
             print("   ", path.relative_to(ROOT).as_posix())
         print("Отпечаток матрицы (dataset.cache_key) включает не весь конфиг, "
               "поэтому добавление ключа обычно безопасно, а правка существующего — нет.")
-    return 1 if clash else 0
+    return 0
 
 
 if __name__ == "__main__":

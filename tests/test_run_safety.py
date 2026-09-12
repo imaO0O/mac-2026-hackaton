@@ -62,3 +62,48 @@ def test_the_cycle_does_depend_on_them(module):
             for p in module.closure(ROOT / "scripts" / "run_cycle.py")}
     assert "src/nefte/agents/quality.py" in deps
     assert "src/nefte/pipeline.py" in deps
+
+
+def test_a_dead_function_is_not_reported_as_reachable(module, tmp_path):
+    """Правка мёртвой функции не должна поднимать тревогу.
+
+    Инструмент сам на этом ошибся: он считал ЛЮБОЕ упоминание имени, а в
+    `models/regime.py` есть локальная переменная `wabt` — и мёртвая
+    `features.wabt` выглядела вызываемой. Инструмент, который кричит на каждое
+    совпадение имён, перестают читать, а тогда он не ловит и настоящие случаи.
+    """
+    deps = module.closure(ROOT / "scripts" / "train_quality.py")
+    home = ROOT / "src" / "nefte" / "data" / "features.py"
+    assert home in deps, "features.py должен быть в зависимостях обучения"
+    reachable = module.is_called_within({"wabt"}, deps | {ROOT / "scripts" / "train_quality.py"}, home)
+    assert reachable == set(), (
+        f"мёртвая features.wabt сочтена вызываемой: {reachable}")
+
+
+def test_a_live_class_is_reported_as_reachable(module):
+    """Обратная сторона: то, что прогон действительно зовёт, обязано находиться.
+
+    Без этой половины предыдущий тест проходил бы и на инструменте, который
+    всегда отвечает «не вызывается».
+    """
+    entry = ROOT / "scripts" / "run_cycle.py"
+    deps = module.closure(entry)
+    home = ROOT / "src" / "nefte" / "pipeline.py"
+    reachable = module.is_called_within({"StateBuilder"}, deps | {entry}, home)
+    assert reachable == {"StateBuilder"}, (
+        "StateBuilder вызывается из самой точки входа — если его не видно, "
+        "инструмент ищет только в пакете и занижает")
+
+
+def test_git_output_in_russian_does_not_break_the_check(module):
+    """Вывод git по-русски обязан читаться, а не превращать ответ в пустоту.
+
+    Ловится настоящая поломка: без явной кодировки Python на Windows берёт
+    cp1251, git отдаёт UTF-8, поток чтения падает в фоновом треде и stdout
+    молча становится None. У нас все коммиты и докстринги по-русски.
+    """
+    names = module.changed_definitions(
+        ROOT / "src" / "nefte" / "agents" / "quality.py", "HEAD~14")
+    assert isinstance(names, set)
+    assert "QualityAgent" in names or not names, (
+        "разбор диффа вернул мусор — проверьте кодировку вызова git")
