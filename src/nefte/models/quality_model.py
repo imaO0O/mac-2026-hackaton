@@ -73,6 +73,11 @@ PHYSICS_BY_TARGET: dict[str, dict[str, int]] = {
 # времени и такого столбца содержать не может.
 SERVE_COMPUTED = ("feature_age_h",)
 
+# Шаг между сидами пробных моделей при отборе признаков. Большой намеренно: при
+# шаге 1 наборы проб у соседних сидов перекрываются, и проверка устойчивости
+# отбора показала бы картину лучше настоящей.
+PROBE_SEED_STRIDE = 1000
+
 # 90 % интервал: σ = (q90 - q10) / (2 * 1.2816)
 Z90 = 1.2815515655446004
 
@@ -275,7 +280,8 @@ class SulfurModel:
     # ------------------------------------------------------------------ #
     def fit(self, X: pd.DataFrame, y: pd.Series, X_val=None, y_val=None,
             top_features: int | None = None,
-            must_keep: list[str] | None = None) -> "SulfurModel":
+            must_keep: list[str] | None = None,
+            probe_seeds: int = 3) -> "SulfurModel":
         """Обучение. ``top_features`` включает отбор признаков в два прохода.
 
         На 983 анализах и 354 признаках бустинг переобучается (AUC 0.80 на train
@@ -283,11 +289,33 @@ class SulfurModel:
         второй учится на сокращённом наборе.
         """
         if top_features:
-            probe = SulfurModel(iterations=self.iterations, learning_rate=self.learning_rate,
-                                depth=self.depth, seed=self.seed, limit=self.limit,
-                                target=self.target, monotone=self.monotone)
-            probe.fit(X, y, X_val, y_val)
-            imp = probe.feature_importance(top_features)
+            # Важность усредняется по НЕСКОЛЬКИМ пробным моделям, а не берётся с
+            # одной. Причина измерена: на 983 строках и 385 признаках отбор по
+            # одному сиду неустойчив — пять прогонов, отличающихся только сидом,
+            # дают общее ядро лишь в 20 % от объединения наборов
+            # (scripts/check_feature_stability.py). Признаки во многом
+            # взаимозаменяемы, и какой из эквивалентных выиграет единственный
+            # прогон, решает случай.
+            #
+            # Усреднение не делает отбор «правильным» — оно делает его
+            # воспроизводимым и убирает часть случайности. Цена — втрое больше
+            # пробных обучений, то есть пара минут на CPU.
+            #
+            # Сиды проб разносим широко (PROBE_SEED_STRIDE), а не берём подряд:
+            # иначе у соседних сидов модели наборы проб перекрываются
+            # (42→42,43,44 и 43→43,44,45), и проверка устойчивости отбора
+            # показала бы картину лучше настоящей.
+            scores = []
+            for offset in range(max(1, probe_seeds)):
+                probe = SulfurModel(
+                    iterations=self.iterations, learning_rate=self.learning_rate,
+                    depth=self.depth, seed=self.seed + PROBE_SEED_STRIDE * offset,
+                    limit=self.limit,
+                    target=self.target, monotone=self.monotone)
+                probe.fit(X, y, X_val, y_val)
+                scores.append(probe.feature_importance(len(X.columns)))
+            imp = (pd.concat(scores, axis=1).fillna(0.0).mean(axis=1)
+                   .sort_values(ascending=False).head(top_features))
             keep = list(imp[imp > 0].index) or list(X.columns[:top_features])
             # управляющие теги оставляем принудительно: без них модель не реагирует
             # на уставки и не годится оптимизатору как суррогат «режим → качество»

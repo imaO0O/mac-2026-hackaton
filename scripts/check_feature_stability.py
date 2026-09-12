@@ -62,6 +62,9 @@ def main() -> int:
     ap.add_argument("--target", default="sulfur", choices=sorted(QUALITY_TARGETS))
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--top-features", type=int, default=40)
+    ap.add_argument("--probe-seeds", type=int, default=None,
+                    help="сколько пробных моделей усреднять при отборе; 1 — как было "
+                         "до усреднения, нужно чтобы померить эффект самой правки")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -83,8 +86,10 @@ def main() -> int:
         seed = 42 + i
         model = SulfurModel(horizon_hours=args.horizon, seed=seed, limit=limit,
                             target=args.target)
+        extra = ({} if args.probe_seeds is None
+                 else {"probe_seeds": args.probe_seeds})
         model.fit(*parts["train"], *parts["val"],
-                  top_features=args.top_features, must_keep=CONTROL_COLUMNS)
+                  top_features=args.top_features, must_keep=CONTROL_COLUMNS, **extra)
         model.calibrate(*parts["val"])
         model.select_risk_source(*parts["val"])
         model.select_alarm_threshold(*parts["val"],
@@ -148,7 +153,8 @@ def main() -> int:
               "ВЗАИМОЗАМЕНЯЕМЫ: они несут общую информацию о состоянии установки, "
               "и какой именно из эквивалентных попадёт в набор — дело случая.")
 
-    out = ROOT / "reports" / f"feature_stability_h{args.horizon:g}.json"
+    tag = "" if args.probe_seeds is None else f"_probe{args.probe_seeds}"
+    out = ROOT / "reports" / f"feature_stability_h{args.horizon:g}{tag}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
         "горизонт": args.horizon, "показатель": args.target, "сидов": args.seeds,
