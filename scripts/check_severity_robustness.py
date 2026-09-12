@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.loaders import load_telemetry  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
@@ -163,6 +164,7 @@ def main() -> int:
     }
     out = ROOT / "reports" / "severity_robustness.json"
     out.parent.mkdir(parents=True, exist_ok=True)
+    report = {**report_provenance(), **report}
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nотчёт: {out}")
     return 0

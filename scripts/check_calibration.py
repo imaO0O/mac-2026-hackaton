@@ -44,6 +44,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.data.features import time_split  # noqa: E402
 from nefte.models.dataset import (  # noqa: E402
     QUALITY_TARGETS,
@@ -207,6 +208,7 @@ def main() -> int:
 
     out = ROOT / "reports" / f"calibration_h{args.horizon:g}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
+    report = {**report_provenance(cfg), **report}
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {out.relative_to(ROOT)}")
     return 0

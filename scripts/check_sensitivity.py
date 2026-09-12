@@ -24,6 +24,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.data.features import time_split  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.quality_model import SulfurModel  # noqa: E402
@@ -154,7 +155,8 @@ def main() -> int:
 
     out = ROOT / "reports" / f"sensitivity_h{args.horizon:g}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"horizon_hours": args.horizon,
+    out.write_text(json.dumps({**report_provenance(),
+                               "horizon_hours": args.horizon,
                                "n_features": len(model.features),
                                "total_response": total,
                                "rows": table.to_dict(orient="records"),

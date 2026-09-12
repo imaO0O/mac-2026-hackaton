@@ -53,6 +53,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.config import ROOT  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.data.loaders import lims_series, load_lims  # noqa: E402
 from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.vak import compile_formulas  # noqa: E402
@@ -274,6 +275,7 @@ def main() -> int:
     out = ROOT / "reports" / "vak_vs_lims.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
+        **report_provenance(),
         "сверено": rows, "не_сверялось": unchecked,
         "без_связи": list(no_signal["формула"]),
         "смещённые": list(biased["формула"]),

@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.agents.schemas import Candidate, ReliabilityAssessment  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
@@ -221,7 +222,8 @@ def main() -> int:
 
     out = ROOT / "reports" / "architectures.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"период": [str(lo), str(hi)], "шаг": args.every,
+    out.write_text(json.dumps({**report_provenance(),
+                               "период": [str(lo), str(hi)], "шаг": args.every,
                                "конфигурации": table}, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     print(f"\nОтчёт: {out.relative_to(ROOT)}")

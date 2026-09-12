@@ -47,6 +47,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.models.dataset import (  # noqa: E402
     QUALITY_TARGETS,
     build_feature_matrix,
@@ -285,6 +286,7 @@ def main() -> int:
     out = ROOT / "reports" / f"drift_h{args.horizon:g}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({
+        **report_provenance(cfg),
         "горизонт": args.horizon, "показатель": args.target, "предел": limit,
         "конец_обучения": str(train_end - pd.Timedelta(days=1)),
         "интервалы": rows, "наклоны_в_месяц": trends, "срок_годности": shelf,

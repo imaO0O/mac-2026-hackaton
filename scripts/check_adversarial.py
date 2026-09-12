@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.agents.schemas import ProcessState, Recommendation  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.regime import FEED  # noqa: E402
 from nefte.pipeline import StateBuilder, is_state_usable  # noqa: E402
@@ -276,7 +277,7 @@ def main() -> int:
     failed = [c["сценарий"] for c in cases if not c["выполнено"]]
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps(
-        {"ts": str(base_ts), "cases": cases, "failed": failed},
+        {**report_provenance(), "ts": str(base_ts), "cases": cases, "failed": failed},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")
 
