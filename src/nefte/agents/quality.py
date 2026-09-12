@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pandas as pd
 
 from nefte.agents.schemas import (
     DataQuality,
@@ -44,7 +45,9 @@ VAK_CONFIDENCE_FACTOR = SOURCE_CONFIDENCE[Source.VAK]
 
 
 def confidence_parts(sigma: float, source: Source, age_hours: float | None,
-                     stale_after_hours: float, usable: bool) -> dict[str, float]:
+                     stale_after_hours: float, usable: bool,
+                     model_age_months: float | None = None,
+                     shelf_life_months: float | None = None) -> dict[str, float]:
     """Из чего складывается уверенность. Возвращает множители, а не одно число.
 
     Раньше уверенность считалась только по σ прогноза — и оказывалась 0.95 почти
@@ -68,6 +71,17 @@ def confidence_parts(sigma: float, source: Source, age_hours: float | None,
         parts["свежесть"] = 1.0 / (1.0 + overdue / stale_after_hours)
     if not usable:
         parts["достоверность данных"] = 0.5
+    # Возраст САМОЙ МОДЕЛИ. Дрейф измерен: смещение прогноза уезжает на
+    # 0.083 мг/кг в месяц, потому что уровень серы падает быстрее, чем модель это
+    # отслеживает (scripts/check_drift.py). Пока этот множитель не появился,
+    # измеренный дрейф оставался бумажным: в отчёте он был, а на решение не влиял.
+    #
+    # Уверенность не режется, пока модель моложе срока годности, и дальше падает
+    # обратно пропорционально просрочке — тем же законом, что и для устаревшего
+    # анализа, чтобы карточка оператора читалась единообразно.
+    if model_age_months is not None and shelf_life_months:
+        overdue = max(model_age_months - shelf_life_months, 0.0)
+        parts["возраст модели"] = 1.0 / (1.0 + overdue / shelf_life_months)
     return parts
 
 
@@ -124,9 +138,25 @@ class QualityAgent:
 
         self.t95_fn = t95_fn if t95_fn is not None else default_t95_estimator()
         self.t95_limit = float(self.cfg["spec"]["t95_c"]["max"])
+        self.shelf_life_months = float(
+            self.cfg["quality"].get("model_shelf_life_months", 0.0)) or None
         # порог тревоги подобран на валидации вместе с моделью; без модели —
         # консервативное значение по умолчанию
         self.alarm_threshold = float(getattr(model, "alarm_threshold", 0.2))
+
+    def _model_age_months(self, ts) -> float | None:
+        """Сколько месяцев прошло с конца обучающего периода.
+
+        Без обученной модели возраст не определён: персистенция не стареет.
+        """
+        if self.model is None:
+            return None
+        try:
+            train_end = pd.Timestamp(self.cfg["split"]["train"][1])
+        except (KeyError, TypeError, ValueError):
+            return None
+        days = (pd.Timestamp(ts) - train_end).total_seconds() / 86400.0
+        return max(0.0, days / 30.44)
 
     def predict(self, state: ProcessState, current: Measurement) -> tuple[float, float]:
         """Прогноз серы на горизонте и σ. Возвращает ``(mean, sigma)``."""
@@ -182,7 +212,9 @@ class QualityAgent:
             risk = spec_risk_normal(mean, sigma, self.limit)
         stale_after = float(self.cfg["quality"]["staleness_hours"]["lims"])
         parts = confidence_parts(sigma, source, current.age_hours, stale_after,
-                                 state.data_quality.usable)
+                                 state.data_quality.usable,
+                                 model_age_months=self._model_age_months(state.ts),
+                                 shelf_life_months=self.shelf_life_months)
         confidence = max(0.05, min(0.95, float(np.prod(list(parts.values())))))
         weakest = min(parts, key=parts.get)
         if parts[weakest] < 0.9:
