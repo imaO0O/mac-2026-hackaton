@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.agents.schemas import Recommendation  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.models.dataset import FEATURE_VERSION  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
@@ -260,9 +261,18 @@ def main() -> int:
     report_path = (REPORT if not tag
                    else REPORT.with_name(f"test_period_{tag}.json"))
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps({"summary": summary, "rows": rows},
-                                 ensure_ascii=False, indent=2, default=str),
-                      encoding="utf-8")
+    payload = {
+        # Версия матрицы и разбиение — чтобы отчёт попадал под контракт
+        # свежести. Без них числа устаревают молча: проверка при отсутствии
+        # поля делает skip, а пропуск неотличим от успеха. Ровно так девять
+        # отчётов сетей оказались вне контракта, который их декларировал.
+        "feature_version": FEATURE_VERSION,
+        "split": {k: list(v) for k, v in cfg["split"].items()
+                  if isinstance(v, (list, tuple))},
+        "summary": summary, "rows": rows,
+    }
+    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2,
+                                      default=str), encoding="utf-8")
     print(f"\nОтчёт: {report_path.relative_to(ROOT)}")
     return 0
 

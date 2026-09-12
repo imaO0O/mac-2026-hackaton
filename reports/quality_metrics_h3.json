@@ -4,7 +4,7 @@
   "limit": 10.0,
   "n_features": 54,
   "monotone": true,
-  "feature_version": 6,
+  "feature_version": 7,
   "split": {
     "train": [
       "2023-01-01",

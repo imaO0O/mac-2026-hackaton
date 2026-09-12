@@ -33,7 +33,8 @@ REPORTS = sorted((ROOT / "reports").glob("*.json"))
 # Числа при этом были свежие, а контракт — неисполняемым. Список ниже превращает
 # пропуск в падение: если семейство отчётов зависит от матрицы, оно обязано
 # сказать, на какой матрице снято.
-MUST_CARRY_VERSION = ("quality_metrics_", "sequence_metrics_", "alarm_budget_")
+MUST_CARRY_VERSION = ("quality_metrics_", "sequence_metrics_", "alarm_budget_",
+                      "test_period", "simulation")
 
 
 def _load(path: Path) -> dict:

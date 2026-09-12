@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.models.dataset import FEATURE_VERSION  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
 from nefte.sim import RESPONSE_TAU_HOURS, ClosedLoopSimulator, summarize  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
@@ -119,6 +120,13 @@ def main() -> int:
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps({
         "период": [str(lo), str(hi)], "шаг": args.every, "tau_hours": args.tau,
+        # Версия матрицы и разбиение — чтобы отчёт попадал под контракт
+        # свежести. Без них числа устаревают молча: проверка при отсутствии
+        # поля делает skip, а пропуск неотличим от успеха. Ровно так девять
+        # отчётов сетей оказались вне контракта, который их декларировал.
+        "feature_version": FEATURE_VERSION,
+        "split": {k: list(v) for k, v in cfg["split"].items()
+                  if isinstance(v, (list, tuple))},
         "итог": report,
         "шаги": [{"ts": str(s.ts), "исход": s.outcome, "применено": s.applied,
                   "сера": round(s.sulfur_sim, 3),
