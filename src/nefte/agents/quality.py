@@ -22,6 +22,16 @@ from nefte.config import load_config
 
 # Разброс между лабораторией и поточным анализатором на исторических парах:
 # MAE 1.70 мг/кг, смещение -0.26. Используется как априорная σ базовой модели.
+# Неопределённость нашего знания о ТЕКУЩЕМ Т95, °C. Это не точность формулы ВАК, а
+# разброс СУТОЧНОГО изменения самого показателя: уровень мы берём из последнего
+# лабораторного анализа, а анализы идут раз в сутки (медиана шага 24 ч), и за это
+# время Т95 успевает уехать. Измерено по обучающему периоду: ст. откл. изменения
+# между соседними анализами 6.64 °C, MAE 4.86.
+#
+# Число важное: запас до предела 360 °C обычно около 12 °C, то есть меньше двух
+# сигм. Показывать Т95 как точно известную величину нельзя.
+T95_SIGMA_C = 6.64
+
 BASELINE_SIGMA_MGKG = 1.7
 
 # Множители уверенности по источнику значения. ДОПУЩЕНИЕ: прямого сравнения в
@@ -97,11 +107,23 @@ def spec_risk_normal(pred: float, sigma: float, limit: float) -> float:
 class QualityAgent:
     """Базовая реализация. Заменяемая часть — ``predict``."""
 
-    def __init__(self, model=None, cfg: dict | None = None, horizon_hours: float = 2.0):
+    def __init__(self, model=None, cfg: dict | None = None, horizon_hours: float = 2.0,
+                 t95_fn=None):
         self.model = model            # обученная модель (участник 1); None → персистенция
         self.cfg = cfg or load_config()
         self.horizon_hours = getattr(model, "horizon_hours", horizon_hours)
         self.limit = self.cfg["spec"]["product_sulfur_mgkg"]["max"]
+        # Т95 — ВТОРОЙ обязательный показатель качества по ответу организаторов, и
+        # считать его должен агент качества, а не оптимизатор. Раньше оценка жила в
+        # `optimizer.default_t95_estimator`: оптимизатор сам вычислял показатель
+        # качества, то есть делал чужую работу, и в `QualityAssessment` этого
+        # показателя не было вовсе — ни в логах прогонов, ни на дашборде.
+        #
+        # Функция, а не число: оптимизатору нужен Т95 для КАЖДОГО варианта уставок.
+        from nefte.agents.optimizer import default_t95_estimator
+
+        self.t95_fn = t95_fn if t95_fn is not None else default_t95_estimator()
+        self.t95_limit = float(self.cfg["spec"]["t95_c"]["max"])
         # порог тревоги подобран на валидации вместе с моделью; без модели —
         # консервативное значение по умолчанию
         self.alarm_threshold = float(getattr(model, "alarm_threshold", 0.2))
@@ -167,12 +189,33 @@ class QualityAgent:
             notes.append(f"Уверенность {confidence:.2f}; сильнее всего её снижает "
                          f"«{weakest}» (множитель {parts[weakest]:.2f}).")
 
+        predictions = {"product_sulfur_mgkg": mean}
+        intervals = {"product_sulfur_mgkg": (mean - 1.96 * sigma, mean + 1.96 * sigma)}
+        risks = {"product_sulfur_mgkg": risk}
+
+        # Т95 текущего режима. Уровень — последний лабораторный анализ, поэтому и
+        # неопределённость берётся ЕГО: между анализами сутки, и Т95 успевает
+        # уехать. Разброс суточного изменения измерен по обучающему периоду и
+        # равен 6.6 °C — это и есть σ нашего знания о текущем Т95, а вовсе не
+        # точность формулы.
+        t95 = self.t95_fn(state, {}) if self.t95_fn else None
+        if t95 is not None and t95 == t95:
+            predictions["product_t95_c"] = float(t95)
+            intervals["product_t95_c"] = (t95 - 1.96 * T95_SIGMA_C,
+                                          t95 + 1.96 * T95_SIGMA_C)
+            risks["product_t95_c"] = spec_risk_normal(t95, T95_SIGMA_C, self.t95_limit)
+            if risks["product_t95_c"] > 0.2:
+                notes.append(
+                    f"Т95 {t95:.1f} °C при пределе {self.t95_limit:.0f}: "
+                    f"вероятность выхода {risks['product_t95_c']:.0%}. Уровень взят "
+                    "из последнего анализа, между анализами он уезжает на 6.6 °C.")
+
         return QualityAssessment(
             ts=state.ts,
             source=source,
-            predictions={"product_sulfur_mgkg": mean},
-            intervals={"product_sulfur_mgkg": (mean - 1.96 * sigma, mean + 1.96 * sigma)},
-            spec_risk={"product_sulfur_mgkg": risk},
+            predictions=predictions,
+            intervals=intervals,
+            spec_risk=risks,
             horizon_hours=self.horizon_hours,
             confidence=confidence,
             notes=notes,

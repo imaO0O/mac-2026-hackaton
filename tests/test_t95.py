@@ -164,3 +164,51 @@ def test_already_over_limit_does_not_forbid_improving_moves():
                 if c.moves.get("T6", 370.0) < 369.0 and "T6" in c.deltas]
     assert lowering, "нужен вариант со снижением температуры Р-202"
     assert all(not any("Т95" in v for v in c.violations) for c in lowering)
+
+
+# --------------------------------------------------------------------------- #
+# граница ответственности: Т95 считает агент качества
+# --------------------------------------------------------------------------- #
+
+def test_quality_agent_reports_t95_as_a_quality_indicator():
+    """Т95 — показатель КАЧЕСТВА, и он обязан быть в ответе агента качества.
+
+    Раньше оценка жила только в оптимизаторе: он сам вычислял показатель
+    качества, а в QualityAssessment его не было вовсе — ни в логах прогонов, ни
+    на дашборде оператор Т95 не видел.
+    """
+    assessment = QualityAgent().assess(make_state(t95=355.0))
+    assert "product_t95_c" in assessment.predictions
+    assert "product_t95_c" in assessment.spec_risk
+    assert "product_t95_c" in assessment.intervals
+
+
+def test_t95_risk_is_a_probability_not_a_flag():
+    """Запас до предела обычно меньше двух сигм — граница не может быть резкой.
+
+    Уровень Т95 берётся из последнего анализа, а анализы идут раз в сутки, и за
+    сутки показатель уезжает на 6.6 °C (измерено). Поэтому «355 при пределе 360»
+    — это не «всё хорошо», а заметная вероятность выхода.
+    """
+    near = QualityAgent().assess(make_state(t95=358.0)).spec_risk["product_t95_c"]
+    far = QualityAgent().assess(make_state(t95=330.0)).spec_risk["product_t95_c"]
+    assert 0.0 < far < near < 1.0
+    assert near > 0.3          # в трёх градусах от предела риск существенный
+    assert far < 0.01
+
+
+def test_optimizer_uses_the_quality_agents_estimator():
+    """Две независимые реализации одного показателя обязаны разъехаться.
+
+    В этом проекте они уже расходились: два пути очистки телеметрии дали 0.9 %
+    разных значений, а исход рекомендации считался в пяти местах по-своему.
+    Оркестратор при сборке передаёт оптимизатору функцию агента качества.
+    """
+    from nefte.agents.blending import BlendingAgent  # noqa: F401
+    from nefte.agents.orchestrator import Orchestrator
+
+    quality = QualityAgent()
+    optimizer = build_optimizer()
+    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0)})
+    Orchestrator(quality, ReliabilityAgent(norms), optimizer, log_runs=False)
+    assert optimizer.t95_fn is quality.t95_fn

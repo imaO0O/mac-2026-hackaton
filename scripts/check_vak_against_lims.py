@@ -60,18 +60,24 @@ from nefte.utils import use_utf8_console  # noqa: E402
 
 # Показатель формулы → как он называется в ЛИМС. Только то, что реально есть в
 # выданных данных; всё остальное сверить не с чем, и мы об этом говорим прямо.
+# Один показатель может называться в ЛИМС по-разному в разных точках отбора:
+# предельная температура фильтруемости записана как `CFPP` на одних точках и как
+# `FilterabilityLimit.T` на других. Пока список был одиночным, формула ПТФ для
+# фракции 240-350 сверялась не с той точкой — с АВТ|1 по 44 анализам вместо АВТ|3
+# по 80, — и давала смещение −6.5 вместо +1.7. Проверка врала ровно тем способом,
+# который должна ловить.
 PARAM_TO_LIMS = {
-    "D15": "D15",
-    "T50": "50%.T",
-    "T90": "90%.T",
-    "T95": "95%.T",
-    "95%.T": "95%.T",
-    "EBP": "EBP.T",
-    "IBP": "IBP.T",
-    "CloudPoint": "CloudPoint",
-    "CFPP": "CFPP",
-    "I250": "I250",
-    "I350": "I350",
+    "D15": ["D15"],
+    "T50": ["50%.T"],
+    "T90": ["90%.T"],
+    "T95": ["95%.T"],
+    "95%.T": ["95%.T"],
+    "EBP": ["EBP.T"],
+    "IBP": ["IBP.T"],
+    "CloudPoint": ["CloudPoint", "CloudPoint_1"],
+    "CFPP": ["CFPP", "FilterabilityLimit.T"],
+    "I250": ["I250"],
+    "I350": ["I350"],
 }
 
 # Точки отбора по УСТАНОВКАМ. Установка формулы известна из её блока и догадкой
@@ -103,7 +109,8 @@ MIN_PAIRS_SHARE = 0.5
 # (в разгонке встречается 0, в плотности — единицы).
 SANE = {"D15": (700.0, 1000.0), "50%.T": (100.0, 400.0), "90%.T": (150.0, 450.0),
         "95%.T": (150.0, 450.0), "EBP.T": (150.0, 500.0), "IBP.T": (50.0, 350.0),
-        "CloudPoint": (-60.0, 40.0), "CFPP": (-60.0, 40.0),
+        "CloudPoint": (-60.0, 40.0), "CloudPoint_1": (-60.0, 40.0),
+        "CFPP": (-60.0, 40.0), "FilterabilityLimit.T": (-60.0, 40.0),
         "I250": (0.0, 100.0), "I350": (0.0, 100.0)}
 
 
@@ -158,24 +165,31 @@ def main() -> int:
                               "причина": "не прошла проверку правдоподобия"})
             continue
         param = item["target"].rsplit(":", 1)[-1]
-        lims_param = PARAM_TO_LIMS.get(param)
-        if lims_param is None:
+        lims_names = PARAM_TO_LIMS.get(param)
+        if lims_names is None:
             unchecked.append({"формула": item["target"],
                               "причина": f"показателя «{param}» нет в ЛИМС"})
             continue
 
         results = {}
         for point in POINTS_BY_UNIT.get(item["unit"], []):
-            try:
-                lab = lims_series(f"{point}|{lims_param}", lims)
-            except KeyError:
-                continue
-            lo, hi = SANE.get(lims_param, (-1e9, 1e9))
-            lab = lab[(lab > lo) & (lab < hi)]
-            stats = compare(feats[column], lab)
-            if stats is None or stats["пар"] < args.min_pairs:
-                continue
-            results[point] = stats
+            # у точки может быть любое из принятых имён показателя; берём то,
+            # по которому анализов больше
+            best_for_point = None
+            for name in lims_names:
+                try:
+                    lab = lims_series(f"{point}|{name}", lims)
+                except KeyError:
+                    continue
+                lo, hi = SANE.get(name, SANE.get(lims_names[0], (-1e9, 1e9)))
+                lab = lab[(lab > lo) & (lab < hi)]
+                stats = compare(feats[column], lab)
+                if stats is None or stats["пар"] < args.min_pairs:
+                    continue
+                if best_for_point is None or stats["пар"] > best_for_point["пар"]:
+                    best_for_point = stats
+            if best_for_point is not None:
+                results[point] = best_for_point
 
         if not results:
             unchecked.append({"формула": item["target"],

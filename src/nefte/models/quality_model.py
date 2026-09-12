@@ -68,6 +68,11 @@ PHYSICS_BY_TARGET: dict[str, dict[str, int]] = {
     "t95": PHYSICS_MONOTONE_T95,
 }
 
+# Признаки, которые НЕ лежат в матрице, а считаются в момент запроса: они зависят
+# от того, когда спросили, а не только от истории. Матрица строится по сетке
+# времени и такого столбца содержать не может.
+SERVE_COMPUTED = ("feature_age_h",)
+
 # 90 % интервал: σ = (q90 - q10) / (2 * 1.2816)
 Z90 = 1.2815515655446004
 
@@ -536,7 +541,19 @@ class SulfurModel:
                                "SulfurModel.attach(features)")
         idx = self.feature_matrix.index
         pos = idx.searchsorted(pd.Timestamp(state.ts), side="right") - 1
-        return None if pos < 0 else self.feature_matrix.iloc[[pos]]
+        if pos < 0:
+            return None
+        row = self.feature_matrix.iloc[[pos]]
+        # Признаки, которых в матрице нет по построению: они зависят не от истории,
+        # а от МОМЕНТА ЗАПРОСА. Возраст строки признаков при обучении считается от
+        # времени анализа, и такого столбца в матрице быть не может — его надо
+        # досчитать здесь, иначе обучение и работа разъедутся.
+        missing = [f for f in self.features if f in SERVE_COMPUTED]
+        if missing:
+            row = row.copy()
+            row["feature_age_h"] = (
+                (pd.Timestamp(state.ts) - idx[pos]).total_seconds() / 3600.0)
+        return row
 
     def predict_with_sigma(self, state: ProcessState) -> tuple[float, float]:
         """Интерфейс для ``QualityAgent``: ``(среднее, σ)`` на момент состояния."""
@@ -547,7 +564,23 @@ class SulfurModel:
         return float(pred["q50"].iloc[0]), float(pred["sigma"].iloc[0])
 
     def attach(self, feature_matrix: pd.DataFrame) -> "SulfurModel":
-        self.feature_matrix = feature_matrix[self.features]
+        """Привязка к рабочей матрице признаков.
+
+        Раньше здесь стояло ``feature_matrix[self.features]``, и это была мина.
+        Отбору признаков при обучении предлагается ``feature_age_h``, которого в
+        рабочей матрице НЕТ по построению: он считается от времени анализа. Пока
+        отбор его не выбирал, всё работало; при следующем переобучении он мог
+        попасть в набор, и модель падала бы на загрузке — в момент, когда её уже
+        подключили к циклу.
+        """
+        stored = [f for f in self.features if f not in SERVE_COMPUTED]
+        missing = [f for f in stored if f not in feature_matrix.columns]
+        if missing:
+            raise RuntimeError(
+                f"в рабочей матрице нет признаков модели: {missing}. "
+                "Матрица и модель собраны по разным настройкам — переобучите "
+                "модель или пересоберите матрицу.")
+        self.feature_matrix = feature_matrix[stored]
         return self
 
     # ------------------------------------------------------------------ #

@@ -110,9 +110,12 @@ def cache_key(freq: str) -> str:
         "target": TARGET_SERIES,
         "feed": FEED_SULFUR_SERIES,
         "lims_delay": load_config()["quality"].get("lims_publication_delay_hours"),
-        # поправки к формулам ВАК меняют состав признаков — кэш обязан это заметить
+        # поправки к формулам ВАК меняют состав признаков — кэш обязан это заметить.
+        # Оба источника: и присланные организаторами, и наше прочтение.
         "vak_corrections": sorted((load_config().get("vak") or {})
                                   .get("corrections", {}).items()),
+        "vak_proposed": sorted((load_config().get("vak") or {})
+                               .get("proposed_corrections", {}).items()),
         "regime": INSTANT_FEATURES,
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:10]

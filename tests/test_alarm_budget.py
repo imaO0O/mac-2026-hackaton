@@ -90,24 +90,30 @@ def test_normalized_wabt_rises_when_the_catalyst_gives_less():
 
     wabt = pd.Series([360.0, 360.0, 360.0])
     sulfur = pd.Series([5.0, 10.0, 20.0])
-    values = normalized_wabt(wabt, sulfur, reference_mgkg=10.0)
+    values = normalized_wabt(wabt, sulfur, feed_sulfur=9000.0, reference_mgkg=10.0)
     assert values.iloc[0] < values.iloc[1] < values.iloc[2]
     # на опорной сере поправка равна нулю
     assert values.iloc[1] == pytest.approx(360.0)
 
 
-def test_normalized_wabt_matches_the_kinetics_it_claims():
-    """Поправка обязана совпадать с той кинетикой, на которую ссылается.
+def test_normalized_wabt_uses_first_order_like_the_rest_of_the_project():
+    """Порядок реакции здесь решает всё, и первая версия была неверной.
 
-    Если коэффициент разъедется с ACTIVATION_ENERGY_KJ в kinetics.py, признак
-    начнёт означать не то, что написано в его докстринге.
+    Она меняла саму серу вместо ГЛУБИНЫ ПРЕВРАЩЕНИЯ, то есть неявно считала по
+    второму порядку: на удвоение серы выходило 21.7 °C вместо 3.4. Остальной
+    проект считает по первому (`models/kinetics.py` берёт tau = ln(S_вх/S_вых)),
+    и два разных порядка в одном коде — то самое тихое расхождение, которое мы
+    уже ловили в двух путях очистки данных.
     """
     from nefte.models.regime import KINETIC_SENSITIVITY, normalized_wabt
 
+    feed, reference = 9000.0, 10.0
     values = normalized_wabt(pd.Series([340.0]), pd.Series([20.0]),
-                             reference_mgkg=10.0)
-    assert values.iloc[0] - 340.0 == pytest.approx(
-        np.log(2.0) / KINETIC_SENSITIVITY)
+                             feed_sulfur=feed, reference_mgkg=reference)
+    expected = np.log(np.log(feed / reference) / np.log(feed / 20.0)) / KINETIC_SENSITIVITY
+    assert values.iloc[0] - 340.0 == pytest.approx(expected)
+    # и заметно меньше второго порядка, который давала первая версия
+    assert values.iloc[0] - 340.0 < np.log(2.0) / KINETIC_SENSITIVITY / 5
 
 
 def test_normalized_wabt_is_not_in_the_feature_matrix():
@@ -131,5 +137,6 @@ def test_zero_or_negative_sulfur_gives_nothing_not_minus_infinity():
     """В ЛИМС встречаются нули. Логарифм нуля — минус бесконечность, а не признак."""
     from nefte.models.regime import normalized_wabt
 
-    values = normalized_wabt(pd.Series([360.0, 360.0]), pd.Series([0.0, -1.0]))
+    values = normalized_wabt(pd.Series([360.0, 360.0]), pd.Series([0.0, -1.0]),
+                             feed_sulfur=9000.0)
     assert values.isna().all()

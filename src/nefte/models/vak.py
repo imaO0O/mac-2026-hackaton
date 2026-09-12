@@ -84,15 +84,32 @@ def compile_formulas() -> tuple[list[dict], list[dict]]:
     отброшенных с причиной. Отбрасываем молча только то, что не компилируется:
     молчаливая «починка» чужой формулы хуже честного пропуска.
     """
-    corrections = (load_config().get("vak") or {}).get("corrections") or {}
+    vak_cfg = load_config().get("vak") or {}
+    corrections = vak_cfg.get("corrections") or {}
+    proposed = vak_cfg.get("proposed_corrections") or {}
     usable, skipped = [], []
     for _, row in load_vak_formulas().iterrows():
         target = row["target"]
-        # Поправки организаторов важнее выданного файла: часть формул на листе
-        # «ВАК» содержит ошибки (T90 давал 198 000 °C). Источник каждой поправки
-        # записан в конфиге, чтобы было видно, что это не наша самодеятельность.
+        # Два РАЗНЫХ источника поправок, и смешивать их нельзя.
+        #
+        # `corrections` — прислано организаторами в ответ на наш вопрос. Часть
+        # формул на листе «ВАК» содержала ошибки (T90 давал 198 000 °C).
+        #
+        # `proposed_corrections` — наше прочтение записи, подтверждённое
+        # лабораторией. Применяется ПОСЛЕ и перекрывает: у `AVT6:240-350:CFPP`
+        # поправка организаторов сместила скобку так, что к температуре
+        # прибавляется расход, и в физический диапазон не попадает ни одно
+        # значение (смещение −62 °C); прочтение `F65/(F32+F30)` даёт MAE 2.3 °C
+        # на 80 анализах.
+        #
+        # Приоритет отдан своему прочтению не из самоуверенности, а потому что у
+        # него есть измеримое свидетельство, а у присланного — нет. Но источник
+        # каждой поправки остаётся в поле `correction_source`, и на защите
+        # «прислано заказчиком» и «вывели сами» должны звучать по-разному.
         fix = corrections.get(target)
-        raw_formula = fix["formula"] if fix else row["formula"]
+        own = proposed.get(target)
+        active = own or fix
+        raw_formula = active["formula"] if active else row["formula"]
         expr = parse_vak_formula(raw_formula)
         for token, (name, _series) in LIMS_TOKENS.items():
             expr = expr.replace(token, name)
@@ -112,8 +129,12 @@ def compile_formulas() -> tuple[list[dict], list[dict]]:
             "expr": expr,
             "tags": sorted(set(_NAME_RE.findall(expr))),
             "uses_lims": bool(row["uses_lims"]) or "LIMS_" in expr,
-            "corrected": bool(fix),
-            "correction_reason": (fix or {}).get("reason", ""),
+            "corrected": bool(active),
+            "correction_reason": (active or {}).get("reason", ""),
+            "correction_source": ("организаторы" if active is fix and fix
+                                  else "наше прочтение" if active else ""),
+            # подтверждена ли поправка заказчиком: на защите это разные вещи
+            "correction_confirmed": bool(active is fix and fix),
         })
     return usable, skipped
 

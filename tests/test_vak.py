@@ -116,4 +116,25 @@ def test_all_expected_targets_are_covered():
     usable, skipped = compile_formulas()
     assert len(usable) == 17
     assert skipped == []
-    assert sum(1 for i in usable if i["corrected"]) == 6
+    # шесть от организаторов плюс две наши; AVT6:240-350:CFPP есть в обоих
+    # списках, и наше прочтение перекрывает присланное
+    assert sum(1 for i in usable if i["corrected"]) == 7
+    by_source = {i["target"]: i["correction_source"] for i in usable if i["corrected"]}
+    assert by_source["AVT6:240-350:CFPP"] == "наше прочтение"
+    assert by_source["24-2000:GODT:T95"] == "организаторы"
+
+
+def test_our_own_reading_is_never_passed_off_as_confirmed():
+    """Источник поправки обязан быть виден.
+
+    «Прислано заказчиком» и «вывели сами» — разные вещи, и на защите они должны
+    звучать по-разному. Поле correction_confirmed отделяет одно от другого; без
+    него наше прочтение формулы неотличимо от ответа организаторов.
+    """
+    usable, _ = compile_formulas()
+    for item in usable:
+        if item["correction_source"] == "наше прочтение":
+            assert item["correction_confirmed"] is False
+            assert item["correction_reason"]
+        elif item["correction_source"] == "организаторы":
+            assert item["correction_confirmed"] is True
