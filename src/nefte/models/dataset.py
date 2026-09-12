@@ -45,6 +45,9 @@ AVT_TAGS = ["T55", "T1", "T20", "T33", "T48", "T66",
 # Окна скользящих статистик в отсчётах по 10 минут: 1 ч, 6 ч, 24 ч.
 ROLL_WINDOWS = [6, 36, 144]
 
+# Сера сырья в ЛИМС записана в процентах массы, а везде в проекте сера — в мг/кг.
+PCT_TO_MGKG = 10_000.0
+
 TARGET_SERIES = "Гидроочистка|2|Mg.Sulfur"
 FEED_SULFUR_SERIES = "Гидроочистка|1|Mass.Sulfur"
 
@@ -90,9 +93,12 @@ def target_series(target: str = "sulfur") -> pd.Series:
 # Версия схемы признаков. Поднимайте её, когда меняете САМ РАСЧЁТ (формулу окна,
 # набор лаговых признаков, способ ресемплинга) — то, что не выражено константами
 # выше. Состав тегов, окна и целевые ряды подставляются в ключ кэша сами.
+# 6: сера сырья переведена в мг/кг и признак переименован в lims_feed_sulfur_mgkg —
+#    раньше он был в процентах массы, а одноимённое значение в срезе оператора в
+#    мг/кг, то есть в десять тысяч раз больше.
 # 5: `frozen_mask` стал причинным — признак `pak_frozen` и маскировка залипших
 #    значений телеметрии больше не заглядывают вперёд.
-FEATURE_VERSION = 5
+FEATURE_VERSION = 6
 
 
 def cache_key(freq: str) -> str:
@@ -220,8 +226,16 @@ def build_feature_matrix(freq: str = "1h", use_cache: bool = True) -> pd.DataFra
     delay = float(cfg["quality"].get("lims_publication_delay_hours", 0.0))
     prev = asof_features(feats.index, known_from(target, delay), "lims_sulfur_prev",
                          allow_exact_matches=False)
-    # сера сырья: контекст нагрузки на катализатор
-    feed_f = asof_features(feats.index, known_from(feed, delay), "lims_feed_sulfur")
+    # Сера сырья: контекст нагрузки на катализатор.
+    #
+    # ПЕРЕВОДИМ В мг/кг прямо здесь. В ЛИМС этот показатель записан в процентах
+    # массы (≈0.93), а везде остальное в проекте сера — в мг/кг: и целевая, и
+    # значение в срезе оператора (`lims_feed_sulfur_mgkg` ≈ 9200), и кинетический
+    # суррогат. Бустингу масштаб безразличен, поэтому расхождение ничего не ломало
+    # и жило незаметно — но имена отличались одним суффиксом, а значения в десять
+    # тысяч раз. Такую ловушку в коде, который пишут втроём, оставлять нельзя.
+    feed_f = asof_features(feats.index, known_from(feed, delay) * PCT_TO_MGKG,
+                           "lims_feed_sulfur_mgkg")
     feats = pd.concat([feats, prev, feed_f], axis=1)
 
     if freq:

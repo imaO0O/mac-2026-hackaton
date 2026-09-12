@@ -165,3 +165,38 @@ def test_outage_retrospective_covers_the_whole_episode():
                         retrospective=True)
     assert whole.iloc[5:15].all()
     assert not whole.iloc[:5].any() and not whole.iloc[15:].any()
+
+
+def test_feed_sulfur_has_the_same_unit_everywhere():
+    """Один показатель — одна единица, в признаках и в срезе оператора.
+
+    В ЛИМС сера сырья записана в процентах массы (≈0.93), а везде в проекте сера
+    в мг/кг. Признак назывался `lims_feed_sulfur` и был в процентах, а значение в
+    срезе — `lims_feed_sulfur_mgkg` и в мг/кг: имена отличались одним суффиксом,
+    значения в десять тысяч раз. Бустингу масштаб безразличен, поэтому ловушка
+    жила незаметно; для человека она смертельна.
+    """
+    from nefte.models.dataset import PCT_TO_MGKG, build_feature_matrix
+
+    matrix = build_feature_matrix()
+    assert "lims_feed_sulfur" not in matrix.columns, "имя без единицы вернулось"
+    values = matrix["lims_feed_sulfur_mgkg"].dropna()
+    assert len(values) > 1000
+    # порядок величины тот же, что и в срезе: тысячи мг/кг, а не единицы процентов
+    assert 1_000.0 < float(values.mean()) < 50_000.0
+    assert PCT_TO_MGKG == 10_000.0
+
+
+def test_conversion_constant_is_shared_not_copied():
+    """Два места, делающие одно преобразование, обязаны ссылаться на одно число.
+
+    Их и было два — матрица признаков и срез оператора, — и константа в них была
+    вписана руками по отдельности.
+    """
+    from pathlib import Path
+
+    import nefte.pipeline as pipeline_module
+
+    source = Path(pipeline_module.__file__).read_text(encoding="utf-8")
+    assert "PCT_TO_MGKG" in source
+    assert "* 10_000" not in source

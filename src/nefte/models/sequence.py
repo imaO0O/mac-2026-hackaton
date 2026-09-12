@@ -60,7 +60,7 @@ DEFAULT_CHANNELS = [
     # АВТ: что приходит в гидроочистку
     "avt_T55", "avt_F30", "avt_F32",
     # оперативная и лабораторная оценка качества
-    "pak_sulfur", "lims_sulfur_prev", "lims_feed_sulfur",
+    "pak_sulfur", "lims_sulfur_prev", "lims_feed_sulfur_mgkg",
 ]
 
 # Цель предобучения: показание поточного анализатора. Его в истории 265 тысяч

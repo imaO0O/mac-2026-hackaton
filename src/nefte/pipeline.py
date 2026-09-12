@@ -16,6 +16,7 @@ from nefte.data.cleaning import (
     frozen_mask,
 )
 from nefte.data.features import known_from
+from nefte.models.dataset import PCT_TO_MGKG
 from nefte.data.loaders import lims_series, load_lims, load_pak, load_telemetry
 from nefte.data.validity import SignalValidity
 
@@ -78,7 +79,10 @@ class StateBuilder:
         try:
             feed = lims_series("Гидроочистка|1|Mass.Sulfur", lims)
             # сера сырья — тоже лабораторный анализ, и публикуется так же поздно
-            self.lims_feed_sulfur = known_from(feed[feed > 0] * 10_000, delay)
+            # % масс. → мг/кг, той же константой, что и в матрице признаков:
+            # два места, где делается одно преобразование, обязаны ссылаться на
+            # одно число, иначе они разъедутся.
+            self.lims_feed_sulfur = known_from(feed[feed > 0] * PCT_TO_MGKG, delay)
         except KeyError:
             self.lims_feed_sulfur = None
         # Т95 — второй обязательный показатель по ответу организаторов. Он нужен не
