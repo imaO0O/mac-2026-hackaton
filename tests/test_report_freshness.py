@@ -18,11 +18,22 @@ import pytest
 from nefte.config import ROOT, load_config
 from nefte.models.dataset import FEATURE_VERSION
 
-# Контракт покрывает и бустинг, и нейросети: сравнение «сеть против бустинга»
-# осмысленно, только если обе стороны считаны на одной матрице. Раньше отчёты
-# сетей были вне проверки и могли устареть молча.
-REPORTS = sorted(list((ROOT / "reports").glob("quality_metrics_*.json"))
-                 + list((ROOT / "reports").glob("sequence_metrics_*.json")))
+# Контракт покрывает ВСЕ отчёты, а не перечисленные по имени. Перечень по именам
+# уже подводил: новый отчёт добавляли, в список его не вносили, и он оставался вне
+# проверки — молча, потому что отсутствие файла в списке ничем не отличается от
+# отсутствия расхождений.
+REPORTS = sorted((ROOT / "reports").glob("*.json"))
+
+# А эти обязаны нести версию матрицы, а не просто «нести, если несут». Разница
+# принципиальная: отчёт без поля версии тесты ниже ПРОПУСКАЮТ, и пропуск выглядит
+# как успех. Ровно так и вышло: докстринг контракта утверждал, что отчёты сетей
+# покрыты, а они пропускались все девять — поле в scripts/train_sequence.py
+# добавили в 18:59, когда прогон сетей уже шёл с 18:54 и работал по старому коду.
+#
+# Числа при этом были свежие, а контракт — неисполняемым. Список ниже превращает
+# пропуск в падение: если семейство отчётов зависит от матрицы, оно обязано
+# сказать, на какой матрице снято.
+MUST_CARRY_VERSION = ("quality_metrics_", "sequence_metrics_", "alarm_budget_")
 
 
 def _load(path: Path) -> dict:
@@ -75,6 +86,23 @@ def test_report_matches_the_current_split(path: Path):
             f"{path.name}: разбиение {name} разошлось с конфигом")
 
 
+@pytest.mark.parametrize(
+    "path", [p for p in REPORTS if p.name.startswith(MUST_CARRY_VERSION)],
+    ids=lambda p: p.name)
+def test_report_that_depends_on_the_matrix_says_which_one(path: Path):
+    """Отчёт, зависящий от матрицы, обязан назвать её версию.
+
+    Без этого проверка свежести превращается в пропуск, а пропуск читается как
+    успех. Это не гипотетическая опасность: девять отчётов сетей пропускались,
+    пока докстринг рядом утверждал, что они покрыты.
+    """
+    assert _load(path).get("feature_version") is not None, (
+        f"{path.name} не записывает версию матрицы — проверки свежести его "
+        "молча пропускают, и устареть он может незаметно")
+
+
 def test_there_are_reports_to_check():
     """Сам список не должен молча опустеть — иначе тесты выше ничего не проверяют."""
-    assert REPORTS, "в reports/ нет ни одного quality_metrics_*.json"
+    assert REPORTS, "в reports/ нет ни одного отчёта"
+    covered = [p for p in REPORTS if p.name.startswith(MUST_CARRY_VERSION)]
+    assert covered, "ни один отчёт не попал под обязательную проверку версии"
