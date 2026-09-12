@@ -72,24 +72,47 @@ def _against_lab(series: pd.Series, point: str, param: str,
             "mae": float(np.mean(np.abs(model - truth)))}
 
 
-def test_data_derived_readings_stay_out_of_the_working_pipeline():
-    """Наши прочтения — не поправки организаторов, и смешивать их нельзя.
+def test_data_derived_readings_never_pass_as_organizer_corrections():
+    """Прочтение, выведенное нами, не должно выдаваться за присланное заказчиком.
 
-    Пока вопрос организаторам не задан, формула, прочитанная нами, остаётся
-    гипотезой. Гипотеза не имеет права попасть в матрицу признаков молча: там
-    она станет числом в чужом отчёте, и происхождение его будет не проследить.
+    Сначала этот тест держал другое: что наши прочтения в рабочий расчёт вообще
+    не попадают. Решение изменилось — участник 1 дал им приоритет над поправками
+    организаторов, и правильно: у нашего прочтения есть измеримое свидетельство
+    (MAE 2.3 °C против 62), а у присланного нет.
+
+    Но тогда инвариант становится строже, а не слабее. Раз формула применяется,
+    единственное, что отделяет «прислано заказчиком» от «вывели сами», — поле
+    происхождения. На защите это разные вещи, и подменять одно другим нельзя.
     """
     vak = load_config()["vak"]
     proposed = vak.get("proposed_corrections") or {}
     assert proposed, "разобранные прочтения должны быть записаны в конфиге"
 
-    working = {item["target"]: item["expr"] for item in compile_formulas()[0]}
+    usable, _ = compile_formulas()
+    by_target = {item["target"]: item for item in usable}
     for target, item in proposed.items():
         assert item.get("assumption") is True
         assert "НЕ подтверждено" in item["source"], \
             f"{target}: у прочтения должен быть виден источник"
-        assert working.get(target) != parse_vak_formula(item["formula"]), \
-            f"{target}: наше прочтение уже применяется в рабочем расчёте молча"
+
+        compiled = by_target[target]
+        assert compiled["expr"] == parse_vak_formula(item["formula"]), \
+            f"{target}: применяется не наше прочтение"
+        assert compiled["correction_source"] == "наше прочтение"
+        assert compiled["correction_confirmed"] is False, \
+            f"{target}: помечено как подтверждённое организаторами"
+
+
+def test_organizer_corrections_are_still_marked_as_theirs():
+    """Обратная сторона: то, что прислали, обязано остаться помеченным как их."""
+    usable, _ = compile_formulas()
+    proposed = set((load_config()["vak"].get("proposed_corrections") or {}))
+    confirmed = [i for i in usable if i["correction_confirmed"]]
+    assert confirmed, "поправки организаторов должны быть видны как подтверждённые"
+    for item in confirmed:
+        assert item["correction_source"] == "организаторы"
+        assert item["target"] not in proposed, \
+            f"{item['target']}: перекрытая поправка числится подтверждённой"
 
 
 def test_proposed_cfpp_reading_reproduces_the_laboratory(avt, formulas):

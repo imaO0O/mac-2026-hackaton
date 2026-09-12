@@ -160,7 +160,11 @@ def build_observations(ht: pd.DataFrame, sulfur_out: pd.Series, sulfur_in: pd.Se
     if not temps or FEED not in ht.columns:
         return pd.DataFrame()
 
-    working = ~outage_mask(ht[FEED], min_outage_hours=6.0)
+    # retrospective=True: здесь разбор ИСТОРИИ, а не срез на момент t. Отсеять
+    # надо весь эпизод останова целиком, включая первые часы, — те отсчёты и
+    # правда были остановом. Причинная маска (по умолчанию) объявляет останов
+    # только после набора порога, и первые часы простоя попали бы в режим.
+    working = ~outage_mask(ht[FEED], min_outage_hours=6.0, retrospective=True)
     wabt = ht[temps].mean(axis=1).where(working).rolling(REGIME_WINDOW).mean()
     feed = ht[FEED].where(working).rolling(REGIME_WINDOW).mean()
 
@@ -196,7 +200,11 @@ def build_observations(ht: pd.DataFrame, sulfur_out: pd.Series, sulfur_in: pd.Se
 def long_outages(feed: pd.Series, min_hours: float = LONG_OUTAGE_HOURS,
                  steps_per_hour: int = 6) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """Интервалы остановов длиннее ``min_hours`` по СЫРОМУ расходу сырья."""
-    down = outage_mask(feed, min_outage_hours=min_hours, steps_per_hour=steps_per_hour)
+    # Тот же случай: перечисляем эпизоды истории целиком, поэтому retrospective.
+    # От границ эпизода зависит шаг NWABT через него, то есть вывод о смене
+    # катализатора, — причинная маска сдвинула бы начало на длительность порога.
+    down = outage_mask(feed, min_outage_hours=min_hours, steps_per_hour=steps_per_hour,
+                       retrospective=True)
     block = (down != down.shift()).cumsum()
     out = []
     for _, part in feed.groupby(block):
