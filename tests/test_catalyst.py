@@ -270,3 +270,28 @@ def test_two_normalizations_answer_two_different_questions():
                             pd.Series([20.0], index=index), pd.Series([9300.0], index=index),
                             **args)
     assert worse.iloc[0] > load_only.iloc[0] + 1.0
+
+
+def test_feed_normalized_wabt_adds_nothing_to_a_tree_and_the_test_says_why():
+    """Держит вывод, ради которого не надо гонять обучение.
+
+    ``reg_kinetic`` уже есть в матрице признаков, а приведённая к нагрузке
+    температура — его монотонное преобразование. Дерево делит по порядку, значит
+    новой информации ровно ноль. Если кто-то соберётся добавить признак в
+    матрицу, пусть сначала увидит здесь, почему не стоит.
+
+    Для severity та же величина осмысленна: там взвешенный индекс, и градусы
+    складываются с градусами, а ``exp(−Ea/RT)/расход`` — нет.
+    """
+    index = pd.date_range("2026-01-01", periods=200, freq="h")
+    rng = np.random.default_rng(7)
+    wabt = pd.Series(360.0 + rng.normal(0, 6, len(index)), index=index)
+    feed = pd.Series(250.0 + rng.normal(0, 40, len(index)), index=index).clip(lower=60.0)
+
+    kinetic = np.exp(-100.0 / (0.008314 * (wabt + 273.15))) / feed
+    normalized = feed_normalized_wabt(wabt, feed, feed_reference=250.0)
+
+    frame = pd.DataFrame({"kinetic": kinetic, "normalized": normalized}).dropna()
+    assert len(frame) > 150
+    # ранги совпадают полностью — это и есть «информации ноль»
+    assert (frame["kinetic"].rank() == frame["normalized"].rank()).all()
