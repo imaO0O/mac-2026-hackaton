@@ -18,7 +18,7 @@ from typing import Callable, Protocol
 import numpy as np
 import pandas as pd
 
-from nefte.agents.quality import T95_SIGMA_C, spec_risk_normal
+from nefte.agents.quality import spec_risk_normal, t95_sigma
 from nefte.agents.schemas import (
     Candidate,
     ProcessState,
@@ -452,11 +452,15 @@ class OptimizerAgent:
             # нести ВЕРОЯТНОСТЬ, а не только значение. Иначе в карточке оператора
             # альтернативы сравнимы по сере и несравнимы по разгонке, хотя
             # ограничение действует по обеим. σ здесь — неопределённость нашего
-            # знания о текущем Т95 (суточный уход показателя, 6.64 °C измерено),
-            # а не точность формулы: уровень мы берём из последнего анализа.
+            # знания о текущем Т95 (уход показателя с момента отбора пробы), а не
+            # точность формулы: уровень мы берём из последнего анализа. Берётся
+            # ТОЙ ЖЕ функцией, что и в агенте качества: одна величина не может
+            # иметь две разные неопределённости в двух карточках одного цикла.
             if t95 is not None:
+                t95_meas = state.quality.get("lims_t95_c")
                 c.spec_risk["product_t95_c"] = spec_risk_normal(
-                    float(t95), T95_SIGMA_C, t95_limit)
+                    float(t95), t95_sigma(t95_meas.age_hours if t95_meas else None),
+                    t95_limit)
             c.throughput = self.throughput_fn(state, c.moves)
             c.energy_proxy = self.energy_fn(state, c.moves)
             # Тяжесть режима У ЭТОГО варианта, а не у текущего: иначе критерий

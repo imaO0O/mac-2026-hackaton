@@ -7,7 +7,10 @@
 """
 from __future__ import annotations
 
+import json
 import math
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -24,14 +27,26 @@ from nefte.config import load_config
 # Разброс между лабораторией и поточным анализатором на исторических парах:
 # MAE 1.70 мг/кг, смещение -0.26. Используется как априорная σ базовой модели.
 # Неопределённость нашего знания о ТЕКУЩЕМ Т95, °C. Это не точность формулы ВАК, а
-# разброс СУТОЧНОГО изменения самого показателя: уровень мы берём из последнего
-# лабораторного анализа, а анализы идут раз в сутки (медиана шага 24 ч), и за это
-# время Т95 успевает уехать. Измерено по обучающему периоду: ст. откл. изменения
-# между соседними анализами 6.64 °C, MAE 4.86.
+# разброс того, насколько показатель успел уехать с момента отбора пробы: уровень
+# мы берём из последнего лабораторного анализа.
 #
 # Число важное: запас до предела 360 °C обычно около 12 °C, то есть меньше двух
 # сигм. Показывать Т95 как точно известную величину нельзя.
-T95_SIGMA_C = 6.64
+#
+# Раньше здесь стояла ОДНА константа 6.64, измеренная на медианном шаге в сутки и
+# применявшаяся при любом возрасте опорного анализа. Но анализ Т95 старше суток в
+# трети моментов решения, и разброс за это время успевает подрасти
+# (scripts/check_t95_sigma.py):
+#
+#     0-30 ч  6.79      80-130 ч  7.59
+#    30-54 ч  7.16     130-200 ч  7.81
+#    54-80 ч  7.53     200-400 ч  8.14
+#
+# Ряд возвращается к среднему, а не блуждает: случайное блуждание дало бы на том
+# же плече рост в 4.47 раза, фактический рост — 1.20. Поэтому кривая пологая, и
+# усложнение оправдано ровно этими двадцатью процентами, а не разами.
+T95_SIGMA_C = 6.79            # запасное значение: возраст анализа неизвестен
+T95_SIGMA_TABLE_PATH = "reports/t95_sigma.json"
 
 BASELINE_SIGMA_MGKG = 1.7
 
@@ -128,6 +143,43 @@ def spec_risk_normal(pred: float, sigma: float, limit: float) -> float:
         return float(pred > limit)
     z = (limit - pred) / sigma
     return float(1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0))))
+
+
+@lru_cache(maxsize=1)
+def _t95_sigma_table() -> tuple[tuple[float, float], ...]:
+    """Измеренная таблица «возраст анализа → разброс», из отчёта.
+
+    Читается из файла, а не зашивается в код: число получено измерением и
+    обязано пересчитываться вместе с остальными. Если отчёта нет — пустая
+    таблица, и в дело идёт запасная константа.
+    """
+    path = Path(__file__).resolve().parents[3] / T95_SIGMA_TABLE_PATH
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    return tuple((float(b["age_to_h"]), float(b["sigma_c"]))
+                 for b in raw.get("buckets", []))
+
+
+def t95_sigma(age_hours: float | None) -> float:
+    """Разброс знания о текущем Т95 при опорном анализе такого возраста.
+
+    Ступенька, а не сглаживание: вёдра измерены, промежуточные значения — нет,
+    и придумывать между ними кривую значило бы выдавать интерполяцию за
+    измерение. За последним ведром σ не растёт — это и есть полка, ради которой
+    мерялась форма.
+    """
+    table = _t95_sigma_table()
+    if not table:
+        return T95_SIGMA_C
+    if age_hours is None:
+        return table[-1][1]          # возраст неизвестен — берём худшее из измеренного
+    for upper, sigma in table:
+        if age_hours < upper:
+            return sigma
+    return table[-1][1]
+
 
 
 class QualityAgent:
@@ -250,15 +302,21 @@ class QualityAgent:
         # точность формулы.
         t95 = self.t95_fn(state, {}) if self.t95_fn else None
         if t95 is not None and t95 == t95:
+            t95_meas = state.quality.get("lims_t95_c")
+            t95_age = t95_meas.age_hours if t95_meas is not None else None
+            sigma_t95 = t95_sigma(t95_age)
             predictions["product_t95_c"] = float(t95)
-            intervals["product_t95_c"] = (t95 - 1.96 * T95_SIGMA_C,
-                                          t95 + 1.96 * T95_SIGMA_C)
-            risks["product_t95_c"] = spec_risk_normal(t95, T95_SIGMA_C, self.t95_limit)
+            intervals["product_t95_c"] = (t95 - 1.96 * sigma_t95,
+                                          t95 + 1.96 * sigma_t95)
+            risks["product_t95_c"] = spec_risk_normal(t95, sigma_t95, self.t95_limit)
             if risks["product_t95_c"] > 0.2:
+                age_text = ("" if t95_age is None
+                            else f", анализу {t95_age:.0f} ч")
                 notes.append(
                     f"Т95 {t95:.1f} °C при пределе {self.t95_limit:.0f}: "
                     f"вероятность выхода {risks['product_t95_c']:.0%}. Уровень взят "
-                    "из последнего анализа, между анализами он уезжает на 6.6 °C.")
+                    f"из последнего анализа{age_text}, за это время он уезжает "
+                    f"на {sigma_t95:.1f} °C.")
 
         return QualityAssessment(
             ts=state.ts,
