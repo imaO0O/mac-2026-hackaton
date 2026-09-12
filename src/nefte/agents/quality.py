@@ -98,14 +98,26 @@ def fuse_sulfur(state: ProcessState, cfg: dict | None = None) -> Measurement:
     lims = state.quality.get("lims_sulfur_mgkg")
     pak = state.quality.get("pak_sulfur_ppm")
 
-    if lims and lims.value is not None and (lims.age_hours or 0) <= stale["lims"]:
+    def fresh(m, hours) -> bool:
+        return m is not None and m.value is not None and (m.age_hours or 0) <= hours
+
+    if fresh(lims, stale["lims"]):
         return lims.model_copy(update={"source": Source.LIMS})
-    if pak and pak.value is not None and not pak.is_frozen:
+    # Свежесть ПАК проверяется СВОИМ порогом (час), а не порогом лаборатории.
+    # Раньше проверялось только «не залип»: поточный анализатор, замолчавший
+    # десять часов назад, не залипший — он просто молчит, и его последнее
+    # значение подставлялось как оперативное.
+    if fresh(pak, stale["pak"]) and not pak.is_frozen:
         comment = "ЛИМС устарел, взят поточный анализатор" if lims else "нет ЛИМС"
         return pak.model_copy(update={"source": Source.PAK, "comment": comment})
-    if lims and lims.value is not None:
+    if lims is not None and lims.value is not None:
         return lims.model_copy(update={"source": Source.LIMS, "is_stale": True,
                                        "comment": "ПАК недостоверен, взят устаревший ЛИМС"})
+    # Лаборатории нет вовсе — устаревший ПАК всё же лучше пустоты, но только с
+    # честной пометкой: приоритет ТЗ (ЛИМС → ПАК) уже соблюдён выше.
+    if pak is not None and pak.value is not None and not pak.is_frozen:
+        return pak.model_copy(update={"source": Source.PAK, "is_stale": True,
+                                      "comment": "нет ЛИМС, показание ПАК устарело"})
     return Measurement(value=None, unit="мг/кг", source=Source.NONE,
                        comment="нет достоверного источника качества")
 
@@ -210,7 +222,13 @@ class QualityAgent:
             risk = self.model.risk_for_state(state)
         if risk is None:
             risk = spec_risk_normal(mean, sigma, self.limit)
-        stale_after = float(self.cfg["quality"]["staleness_hours"]["lims"])
+        # Порог свежести берётся у ТОГО источника, который реально выбран.
+        # Раньше здесь всегда стоял порог лаборатории (24 ч), и показание
+        # поточного анализатора десятичасовой давности считалось свежим, хотя его
+        # собственный порог — час.
+        staleness = self.cfg["quality"]["staleness_hours"]
+        stale_after = float(staleness.get(
+            "pak" if source is Source.PAK else "lims", staleness["lims"]))
         parts = confidence_parts(sigma, source, current.age_hours, stale_after,
                                  state.data_quality.usable,
                                  model_age_months=self._model_age_months(state.ts),
