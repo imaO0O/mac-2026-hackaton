@@ -108,6 +108,27 @@ class Orchestrator:
             off_spec_now = (f"ФАКТ ВНЕ СПЕЦИФИКАЦИИ: {measured.source.value} "
                             f"{measured.value:.2f} мг/кг при пределе {limit}{age}. ")
 
+        # То же самое для ВТОРОГО обязательного показателя, и по той же причине.
+        #
+        # Оптимизатор запрещает варианты, ухудшающие Т95, но когда Т95 уже за
+        # пределом, запрещать по нему бессмысленно: бездействие не «хуже себя», и
+        # оно проходит как допустимое. Логика верная — а следствие было такое:
+        # карточка писала «Режим устойчив, риск 8 %» и «текущий режим
+        # удовлетворяет ограничениям», показывая рядом Т95 364 °C при пределе 360
+        # и перечисляя «Т95 ≤ 360 (жёсткое, прогноз)» как проверенное.
+        #
+        # Заметка про это агентом качества СОЗДАВАЛАСЬ («вероятность выхода
+        # 72 %») и никуда не попадала: q.notes доходят до карточки только по
+        # ветке отказа. Третий за вечер случай «проверка есть, но не проверяет».
+        t95_limit = float(self.cfg["spec"]["t95_c"]["max"])
+        t95_pred = q.predictions.get("product_t95_c")
+        t95_risk = q.spec_risk.get("product_t95_c", 0.0)
+        t95_off_spec = t95_pred is not None and float(t95_pred) > t95_limit
+        t95_alert = ""
+        if t95_off_spec:
+            t95_alert = (f"Т95 ЗА ПРЕДЕЛОМ: прогноз {float(t95_pred):.1f} °C при "
+                         f"{t95_limit:.0f} (вероятность нарушения {t95_risk:.0%}). ")
+
         # --- отказ 1: установка не в работе -----------------------------
         # Проверяется ПЕРВОЙ: на остановленной установке устаревший ЛИМС и
         # зависший анализатор — следствия останова, а не самостоятельные причины.
@@ -163,7 +184,7 @@ class Orchestrator:
         if self._too_soon(state.ts) and hold is not None and not already_off_spec:
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
-                problem=off_spec_now + f"Риск нарушения спецификации: {risk:.0%}",
+                problem=off_spec_now + t95_alert + f"Риск нарушения спецификации: {risk:.0%}",
                 action=hold, confidence=q.confidence,
                 expected_effect={"сера, мг/кг": round(pred, 2) if pred else "н/д"},
                 checked_constraints=self._constraint_log(),
@@ -178,17 +199,28 @@ class Orchestrator:
 
         # --- нормальный режим: не создаём лишних воздействий ------------
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
+            if t95_off_spec:
+                # «Режим устойчив» здесь было бы неправдой: обязательных
+                # показателя три, и один из них вне спецификации.
+                headline = (f"Сера спокойна (риск {risk:.0%}), но Т95 за пределом")
+                why = ("По сере изменение уставок не требуется. Т95 за пределом уже "
+                       "сейчас, и система его НЕ оптимизирует: она только запрещает "
+                       "варианты, которые ухудшают Т95 ради серы. Решение по Т95 — "
+                       "за технологом.")
+            else:
+                headline = ("Режим устойчив, риск выхода за спецификацию "
+                            f"{risk:.0%}" if risk < self.act_risk_threshold / 2 else
+                            f"Риск {risk:.0%} — ниже порога вмешательства "
+                            f"{self.act_risk_threshold:.0%}, режим держим под наблюдением")
+                why = ("Текущий режим удовлетворяет ограничениям, "
+                       "изменение уставок не требуется.")
             rec = Recommendation(
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
-                problem=off_spec_now + ("Режим устойчив, риск выхода за спецификацию "
-                        f"{risk:.0%}" if risk < self.act_risk_threshold / 2 else
-                        f"Риск {risk:.0%} — ниже порога вмешательства "
-                        f"{self.act_risk_threshold:.0%}, режим держим под наблюдением"),
+                problem=off_spec_now + t95_alert + headline,
                 action=hold, confidence=q.confidence,
                 expected_effect=self._effect(hold, hold, r),
-                checked_constraints=self._constraint_log(),
-                explanation="Текущий режим удовлетворяет ограничениям, "
-                            "изменение уставок не требуется.",
+                checked_constraints=self._constraint_log(t95_off_spec),
+                explanation=why,
                 alternatives=self.optimizer.diverse_alternatives(candidates, 3),
             )
             return self._finish(rec, state, q, r)
@@ -196,11 +228,12 @@ class Orchestrator:
         # --- есть риск: рекомендуем действие ----------------------------
         rec = Recommendation(
             ts=state.ts, state_summary=state_summary, freshness=freshness,
-            problem=off_spec_now + f"Риск нарушения спецификации по сере: {risk:.0%} "
-                    f"(прогноз {pred:.2f} мг/кг при пределе {limit})",
+            problem=off_spec_now + t95_alert
+                    + f"Риск нарушения спецификации по сере: {risk:.0%} "
+                      f"(прогноз {pred:.2f} мг/кг при пределе {limit})",
             action=best,
             expected_effect=self._effect(best, hold, r),
-            checked_constraints=self._constraint_log(),
+            checked_constraints=self._constraint_log(t95_off_spec),
             explanation=self._explain(best, candidates, q, r,
                                       q.confidence * (1.0 if best.guaranteed else 0.6)),
             confidence=q.confidence * (1.0 if best.guaranteed else 0.6),
@@ -234,13 +267,21 @@ class Orchestrator:
             cur = best.predicted_quality.get("product_sulfur_mgkg")
             if base is not None and cur is not None:
                 out["сера к бездействию"] = round(cur - base, 2)
+            # Т95 тоже к бездействию, а не только абсолютом. Без этого размен
+            # виден наполовину: оператор читает «сера −1.93, выпуск −3 %» и
+            # «Т95 355», из чего нельзя понять, двинул ли ход разгонку и в какую
+            # сторону. А ход по температуре двигает её всегда: в исправленной
+            # формуле ВАК коэффициент по Т6 равен 0.50.
+            t95_base = hold.predicted_quality.get("product_t95_c")
+            if t95_base is not None and t95 is not None:
+                out["Т95 к бездействию"] = round(float(t95) - float(t95_base), 2)
             if hold.throughput and best.throughput is not None:
                 out["выпуск, %"] = round((best.throughput / hold.throughput - 1) * 100, 2)
             if hold.energy_proxy and best.energy_proxy is not None:
                 out["энергия, %"] = round((best.energy_proxy / hold.energy_proxy - 1) * 100, 2)
         return out
 
-    def _constraint_log(self) -> list[str]:
+    def _constraint_log(self, t95_off_spec: bool = False) -> list[str]:
         """Что именно проверено — и, столь же важно, что НЕ проверено.
 
         Список обязан стареть вместе с кодом. Пока модели Т95 не было, здесь
@@ -254,9 +295,18 @@ class Orchestrator:
         моделей не имеют и проверяются по последнему лабораторному анализу.
         """
         spec = self.cfg["spec"]
+        # Когда Т95 УЖЕ за пределом, писать «Т95 ≤ 360 (жёсткое)» без оговорки
+        # значит обещать выполнение того, что не выполняется. Ограничение при этом
+        # действует — но в ослабленном виде: оно запрещает ухудшать Т95, а не
+        # обязывает вернуть его в норму.
+        t95_line = (f"Т95 ≤ {spec['t95_c']['max']} °C (жёсткое, прогноз: уровень из "
+                    "лаборатории, приращение по формуле ВАК)")
+        if t95_off_spec:
+            t95_line = (f"Т95 УЖЕ выше {spec['t95_c']['max']} °C: варианты, "
+                        "ухудшающие его, запрещены, но вернуть в норму система не "
+                        "берётся — это решение технолога")
         out = [f"сера ≤ {spec['product_sulfur_mgkg']['max']} мг/кг (жёсткое, прогноз)",
-               f"Т95 ≤ {spec['t95_c']['max']} °C (жёсткое, прогноз: уровень из "
-               "лаборатории, приращение по формуле ВАК)",
+               t95_line,
                "уставки внутри модельного диапазона (допущение, p05–p95 истории)",
                "шаг изменения за цикл ограничен"]
         if self.blending is not None:
