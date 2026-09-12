@@ -18,7 +18,7 @@ from typing import Callable, Protocol
 import numpy as np
 import pandas as pd
 
-from nefte.agents.quality import spec_risk_normal
+from nefte.agents.quality import T95_SIGMA_C, spec_risk_normal
 from nefte.agents.schemas import (
     Candidate,
     ProcessState,
@@ -448,6 +448,15 @@ class OptimizerAgent:
             c.spec_risk = {"product_sulfur_mgkg":
                            spec_risk_normal(sulfur, float(sigma), limit)
                            if sulfur == sulfur else 1.0}
+            # Т95 — такой же обязательный показатель, и у вариантов он тоже должен
+            # нести ВЕРОЯТНОСТЬ, а не только значение. Иначе в карточке оператора
+            # альтернативы сравнимы по сере и несравнимы по разгонке, хотя
+            # ограничение действует по обеим. σ здесь — неопределённость нашего
+            # знания о текущем Т95 (суточный уход показателя, 6.64 °C измерено),
+            # а не точность формулы: уровень мы берём из последнего анализа.
+            if t95 is not None:
+                c.spec_risk["product_t95_c"] = spec_risk_normal(
+                    float(t95), T95_SIGMA_C, t95_limit)
             c.throughput = self.throughput_fn(state, c.moves)
             c.energy_proxy = self.energy_fn(state, c.moves)
             # Тяжесть режима У ЭТОГО варианта, а не у текущего: иначе критерий
