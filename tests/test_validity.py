@@ -30,13 +30,24 @@ def test_sentinel_and_dead_tag_detected():
 
 
 def test_frozen_plateau_is_masked_not_kept():
+    """Полка маскируется — но только с того отсчёта, где порог набран по прошлому.
+
+    Раньше тест требовал маску на ВСЕЙ полке с первого отсчёта. Это выглядело
+    естественно и было заглядыванием вперёд: система узнавала об отказе прибора
+    раньше, чем это в принципе возможно. Цена исправления — первые 17 отсчётов
+    полки остаются в данных как достоверные; это осознанный размен, потому что
+    единственная альтернатива — снова развести очистку для обучения и для работы,
+    а они у нас уже однажды разъехались.
+    """
     df = _telemetry()
     df.iloc[50:80, df.columns.get_loc("F30")] = 42.0     # 30 отсчётов = 5 часов
     v = SignalValidity.build(df, unit="avt")
 
-    assert v.frozen.iloc[50:80]["F30"].all()
-    assert v.clean.iloc[50:80]["F30"].isna().all()
+    threshold = 18                                       # frozen_min_samples
+    assert v.frozen.iloc[50 + threshold - 1:80]["F30"].all()
+    assert v.clean.iloc[50 + threshold - 1:80]["F30"].isna().all()
     assert not v.frozen.iloc[:50]["F30"].any()
+    assert not v.frozen.iloc[50:50 + threshold - 1]["F30"].any()
 
 
 def test_flags_at_explains_reasons():

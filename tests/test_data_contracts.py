@@ -28,14 +28,25 @@ def test_sentinel_masking_removes_307():
 
 
 def test_frozen_mask_detects_stuck_analyzer():
+    """Маска включается, когда порог УЖЕ набран по прошлому.
+
+    Здесь раньше стояло `m.iloc[:20].all()` — то есть маска считалась истинной с
+    первого же отсчёта полки. Утверждение выглядело разумным («вся полка
+    заморожена»), но означало заглядывание вперёд: в первый момент видно одно
+    одинаковое значение, и узнать, что сигнал простоит ещё три часа, нельзя.
+    """
     s = _series([5.0] * 20 + [5.1, 5.2, 5.3])
     m = frozen_mask(s, min_samples=18)
-    assert m.iloc[:20].all()
+    assert not m.iloc[:17].any(), "порог ещё не набран — знать неоткуда"
+    assert m.iloc[17:20].all(), "с 18-го одинакового отсчёта полка видна"
     assert not m.iloc[20:].any()
 
+    # А вот ОТЧЁТ об эпизодах смотрит на прогон целиком, и это правильно:
+    # он ретроспективный и ни в какие признаки не идёт.
     intervals = frozen_intervals(s, min_samples=18)
     assert len(intervals) == 1
     assert intervals.loc[0, "value"] == 5.0
+    assert intervals.loc[0, "n"] == 20
 
 
 def test_asof_never_looks_into_future():

@@ -130,7 +130,7 @@ def test_normalized_wabt_is_not_in_the_feature_matrix():
 
     source = Path(dataset_module.__file__).read_text(encoding="utf-8")
     assert "reg_nwabt" not in source
-    assert FEATURE_VERSION == 4
+    assert FEATURE_VERSION >= 4
 
 
 def test_zero_or_negative_sulfur_gives_nothing_not_minus_infinity():

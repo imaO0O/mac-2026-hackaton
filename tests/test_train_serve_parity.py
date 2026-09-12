@@ -105,3 +105,36 @@ def test_every_working_model_feature_is_available_at_serve_time():
         assert not unavailable, (
             f"модель горизонта {horizon:g} ч использует признаки, которых нет "
             f"в рабочей матрице: {unavailable}")
+
+
+def test_frozen_detection_is_causal():
+    """Замороженный сигнал нельзя объявить раньше, чем порог набран по прошлому.
+
+    Дефект был двойным. Как ПРИЗНАК (`pak_frozen` в матрице) полный размер прогона
+    давал модели знание о будущем отказе прибора. Как СОСТОЯНИЕ в срезе оператора
+    он делал систему прозорливой в бэктесте: она объявляла анализатор зависшим
+    раньше, чем это стало бы известно в реальном времени.
+    """
+    from nefte.data.cleaning import frozen_mask
+
+    values = pd.Series([1.0, 2.0] + [7.0] * 10 + [3.0])
+    mask = frozen_mask(values, min_samples=5)
+    first_true = int(np.argmax(mask.to_numpy()))
+    # полка начинается с индекса 2; порог 5 набирается на индексе 6
+    assert first_true == 6
+    assert not mask.iloc[:6].any()
+
+
+def test_frozen_detection_does_not_depend_on_what_comes_after():
+    """Проверка на само заглядывание: будущее не должно менять прошлое.
+
+    Берём один и тот же префикс и продолжаем его по-разному. Маска на префиксе
+    обязана совпасть — иначе значение признака в момент t зависит от того, что
+    случится позже.
+    """
+    from nefte.data.cleaning import frozen_mask
+
+    prefix = [1.0, 2.0] + [7.0] * 6
+    short = frozen_mask(pd.Series(prefix + [3.0]), min_samples=5)
+    long = frozen_mask(pd.Series(prefix + [7.0] * 20), min_samples=5)
+    assert list(short.iloc[:len(prefix)]) == list(long.iloc[:len(prefix)])
