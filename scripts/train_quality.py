@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.features import time_split  # noqa: E402
 from nefte.models.dataset import (  # noqa: E402
+    FEATURE_VERSION,
     QUALITY_TARGETS,
     build_feature_matrix,
     build_training_table,
@@ -139,6 +140,13 @@ def main() -> int:
     report = {"horizon_hours": args.horizon, "target": args.target,
               "limit": limit, "n_features": len(model.features),
               "monotone": model.monotone,
+              # Версия схемы признаков — чтобы по отчёту было видно, на какой
+              # матрице он получен. Без неё устаревший отчёт неотличим от
+              # свежего, и «воспроизводится командой из README» остаётся
+              # обещанием: матрицу меняли, а числа лежат прежние.
+              "feature_version": FEATURE_VERSION,
+              "split": {k: list(v) for k, v in cfg["split"].items()
+                        if isinstance(v, (list, tuple))},
               "sigma_scale": model.sigma_scale, "alarm_threshold": model.alarm_threshold,
               "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
               "alarm_budget": cfg["quality"].get("alarm_budget"),
