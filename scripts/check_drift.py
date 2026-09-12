@@ -228,14 +228,56 @@ def main() -> int:
     # требования к точности виртуального анализатора. Число видно здесь, и на
     # защите его надо называть допущением.
     tolerance = 0.05 * limit
-    if bias_slope and abs(bias_slope) > 1e-6:
-        months = tolerance / abs(bias_slope)
+    shelf: dict = {}
+    if bias_slope and abs(bias_slope) > 1e-6 and len(rows) >= 2:
+        ages = np.array([r["возраст, мес"] for r in rows], dtype=float)
+        biases = np.array([r["смещение"] for r in rows], dtype=float)
+        slope, intercept = np.polyfit(ages, biases, 1)
+
+        # ТУТ БЫЛА ОШИБКА, и её стоит назвать. Срок считался как
+        # tolerance / |наклон| — время, за которое смещение проходит допустимые
+        # 0.5 мг/кг ОТ НУЛЯ. Но в нуле оно не начинается: подгонка даёт
+        # пересечение около -0.84, то есть на молодой модели прогноз ЗАНИЖЕН, а с
+        # возрастом смещение идёт вверх, проходит ноль и только потом уходит в
+        # плюс. По модулю оно сначала УБЫВАЕТ.
+        #
+        # Из-за пропущенного пересечения срок годности оказывался втрое короче
+        # реального, и карточка оператора резала уверенность сильнее всего ровно
+        # там, где измеренное смещение наименьшее.
+        def crossing(level: float) -> float | None:
+            if abs(slope) < 1e-9:
+                return None
+            return float((level - intercept) / slope)
+
+        up, down = crossing(tolerance), crossing(-tolerance)
+        inside = [t for t in (up, down) if t is not None and t > ages.max()]
+        measured_to = float(ages.max())
+        shelf = {
+            "подгонка": {"пересечение": float(intercept), "наклон": float(slope)},
+            "смещение_по_модулю_убывает": bool(abs(biases[-1]) < abs(biases[0])),
+            "измерено_до_мес": measured_to,
+            "выход_за_допуск_вверх_мес": up,
+            "выход_за_допуск_вниз_мес": down,
+            "допуск": float(tolerance),
+        }
         verdict.append(
-            f"Практический вывод: при таком темпе смещение съедает допустимые "
-            f"{tolerance:.2f} мг/кг (5 % предела, ДОПУЩЕНИЕ) примерно за "
-            f"{months:.0f} мес. Это и есть период переобучения. Проверять надо не "
-            f"по календарю, а по этой же метрике: считать смещение на последних "
-            f"анализах и переобучать, когда оно выйдет за {tolerance:.2f}.")
+            f"Смещение подгоняется прямой {intercept:+.3f} {slope:+.4f}*возраст. "
+            f"Допустимые ±{tolerance:.2f} мг/кг (5 % предела, ДОПУЩЕНИЕ) она "
+            f"пересекает вверх на {up:.1f} мес и вниз на {down:.1f} мес; "
+            f"внутри допуска модель с {max(down, 0):.1f} по {up:.1f} мес.")
+        verdict.append(
+            f"Считать срок как {tolerance:.2f}/наклон было бы ошибкой: это время "
+            f"прохождения допуска ОТ НУЛЯ, а смещение начинается с "
+            f"{intercept:+.3f}. По модулю оно сначала убывает "
+            f"({abs(biases[0]):.3f} на {ages.min():.1f} мес против "
+            f"{abs(biases[-1]):.3f} на {ages.max():.1f} мес).")
+        verdict.append(
+            f"Поэтому срок годности берём по КРАЮ ИЗМЕРЕННОГО, а не по "
+            f"экстраполяции: проверено до {measured_to:.1f} мес, и на всём этом "
+            f"промежутке качество решений не ухудшается. Дальше мы не знаем — и "
+            f"уверенность должна падать именно от незнания, а не от измеренной "
+            f"порчи." + (f" Экстраполяция обещала бы {inside[0]:.1f} мес."
+                         if inside else ""))
 
     for line in verdict:
         print("  " + line)
@@ -245,7 +287,8 @@ def main() -> int:
     out.write_text(json.dumps({
         "горизонт": args.horizon, "показатель": args.target, "предел": limit,
         "конец_обучения": str(train_end - pd.Timedelta(days=1)),
-        "интервалы": rows, "наклоны_в_месяц": trends, "вывод": verdict,
+        "интервалы": rows, "наклоны_в_месяц": trends, "срок_годности": shelf,
+        "вывод": verdict,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {out.relative_to(ROOT)}")
     return 0
