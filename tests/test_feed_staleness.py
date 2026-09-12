@@ -65,3 +65,37 @@ def test_default_feed_is_no_better_than_a_month_old_measurement():
     assert default_error >= month_old_error * 0.5, (
         "если заглушка стала заметно точнее старого измерения, "
         "выбор «старое измерение лучше константы» надо пересчитать")
+
+
+def test_every_lims_row_agrees_with_its_own_threshold():
+    """Показанный возраст и флаг устаревания обязаны говорить одно и то же.
+
+    Инвариант общий для всех лабораторных рядов среза, а не про сырьё: возраст
+    считается от ОТБОРА пробы, и порог сравнивается с ним же. Пока это было
+    написано трижды по месту, один ряд разъехался — у Т95 возраст показывался
+    от отбора, а флаг считался от публикации, и в 19.2 % срезов тестового
+    периода две строки ЛИМС с одинаковым возрастом 26 ч при одном пороге 24 ч
+    имели разные флаги.
+    """
+    pd = pytest.importorskip("pandas")
+    from nefte.pipeline import StateBuilder
+
+    cfg = load_config()
+    stale = cfg["quality"]["staleness_hours"]
+    thresholds = {
+        "lims_sulfur_mgkg": stale["lims"],
+        "lims_t95_c": stale["lims"],
+        "lims_feed_sulfur_mgkg": stale["lims_feed"],
+    }
+    builder = StateBuilder(cfg)
+    lo, hi = cfg["split"]["test"]
+
+    for ts in pd.date_range(lo, hi, freq="37h"):
+        state = builder.build(ts)
+        for key, limit in thresholds.items():
+            m = state.quality.get(key)
+            if m is None or m.age_hours is None:
+                continue
+            assert (m.age_hours > limit) == m.is_stale, (
+                f"{ts}: {key} показывает возраст {m.age_hours:.1f} ч при пороге "
+                f"{limit} ч, но is_stale={m.is_stale}")

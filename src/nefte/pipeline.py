@@ -107,6 +107,26 @@ class StateBuilder:
         age_h = (ts - sub.index[-1]).total_seconds() / 3600.0
         return float(sub.iloc[-1]), float(age_h)
 
+    def _last_lims(self, series: pd.Series,
+                   ts: pd.Timestamp) -> tuple[float | None, float | None]:
+        """То же для лабораторного ряда, но возраст — ОТ ОТБОРА ПРОБЫ.
+
+        Ряды ЛИМС хранятся сдвинутыми на задержку публикации: в срез попадает
+        только то, что оператор мог увидеть. Поэтому возраст «от последней
+        известной точки» занижен ровно на задержку, и складывать её обратно
+        обязаны все три ряда одинаково — иначе один порог означает разное для
+        серы и для Т95.
+
+        Такое расхождение здесь уже было: возраст Т95 показывался от отбора, а
+        флаг устаревания считался от публикации. В 19.2 % срезов тестового
+        периода оператор видел две строки ЛИМС с ОДНИМ возрастом 26 ч и ОДНИМ
+        порогом 24 ч, из которых одна помечена устаревшей, а другая нет.
+        """
+        value, age_h = self._last(series, ts)
+        if age_h is not None:
+            age_h += self.lims_delay_hours
+        return value, age_h
+
     def build(self, ts: str | pd.Timestamp) -> ProcessState:
         ts = pd.Timestamp(ts)
         stale = self.cfg["quality"]["staleness_hours"]
@@ -114,12 +134,11 @@ class StateBuilder:
         avt_row = self.avt.loc[:ts].iloc[-1] if len(self.avt.loc[:ts]) else pd.Series(dtype=float)
         ht_row = self.ht.loc[:ts].iloc[-1] if len(self.ht.loc[:ts]) else pd.Series(dtype=float)
 
-        # в срез идёт ТОЛЬКО опубликованное значение
-        lims_val, lims_age = self._last(self.lims_sulfur_known, ts)
-        if lims_age is not None:
-            # возраст показываем от ОТБОРА пробы: оператору важно, насколько
-            # старая проба, а не когда её напечатали
-            lims_age += self.lims_delay_hours
+        # в срез идёт ТОЛЬКО опубликованное значение, а возраст считается от
+        # ОТБОРА пробы: оператору важно, насколько старая проба, а не когда её
+        # напечатали. Одной функцией для всех трёх лабораторных рядов — чтобы
+        # порог означал для них одно и то же.
+        lims_val, lims_age = self._last_lims(self.lims_sulfur_known, ts)
         pak_val, pak_age = self._last(self.pak_sulfur, ts)
         pak_is_frozen = bool(self.pak_frozen.loc[:ts].iloc[-1]) if len(
             self.pak_frozen.loc[:ts]) else False
@@ -130,7 +149,7 @@ class StateBuilder:
                 value=lims_val, unit="мг/кг", source=Source.LIMS, age_hours=lims_age,
                 is_stale=lims_age > stale["lims"])
         if self.lims_feed_sulfur is not None:
-            feed_val, feed_age = self._last(self.lims_feed_sulfur, ts)
+            feed_val, feed_age = self._last_lims(self.lims_feed_sulfur, ts)
             if feed_val is not None:
                 # Порог для сырья — СВОЙ, а не кратный порогу продукта. Продукт
                 # анализируют раз в сутки (95 % промежутков ровно 24 ч), сырьё —
@@ -143,11 +162,10 @@ class StateBuilder:
                     is_stale=feed_age > stale["lims_feed"],
                     comment="сера сырья гидроочистки")
         if self.lims_t95_known is not None:
-            t95_val, t95_age = self._last(self.lims_t95_known, ts)
+            t95_val, t95_age = self._last_lims(self.lims_t95_known, ts)
             if t95_val is not None:
                 quality["lims_t95_c"] = Measurement(
-                    value=t95_val, unit="°C", source=Source.LIMS,
-                    age_hours=None if t95_age is None else t95_age + self.lims_delay_hours,
+                    value=t95_val, unit="°C", source=Source.LIMS, age_hours=t95_age,
                     is_stale=t95_age > stale["lims"],
                     comment="Т95 продукта гидроочистки")
         if pak_val is not None:
