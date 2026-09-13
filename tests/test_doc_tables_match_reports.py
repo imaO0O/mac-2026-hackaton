@@ -66,7 +66,12 @@ def table_rows(doc: str, header: str, label_cells: int = 1) -> dict[str, list[st
     for line in lines[start + 2:]:
         if not line.startswith("|"):
             break
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # Обратная косая перед чертой внутри ячейки — символ, а не граница столбца:
+        # в таблицах формул АВТ точка отбора пишется «АВТ\|3». Без этого все ячейки
+        # правее сдвигались на одну, и сверка шла не с тем столбцом.
+        escaped_pipe = chr(92) + "|"
+        text = line.strip().strip("|").replace(escaped_pipe, "¦")
+        cells = [c.strip().replace("¦", "|") for c in text.split("|")]
         key = " | ".join(c.replace("*", "").strip() for c in cells[:label_cells])
         rows[key] = cells[label_cells:]
     return rows
@@ -296,6 +301,232 @@ ROWS = [
         lambda: [[weights()["сера разброс, среднее"]]]),
     Row(OA, "| При разбросе весов ±50 % |", "моментов с действием, на которых это посчитано",
         lambda: [[weights()["моментов с действием"], weights()["stamps"]]]),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Участник 2: надёжность, ресурс катализатора, формулы АВТ.
+#
+# Добавлено по той же причине, что и всё выше: в этих документах числа тоже
+# переносились руками, и при первом же прогоне сверки нашлись устаревшие ячейки —
+# после причинной маски «залипшего» сигнала сдвинулись доля брака, медианы тегов и
+# число анализов. Таблицы из разовых разборов без отчёта (разложение нормировки,
+# расхождение масок) сюда не входят: сверять их не с чем.
+# --------------------------------------------------------------------------- #
+
+def catalyst() -> dict:
+    return report("catalyst_life.json")
+
+
+def avt_tags() -> dict:
+    return report("avt_formulas.json")
+
+
+def reliability() -> dict:
+    return report("reliability_metrics.json")
+
+
+def outage(start: str) -> list[list[float] | None]:
+    r = next(x for x in catalyst()["остановы"] if x["начало"] == start)
+    return [[r["длительность, ч"]], [r["NWABT до, °C"]], [r["NWABT после, °C"]],
+            [r["шаг, °C"]], None]
+
+
+def cycle(number: int) -> list[list[float] | None]:
+    c = next(x for x in catalyst()["циклы"] if x["цикл"] == number)
+    return [None, [c["длительность, сут"]], [c["анализов"]],
+            [c["NWABT в начале, °C"], c["NWABT в конце, °C"]],
+            [c["скорость, °C/мес"]], list(c["95% ДИ"])]
+
+
+def sensitivity(axis: str, keys: tuple[str, ...]) -> list[list[float]]:
+    values = catalyst()["чувствительность"][axis]
+    return [[values[k]] for k in keys]
+
+
+def remaining(method: str) -> list[list[float] | None]:
+    r = catalyst()["остаточный_ресурс_мес"]
+    if method == "а":
+        return [[r["по средней скорости"], *r["по средней скорости, ДИ"]], None]
+    if method == "б":
+        left = {row["цикл"]: row["оставалось, мес"] for row in r["по аналогии"]}
+        # в ячейке «13.0 мес (цикл 1), 14.4 (цикл 0, …)» номера циклов — тоже числа
+        return [[left[1], 1, left[0], 0], None]
+    if method == "в":
+        return [[r["по текущей скорости"]], None]
+    by_lag = r["по отставанию от эталона"]
+    return [[by_lag["остаток, мес"]],
+            [by_lag["эталон прожил ещё, мес"], by_lag["отставание, °C"],
+             by_lag["отставание, мес наработки"]]]
+
+
+def lag(day: int) -> list[list[float] | None]:
+    rows = catalyst()["контрольная_точка"]["отставание"]
+    r = next(x for x in rows if x["сутки"] == day)
+    return [[r["цикл 1, °C"]], [r["цикл 2, °C"]], [r["отставание, °C"]],
+            list(r["95% ДИ"]), None]
+
+
+def backtest(day: int) -> list[list[float]]:
+    r = next(x for x in catalyst()["бэктест_метода"] if x["сутки"] == day)
+    return [[r["NWABT тогда, °C"]], [r["(а) линейно, мес"]], [r["(б) аналогия, мес"]],
+            [r["ФАКТ, мес"]], [r["ошибка (а), %"]]]
+
+
+def cetane_within(number: int) -> list[list[float]]:
+    rows = catalyst()["цетановое_число"]["внутри циклов"]
+    return [[next(x for x in rows if x["цикл"] == number)["наклон, ед/год"]]]
+
+
+def cetane_jump(date: str) -> list[list[float]]:
+    rows = catalyst()["цетановое_число"]["шаг при смене"]
+    r = next(x for x in rows if x["смена"] == date)
+    return [[r["ЦЧ до"]], [r["ЦЧ после"]], [r["шаг"]]]
+
+
+def percent(text) -> float:
+    return float(str(text).replace("%", "").strip())
+
+
+def avt_formula(name: str) -> list[list[float] | None]:
+    r = next(x for x in avt_tags()["формулы"] if x["формула"] == name)
+    # точка отбора («АВТ|3») числом не сверяется; остальное — против СВОЕЙ точки блока
+    head = [[r["медиана"]], [percent(r["в физ. диапазоне"])], None]
+    if r.get("n (своя)") is None:
+        return head + [None, None, None, None]
+    return head + [[r["n (своя)"]], [r["смещение (своя)"]], [r["MAE (своя)"]],
+                   [r["corr (своя)"]]]
+
+
+def broken(name: str) -> dict:
+    return next(x for x in avt_tags()["разбор_сломанных"] if x["формула"] == name)
+
+
+def cfpp_reading(index: int) -> list[list[float]]:
+    r = broken("AVT6:240-350:CFPP")["проверка"][index]
+    return [[percent(r["в диапазоне"])], [r["смещение"]], [r["MAE"]]]
+
+
+def i350_constant(index: int) -> list[list[float]]:
+    r = broken("AVT6:350:I350")["проверка"][index]
+    return [[r["смещение"]], [r["MAE"]]]
+
+
+def tag_verdict(code: str) -> list[list[float] | None]:
+    r = next(x for x in avt_tags()["вердикты_по_тегам"] if x["тег"] == code)
+    return [None, [r["медиана"]], [r["p05"], r["p95"]], None, None]
+
+
+def validity(unit: str) -> list[list[float] | None]:
+    v = reliability()["validity"][unit]
+    # «Мёртвых» числом не сверяется: в ячейке «1 (`D10`)» имя тега тоже число
+    return [[v["n_tags"]], None, [len(v["suspicious_negative"])],
+            [v["mean_bad_share_pct"]]]
+
+
+def analyzer_failure(start: str) -> list[list[float]]:
+    rows = reliability()["analyzer_failures"]["longest"]
+    r = next(x for x in rows if x["start"].startswith(start))
+    return [[r["value"]], [r["hours"]]]
+
+
+def tradeoff(split: str) -> list[list[float]]:
+    t = reliability()["tradeoff_quality_vs_severity"][split]
+    return [[t["auc_severity"]], [t["auc_inverse"]]]
+
+
+def robustness(spread: int) -> list[list[float] | None]:
+    name = ("severity_robustness.json" if spread == 50
+            else f"severity_robustness_s{spread}.json")
+    data = report(name)
+    rc, decision = data["risk_class"], data["decision"]
+    near = (None if rc["устойчивость у границы"] is None
+            else [100 * rc["устойчивость у границы"], rc["моментов у границы"],
+                  rc["stamps"]])
+
+    def outcome(label: str) -> list[float] | None:
+        o = decision["по исходам"].get(label)
+        if o is None:
+            return None
+        return [100 * o["устойчивость"], 100 * o["худший момент"], o["моментов"]]
+
+    # Сколько моментов с действием лежат у границы класса. Без этого числа «исход
+    # сохраняется» не отличить от «пограничных случаев в выборке просто нет».
+    from nefte.agents.reliability import ReliabilityAgent
+    low, high = reliability()["risk_thresholds"]
+    margin = ReliabilityAgent.CLASS_BOUNDARY_MARGIN
+    acting_near = sum(
+        min(abs(r["severity"] - low), abs(r["severity"] - high)) <= margin
+        for r in decision["per_stamp"] if r["базовый исход"] == "меняем уставки")
+    return [[100 * rc["mean_stability"], 100 * rc["worst_stability"]], near,
+            outcome("меняем уставки"), outcome("держим режим"),
+            [decision["моментов с действием"], decision["stamps"], acting_near]]
+
+
+CL, AT, RA = "CATALYST_LIFE.md", "AVT_TAGS.md", "RELIABILITY_AGENT.md"
+REMAINING = "| Способ | Оценка | На чём держится |"
+EA_KEYS = ("70.0", "85.0", "100.0", "115.0", "130.0")
+SULFUR_KEYS = ("5.0", "8.0", "10.0")
+AVT_FORMULAS = ("AVT6:240-350:D15", "AVT6:240-350:T50", "AVT6:240-350:EBP",
+                "AVT6:240-350:CFPP", "AVT6:350:T50", "AVT6:350:I350", "AVT6:350:D15",
+                "AVT6:350-500:ViscosityK", "AVT6:350:CFPP")
+DISPUTED_TAGS = ("F30", "F31", "F32", "F36", "F57", "F64", "F65", "L43", "P4", "P67",
+                 "T6", "T11", "T15", "T18", "T33", "T37", "T40", "T42", "T48", "T58")
+
+ROWS += [
+    *[Row(CL, "| Останов | Длительность |", label, (lambda s=start: outage(s)))
+      for label, start in (("2024-03-16 … 04-17", "2024-03-16"),
+                           ("2026-04-15 … 04-23", "2026-04-15"),
+                           ("2026-06-20 … 06-30", "2026-06-20"))],
+    *[Row(CL, "| Цикл | Период | Длина |", str(n), (lambda n=n: cycle(n)))
+      for n in (0, 1, 2)],
+    Row(CL, "| Энергия активации, кДж/моль |", "Скорость, °C/мес",
+        lambda: sensitivity("энергия активации", EA_KEYS)),
+    Row(CL, "| Эталонная сера, мг/кг |", "Скорость, °C/мес",
+        lambda: sensitivity("эталонная сера", SULFUR_KEYS)),
+    Row(CL, REMAINING, "(а) по средней скорости", lambda: remaining("а")),
+    Row(CL, REMAINING, "(б) по аналогии, сопоставление по УРОВНЮ", lambda: remaining("б")),
+    Row(CL, REMAINING, "(в) по текущей скорости +4.15 °C/мес", lambda: remaining("в")),
+    Row(CL, REMAINING, "(г) по отставанию, сопоставление по НАРАБОТКЕ",
+        lambda: remaining("г")),
+    *[Row(CL, "| Сутки | Цикл 1, °C |", str(d), (lambda d=d: lag(d)))
+      for d in (40, 60, 80, 100)],
+    *[Row(CL, "| Сутки цикла 1 | NWABT тогда |", str(d), (lambda d=d: backtest(d)))
+      for d in (108, 150, 200, 300, 400, 500)],
+    Row(CL, "| | Наклон, ед/год |", "по календарю, все 42 анализа",
+        lambda: [[catalyst()["цетановое_число"]["наклон по календарю, ед/год"]]]),
+    Row(CL, "| | Наклон, ед/год |", "внутри цикла 0 (17 анализов)",
+        lambda: cetane_within(0)),
+    Row(CL, "| | Наклон, ед/год |", "внутри цикла 1 (22 анализа)",
+        lambda: cetane_within(1)),
+    *[Row(CL, "| Смена катализатора | ЦЧ до |", date, (lambda d=date: cetane_jump(d)))
+      for date in ("2024-04-17", "2026-04-23")],
+    *[Row(AT, "| Формула | Медиана | В физ. диапазоне |", name,
+          (lambda n=name: avt_formula(n)))
+      for name in AVT_FORMULAS],
+    Row(AT, "| Прочтение | В диапазоне", "как исправили организаторы: `F65/F32+F30`",
+        lambda: cfpp_reading(0)),
+    Row(AT, "| Прочтение | В диапазоне", "по аналогии с D15: `F65/(F32+F30)`",
+        lambda: cfpp_reading(1)),
+    Row(AT, "| Константа | Смещение | MAE |", "39.562 (как выдано)",
+        lambda: i350_constant(0)),
+    Row(AT, "| Константа | Смещение | MAE |", "399.562", lambda: i350_constant(1)),
+    *[Row(AT, "| Тег | Описание КИП | Медиана |", code, (lambda c=code: tag_verdict(c)))
+      for code in DISPUTED_TAGS],
+    *[Row(RA, "| Установка | Тегов | Мёртвых |", label, (lambda u=unit: validity(u)))
+      for label, unit in (("ЭЛОУ-АВТ-6", "avt"), ("24-2000", "ht"))],
+    *[Row(RA, "| Начало | Значение | Длительность |", start,
+          (lambda s=start: analyzer_failure(s)))
+      for start in ("2024-03-16", "2026-06-18", "2026-04-15")],
+    *[Row(RA, "| Выборка | ROC-AUC severity |", split, (lambda s=split: tradeoff(s)))
+      for split in ("train", "test")],
+    Row(RA, "| | Доля нетипичных часов |", "train (2023 — июнь 2025)",
+        lambda: [[reliability()["anomaly_detector"]["train_%"], 99]]),
+    Row(RA, "| | Доля нетипичных часов |", "test (2026)",
+        lambda: [[reliability()["anomaly_detector"]["test_%"]]]),
+    *[Row(RA, "| Разброс весов | risk_class сохраняется |", label,
+          (lambda s=spread: robustness(s)))
+      for label, spread in (("±20 %", 20), ("±50 %", 50))],
 ]
 
 
