@@ -26,7 +26,7 @@ from nefte.agents.schemas import (
     ReliabilityAssessment,
 )
 from nefte.config import load_config
-from nefte.models.regime import implied_t6
+from nefte.models.regime import implied_t6, T6_RESPONSE
 from nefte.models.vak import point_evaluator
 
 # Во сколько σ закладываем запас по качеству: рекомендация должна оставаться
@@ -106,7 +106,9 @@ def default_t95_estimator(target: str = "24-2000:GODT:T95"
     """
     evaluator = point_evaluator(target)
 
-    def _at(state: ProcessState, moves: dict[str, float]) -> float | None:
+    def _at(state: ProcessState, moves: dict[str, float],
+            fill: float | None = None) -> float | None:
+        """Формула при уставках ``moves``; ``fill`` — чем заменить НЕТРОНУТЫЙ пустой вход."""
         current = {**state.telemetry_avt, **state.telemetry_ht}
         # T6 никто не задаёт уставкой: это температура ниже по потоку, следствие
         # того, что сделали с T5 и T11. В формулу Т95 входит именно она, поэтому
@@ -121,7 +123,14 @@ def default_t95_estimator(target: str = "24-2000:GODT:T95"
             if tag == "T6" and derived is not None:
                 values[tag] = derived
                 continue
-            values[tag] = moves.get(tag, current.get(tag))
+            value = moves.get(tag, current.get(tag))
+            # T6 выводится из T5 и T11: если вариант двигает их, T6 «тронут», даже
+            # когда его самого нет в срезе, и подставлять за него нельзя — иначе ход
+            # T5 молча дал бы нулевое приращение Т95
+            touched = tag in moves or (tag == "T6" and any(t in moves for t in T6_RESPONSE))
+            if value is None and not touched:
+                value = fill
+            values[tag] = value
         return evaluator(values)
 
     # Опорная точка «текущий режим» от варианта не зависит, а оптимизатор зовёт
@@ -153,9 +162,25 @@ def default_t95_estimator(target: str = "24-2000:GODT:T95"
         if not moves:
             return float(lab.value)
         base, moved = _base_at(state), _at(state, moves)
-        if base is None or moved is None:
+        if base is not None and moved is not None:
+            return float(lab.value) + (moved - base)
+        # Формулу не посчитать, потому что в срезе нет входа, который вариант НЕ
+        # трогает. Так было в 11 % моментов теста: расходы АВТ F9 и F2 отбракованы
+        # очисткой, и оценка Т95 при любом ходе T5 была пустой — а с ней молча не
+        # проверялось жёсткое ограничение по Т95. Оптимизатор эти теги не двигает,
+        # и в ПРИРАЩЕНИИ их значения сокращаются. Подставляем одно и то же в оценку
+        # «до» и «после» и принимаем приращение, только если оно от подстановки не
+        # зависит — для линейной формулы это точно, для нелинейной честно остаётся
+        # «не знаем».
+        increments = []
+        for fill in (0.0, 1000.0):
+            b, m = _at(state, {}, fill), _at(state, moves, fill)
+            if b is None or m is None:
+                return None
+            increments.append(m - b)
+        if abs(increments[0] - increments[1]) > 1e-6:
             return None
-        return float(lab.value) + (moved - base)
+        return float(lab.value) + increments[0]
 
     return _fn
 
