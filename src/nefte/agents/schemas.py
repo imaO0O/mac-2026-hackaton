@@ -191,9 +191,17 @@ class Recommendation(BaseModel):
             # оператор задаёт именно тогда, когда рекомендации по режиму нет
             text = head + f"РЕКОМЕНДАЦИИ НЕТ: {self.abstain_reason}"
         else:
+            # Только теги, которые реально меняются, и с точностью, при которой
+            # изменение видно: «P13: +0.00» при реальном ходе 0.004 МПа выглядело как
+            # рекомендация ничего не делать, а все нетронутые теги — как шум.
+            def _move(tag: str, value: float) -> str:
+                delta = self.action.deltas.get(tag, 0.0)
+                digits = 3 if abs(delta) < 0.01 else 2
+                return f"{tag}: {delta:+.{digits}f} → {value:.{digits}f}"
             moves = ", ".join(
-                f"{tag}: {self.action.deltas.get(tag, 0):+.2f} → {val:.2f}"
+                _move(tag, val)
                 for tag, val in (self.action.moves if self.action else {}).items()
+                if abs(self.action.deltas.get(tag, 0.0)) > 1e-6
             )
             text = (
                 f"{head}{self.problem}\n"

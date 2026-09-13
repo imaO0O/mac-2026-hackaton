@@ -270,8 +270,13 @@ class Orchestrator:
         t95_off_spec = t95_pred is not None and float(t95_pred) > t95_limit
         t95_alert = ""
         if t95_off_spec:
-            t95_alert = (f"Т95 ЗА ПРЕДЕЛОМ: прогноз {float(t95_pred):.1f} °C при "
-                         f"{t95_limit:.0f} (вероятность нарушения {t95_risk:.0%}). ")
+            # «Прогноз 364 при вероятности 12 %» на демо читалось как противоречие.
+            # Число слева — оценка по последнему лабораторному анализу, а вероятность
+            # — что показатель выше предела СЕЙЧАС: после таких анализов режим обычно
+            # поправляют, и поправленная по истории вероятность это знает.
+            t95_alert = (f"Т95 ЗА ПРЕДЕЛОМ по последнему анализу: {float(t95_pred):.1f} °C "
+                         f"при {t95_limit:.0f}; вероятность, что он выше предела сейчас, — "
+                         f"{t95_risk:.0%}. ")
 
         # --- отказ 1: установка не в работе -----------------------------
         # Проверяется ПЕРВОЙ: на остановленной установке устаревший ЛИМС и
@@ -292,7 +297,10 @@ class Orchestrator:
                 ts=state.ts, state_summary=state_summary, freshness=freshness,
                 problem="Недостаточно достоверных данных для оценки качества",
                 abstained=True, confidence=q.confidence,
-                abstain_reason="; ".join(q.notes + state.data_quality.notes)
+                # причины — законченные фразы с точкой; склейка через «; » давала «ч.; »
+                abstain_reason=" ".join(
+                    n if n.rstrip().endswith((".", "!", "?")) else n.rstrip() + "."
+                    for n in q.notes + state.data_quality.notes if n)
                 or "низкая уверенность прогноза",
             )
             return self._finish(rec, state, q, r, blend=False)
@@ -394,9 +402,25 @@ class Orchestrator:
             return self._finish(rec, state, q, r)
 
         # --- есть риск: рекомендуем действие ----------------------------
+        # Действие при риске НИЖЕ порога бывает, когда у бездействия нет
+        # гарантированного запаса по сере. На тесте это 10 случаев из 99, и во всех
+        # запас нарушен на сотые: прогноз плюс запас 10.01–10.06 при пределе 10, а
+        # действие — поправка в доли шага. Решение верное, но карточка с «риск 16 %»
+        # и действием выглядела противоречием, поэтому причина называется прямо.
+        below = ""
+        if risk < self.act_risk_threshold:
+            hold_sulfur = (hold.predicted_quality.get("product_sulfur_mgkg")
+                           if hold is not None else None)
+            margin = float(getattr(self.optimizer, "_required_margin", 0.0))
+            why = (f"прогноз {hold_sulfur:.2f} + запас {margin:.2f} = "
+                   f"{hold_sulfur + margin:.2f} мг/кг при пределе {limit}"
+                   if hold_sulfur is not None else "бездействие не проходит ограничения")
+            below = (f"Риск {risk:.0%} ниже порога вмешательства "
+                     f"{self.act_risk_threshold:.0%}, но у текущего режима нет "
+                     f"гарантированного запаса по сере: {why}. Нужна небольшая поправка. ")
         rec = Recommendation(
             ts=state.ts, state_summary=state_summary, freshness=freshness,
-            problem=off_spec_now + t95_alert
+            problem=off_spec_now + t95_alert + below
                     + f"Риск нарушения спецификации по сере: {risk:.0%} "
                       f"(прогноз {pred:.2f} мг/кг при пределе {limit})",
             action=best,
@@ -490,7 +514,8 @@ class Orchestrator:
     def _explain(self, best, candidates, q, r, confidence: float | None = None) -> str:
         n_feas = len(candidates)
         n_front = len(self.optimizer.pareto_front(candidates))
-        moves = ", ".join(f"{t} {d:+.2f}" for t, d in best.deltas.items() if abs(d) > 1e-6)
+        moves = ", ".join(f"{t} {d:+.3f}" if abs(d) < 0.01 else f"{t} {d:+.2f}"
+                          for t, d in best.deltas.items() if abs(d) > 1e-6)
         text = (
             f"Из {n_feas} допустимых вариантов ({n_front} на фронте Парето) выбран "
             f"{best.id}: {moves or 'без изменений'}. Он даёт наибольший запас по сере "
