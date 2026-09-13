@@ -143,6 +143,9 @@ def main() -> int:
                     help="какой виртуальный анализатор проверяем")
     ap.add_argument("--seq-horizon", type=float, default=None,
                     help="горизонт нейросетевой модели (0 или 2)")
+    ap.add_argument("--quality-path", default=None,
+                    help="конкретный каталог модели бустинга (сидовый вариант); "
+                         "без него — рабочая models/sulfur_h0")
     ap.add_argument("--seq-path", default=None,
                     help="конкретный каталог модели сети (например, сидовый вариант); "
                          "без него берётся основная конфигурация по валидации")
@@ -156,7 +159,9 @@ def main() -> int:
 
     sb = StateBuilder(cfg)
     system = build_system(sb, cfg, model_kind=args.model, seq_horizon=args.seq_horizon,
-                          seq_path=Path(args.seq_path) if args.seq_path else None)
+                          seq_path=Path(args.seq_path) if args.seq_path else None,
+                          quality_path=(Path(args.quality_path) if args.quality_path
+                                        else None))
     system.log_runs = False        # полугодовой прогон не засоряет журнал демо
     global ACT_THRESHOLD
     ACT_THRESHOLD = system.act_risk_threshold
@@ -283,6 +288,9 @@ def main() -> int:
     # уже был, но требовал, чтобы о нём помнили; теперь суффикс проставляется сам.
     # Ровно та же ошибка уже случилась с абляцией признаков справочника.
     tag = args.tag
+    if not tag and args.model == "boost" and args.quality_path:
+        seed = re.search(r"_s(\d+)$", Path(args.quality_path).name)
+        tag = f"boost_s{seed.group(1)}" if seed else f"boost_{Path(args.quality_path).name}"
     if not tag and args.model != "boost":
         horizon = args.seq_horizon if args.seq_horizon is not None else 0
         tag = f"{args.model}_h{horizon:g}"

@@ -63,6 +63,9 @@ def main() -> int:
                     help="не зашивать физическое направление отклика в модель")
     ap.add_argument("--no-vak", action="store_true",
                     help="выбросить признаки vak_* — абляция вклада формул справочника")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="сид бустинга и проб отбора. Не 42 — это проверка устойчивости: "
+                         "модель и отчёт получают суффикс _s<сид> и рабочую не трогают")
     ap.add_argument("--tag", default="",
                     help="суффикс имени модели и отчёта: чтобы абляция не затирала рабочую модель")
     ap.add_argument("--target", default="sulfur", choices=sorted(QUALITY_TARGETS),
@@ -100,7 +103,7 @@ def main() -> int:
     print("[3/4] обучение CatBoost (CPU)…")
     model = SulfurModel(horizon_hours=args.horizon, iterations=args.iterations,
                         monotone=not args.no_monotone, limit=limit,
-                        target=args.target)
+                        target=args.target, seed=args.seed)
     model.fit(*parts["train"], *parts["val"], top_features=args.top_features or None,
               must_keep=CONTROL_COLUMNS)
     print(f"      признаков после отбора: {len(model.features)}; "
@@ -166,6 +169,11 @@ def main() -> int:
     # числа попадают в документацию, и подмена «модели без справочника» на месте
     # рабочей осталась бы незамеченной.
     suffix = args.tag or ("_novak" if args.no_vak else "")
+    # Сид — в имя сам, без надежды, что о нём вспомнят в --tag. У сети проверка
+    # сидов однажды затёрла основную модель, и прогон по тестовому периоду молча
+    # считался на сидовом варианте (docs/GPU_MODELS.md §1.1).
+    if args.seed != 42:
+        suffix += f"_s{args.seed}"
     base = model.default_path(args.horizon, args.target)
     path = model.save(base.with_name(base.name + suffix) if suffix else None)
     stem = "" if args.target == "sulfur" else f"_{args.target}"

@@ -60,3 +60,40 @@ def test_decision_table_matches_report():
                 f"{label}, ложных тревог ≤{level}: в документации {cell} %, "
                 f"в отчёте {expected} % — перенесите число из "
                 "reports/decision_curves.json")
+
+
+VERDICT_HEADER = "| против рабочего бустинга, ложных не больше |"
+VERDICT_ROWS = {"сеть, сиды 42–44": "сеть h2, сиды 42–44",
+                "сеть, сиды 100–102": "сеть h2, сиды 100–102",
+                "сеть, сиды 200–202": "сеть h2, сиды 200–202"}
+
+
+def test_significance_table_matches_report():
+    """Вывод «лучше / неразличимо» и разница в скобках — из парного бутстрэпа."""
+    if not REPORT.exists():
+        pytest.skip("нет reports/decision_curves.json")
+    report = json.loads(REPORT.read_text(encoding="utf-8"))
+    if report.get("feature_version") != FEATURE_VERSION:
+        pytest.skip("отчёт снят на другой матрице")
+    lines = DOC.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, l in enumerate(lines) if l.startswith(VERDICT_HEADER)), None)
+    assert start is not None, f"в {DOC.name} нет таблицы «{VERDICT_HEADER}»"
+    levels = [c.strip().replace(" ", "") for c in lines[start].strip("|").split("|")[1:]]
+    seen = set()
+    for line in lines[start + 2:]:
+        if not line.startswith("|"):
+            break
+        cells = [c.strip().replace("*", "") for c in line.strip("|").split("|")]
+        label = cells[0]
+        seen.add(label)
+        stored = report["модели"][VERDICT_ROWS[label]]["против «бустинг h0»"]
+        for level, cell in zip(levels, cells[1:]):
+            want = stored[level]
+            assert cell.split(" (")[0].strip() == want["вывод"], (
+                f"{label}, ложных ≤{level}: в документации «{cell}», в отчёте «{want['вывод']}»")
+            if "(" in cell:
+                shown = float(cell.split("(")[1].rstrip(" %)").replace("−", "-"))
+                assert abs(shown - 100 * want["разница"]) <= 0.5 + 1e-9, (
+                    f"{label}, ложных ≤{level}: разница {shown} %, в отчёте "
+                    f"{100 * want['разница']:.1f} %")
+    assert seen == set(VERDICT_ROWS), f"строки таблицы значимости: {sorted(seen)}"

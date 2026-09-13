@@ -44,19 +44,29 @@ CONTROL_TAGS = ["T5", "T11", "F26", "P13"]
 SENSITIVITIES = {"T5": -0.15, "T11": -0.15, "F26": 0.01, "P13": -0.5}
 
 
-def load_quality_model(horizon: float | None = None) -> SulfurModel | None:
+def load_quality_model(horizon: float | None = None,
+                       path: Path | None = None) -> SulfurModel | None:
     """Обученная модель, если она есть. Иначе система работает на персистенции.
 
     По умолчанию берём nowcast (h=0): виртуальный анализатор приводит показания
     ПАК к лабораторной шкале и работает заметно точнее прогноза на 2 часа.
+    ``path`` — конкретная модель, например сидовый вариант для проверки
+    устойчивости решений.
     """
-    candidates = ([SulfurModel.default_path(horizon)] if horizon is not None
-                  else [SulfurModel.default_path(0), SulfurModel.default_path(2)])
-    for path in candidates:
-        if (path / "meta.json").exists():
-            model = SulfurModel.load(path)
+    if path is not None:
+        candidates = [Path(path)]
+    else:
+        candidates = ([SulfurModel.default_path(horizon)] if horizon is not None
+                      else [SulfurModel.default_path(0), SulfurModel.default_path(2)])
+    for candidate in candidates:
+        if (candidate / "meta.json").exists():
+            model = SulfurModel.load(candidate)
             model.attach(build_feature_matrix())
+            # какой артефакт реально попал в прогон — отчёт обязан это назвать
+            model.source_path = candidate
             return model
+    if path is not None:
+        raise FileNotFoundError(f"нет обученной модели в {path}")
     return None
 
 
@@ -152,7 +162,8 @@ def attach_autoencoder(reliability, sb: StateBuilder, cfg: dict) -> bool:
 def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
                  anomaly_kind: str = "maha",
                  seq_horizon: float | None = None,
-                 seq_path: Path | None = None) -> Orchestrator:
+                 seq_path: Path | None = None,
+                 quality_path: Path | None = None) -> Orchestrator:
     # нормировка тяжести режима — только по обучающему периоду, без заглядывания вперёд
     # сырая телеметрия нужна агенту, чтобы увидеть остановы: очистка убирает
     # замороженный на нуле расход сырья вместе с самим фактом останова
@@ -164,7 +175,7 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
         attach_autoencoder(reliability, sb, cfg)
 
     model = (load_sequence_model(seq_horizon, path=seq_path) if model_kind == "seq"
-             else load_quality_model())
+             else load_quality_model(path=quality_path))
     if model_kind == "seq" and model is not None:
         # У сети нет табличного суррогата: она читает окно, а не строку признаков.
         # Кинетика берёт у модели только уровень серы, и этого достаточно —
