@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -83,6 +84,9 @@ def main() -> int:
                     help="какой виртуальный анализатор проверяем")
     ap.add_argument("--seq-horizon", type=float, default=None,
                     help="горизонт нейросетевой модели (0 или 2)")
+    ap.add_argument("--seq-path", default=None,
+                    help="конкретный каталог модели сети (например, сидовый вариант); "
+                         "без него берётся основная конфигурация по валидации")
     ap.add_argument("--tag", default="", help="суффикс имени отчёта, чтобы прогоны "
                                               "разных конфигураций не затирали друг друга")
     args = ap.parse_args()
@@ -92,7 +96,8 @@ def main() -> int:
     lo, hi = cfg["split"]["test"]
 
     sb = StateBuilder(cfg)
-    system = build_system(sb, cfg, model_kind=args.model, seq_horizon=args.seq_horizon)
+    system = build_system(sb, cfg, model_kind=args.model, seq_horizon=args.seq_horizon,
+                          seq_path=Path(args.seq_path) if args.seq_path else None)
     system.log_runs = False        # полугодовой прогон не засоряет журнал демо
     global ACT_THRESHOLD
     ACT_THRESHOLD = system.act_risk_threshold
@@ -205,6 +210,10 @@ def main() -> int:
         "шаг": args.every,
         "модель": args.model,
         "горизонт сети": args.seq_horizon,
+        # Какой артефакт модели реально отработал. Без этого поля сидовый вариант,
+        # затёрший основную модель, прошёл прогон незамеченным.
+        "артефакт модели": (getattr(system.quality.model, "source_path", None) and
+                            Path(system.quality.model.source_path).name),
         "моментов": int(len(frame)),
         "исходы": {k: int(v) for k, v in Counter(frame["исход"]).items()},
         "причины отказа": {k: int(v) for k, v in
@@ -258,6 +267,10 @@ def main() -> int:
     if not tag and args.model != "boost":
         horizon = args.seq_horizon if args.seq_horizon is not None else 0
         tag = f"{args.model}_h{horizon:g}"
+        if args.seq_path:
+            seed = re.search(r"_s(\d+)_h", Path(args.seq_path).name)
+            if seed:
+                tag = f"{args.model}_s{seed.group(1)}_h{horizon:g}"
     report_path = (REPORT if not tag
                    else REPORT.with_name(f"test_period_{tag}.json"))
     report_path.parent.mkdir(parents=True, exist_ok=True)

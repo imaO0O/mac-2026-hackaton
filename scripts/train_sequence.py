@@ -150,8 +150,9 @@ def main() -> int:
 
     model.metrics = report
     path = model.save()
-    tag = (f"{args.arch}{args.window}" + ("_pre" if args.pretrain else "")
-           + ("" if args.seed_base == 42 else f"_s{args.seed_base}"))
+    # имя отчёта выводится из имени модели, а не собирается второй раз рядом:
+    # две независимые сборки одного имени однажды уже разошлись
+    tag = path.name.removeprefix("sulfur_seq_").rsplit("_h", 1)[0]
     out = ROOT / "reports" / f"sequence_metrics_{tag}_h{args.horizon:g}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

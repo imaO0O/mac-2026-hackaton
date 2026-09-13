@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def load_quality_model(horizon: float | None = None) -> SulfurModel | None:
     return None
 
 
-def load_sequence_model(horizon: float | None = None):
+def load_sequence_model(horizon: float | None = None, path: Path | None = None):
     """Нейросетевой виртуальный анализатор, если он обучен и torch установлен.
 
     Инференс идёт на CPU: демо обязано работать на машине без видеокарты
@@ -71,8 +72,23 @@ def load_sequence_model(horizon: float | None = None):
         print("[модель] torch не установлен — нейросетевую модель не подключить")
         return None
 
+    # Варианты с другим базовым сидом (``_s100``, ``_s200``) — это проверка
+    # устойчивости, а не кандидаты: выбирать среди них лучший по валидации значило
+    # бы подбирать сид. Раньше они и не могли сюда попасть отдельно — они затирали
+    # основную модель, и загрузчик молча брал сидовый вариант.
+    if path is not None:
+        # Явно указанная модель — для проверки разброса по сидам на уровне решений.
+        # Выбор по валидации тут не нужен и был бы вреден: сравнивается ровно то,
+        # что попросили.
+        path = Path(path)
+        model = SulfurSequenceModel.load(path).attach(build_feature_matrix())
+        model.source_path = path
+        print(f"[модель] последовательность (указана явно): {path.name}")
+        return model
+
     trained = [p for p in sorted((ROOT / "models").glob("sulfur_seq_*"))
-               if (p / "meta.json").exists()]
+               if (p / "meta.json").exists()
+               and not re.search(r"_s\d+_h[\d.]+$", p.name)]
     # Горизонты не смешиваем: сравнивать MAE прогноза на 0 и на 2 часа бессмысленно.
     # По умолчанию берём nowcast, как и у бустинга, и только если его нет — h=2.
     candidates: list[Path] = []
@@ -95,6 +111,8 @@ def load_sequence_model(horizon: float | None = None):
 
     path = min(candidates, key=val_mae)
     model = SulfurSequenceModel.load(path).attach(build_feature_matrix())
+    # какой артефакт реально попал в прогон — отчёт обязан это назвать
+    model.source_path = path
     print(f"[модель] последовательность: {path.name}, "
           f"{len(model.channels)} каналов, окно {model.window} ч, "
           f"порог тревоги {model.alarm_threshold:.2f} "
@@ -133,7 +151,8 @@ def attach_autoencoder(reliability, sb: StateBuilder, cfg: dict) -> bool:
 
 def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
                  anomaly_kind: str = "maha",
-                 seq_horizon: float | None = None) -> Orchestrator:
+                 seq_horizon: float | None = None,
+                 seq_path: Path | None = None) -> Orchestrator:
     # нормировка тяжести режима — только по обучающему периоду, без заглядывания вперёд
     # сырая телеметрия нужна агенту, чтобы увидеть остановы: очистка убирает
     # замороженный на нуле расход сырья вместе с самим фактом останова
@@ -144,7 +163,7 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
     if anomaly_kind == "ae":
         attach_autoencoder(reliability, sb, cfg)
 
-    model = (load_sequence_model(seq_horizon) if model_kind == "seq"
+    model = (load_sequence_model(seq_horizon, path=seq_path) if model_kind == "seq"
              else load_quality_model())
     if model_kind == "seq" and model is not None:
         # У сети нет табличного суррогата: она читает окно, а не строку признаков.

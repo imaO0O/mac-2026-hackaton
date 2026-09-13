@@ -46,6 +46,8 @@ from nefte.models.quality_model import (
 )
 
 MODELS_DIR = ROOT / "models"
+# базовый сид основной конфигурации; с другим сидом — проверка устойчивости
+DEFAULT_SEED_BASE = 42
 
 # Каналы окна: сырые теги режима, производные признаки режима, поточный анализатор
 # и лабораторный контекст. Скользящие средние сюда НЕ входят намеренно — их работу
@@ -482,16 +484,28 @@ class SulfurSequenceModel:
     # ------------------------------------------------------------------ #
     @staticmethod
     def default_path(horizon_hours: float, arch: str = "gru", window: int = 24,
-                     pretrained: bool = False) -> Path:
-        """Окно и предобучение входят в имя: конфигурации не затирают друг друга."""
-        tag = f"{arch}{window}" + ("_pre" if pretrained else "")
+                     pretrained: bool = False, seed_base: int = DEFAULT_SEED_BASE) -> Path:
+        """Окно, предобучение и базовый сид входят в имя: конфигурации не затирают
+        друг друга.
+
+        Сид добавлен после того, как обещание выше оказалось неправдой. Проверка
+        устойчивости по сидам (``--seed-base 100``, ``200``) писала модель в тот же
+        каталог, что и основная конфигурация, — имя ОТЧЁТА сид содержало, имя
+        МОДЕЛИ нет. В итоге в ``sulfur_seq_tcn48_pre_h2`` лежала модель на сидах
+        200–202, отчёт с тем же именем описывал сиды 42–44, а загрузчик выбрал её по
+        валидации, и прогон по тестовому периоду считался на сидовом варианте.
+        Суффикс тот же, что у отчёта, чтобы пара «модель — отчёт» читалась по имени.
+        """
+        tag = (f"{arch}{window}" + ("_pre" if pretrained else "")
+               + ("" if seed_base == DEFAULT_SEED_BASE else f"_s{seed_base}"))
         return MODELS_DIR / f"sulfur_seq_{tag}_h{horizon_hours:g}"
 
     def save(self, path: Path | None = None) -> Path:
         import torch
 
-        path = Path(path) if path else self.default_path(self.horizon_hours, self.arch,
-                                                         self.window, self.pretrained)
+        path = Path(path) if path else self.default_path(
+            self.horizon_hours, self.arch, self.window, self.pretrained,
+            seed_base=min(self.seeds) if self.seeds else DEFAULT_SEED_BASE)
         path.mkdir(parents=True, exist_ok=True)
         for i, net in enumerate(self.nets):
             torch.save(net.state_dict(), path / f"net{i}.pt")
