@@ -79,6 +79,8 @@ class SimStep:
     # здесь видно, не чинит ли контур серу за счёт другого обязательного показателя:
     # за один цикл прибавка к Т95 меньше градуса и незаметна, а за прогон копится.
     t95_sim: float | None = None
+    # вид действия: "возврат" — шаг назад к базовому режиму, "" — всё остальное
+    kind: str = ""
     # Т95 БЕЗ наших воздействий — то же, что «сера_история» для серы. Без этой
     # опорной точки доля времени выше предела ничего не говорит: Т95 гуляет сама
     # по себе, и приписывать её выход за предел нашему управлению нечестно.
@@ -239,6 +241,10 @@ class ClosedLoopSimulator:
             rec = self.system.run(observed)
             moved = {} if (rec.abstained or rec.action is None) else \
                 self._accept(rec.action.deltas)
+            # оркестратор узнаёт о применённом — только так он может потом вернуть
+            # режим к базовому; выданная, но не применённая рекомендация не в счёт
+            if moved and hasattr(self.system, "record_applied"):
+                self.system.record_applied(moved)
 
             hist = None
             if hist_sulfur is not None:
@@ -256,6 +262,8 @@ class ClosedLoopSimulator:
                 offsets=dict(self.offsets),
                 moved=moved,
                 confidence=float(rec.confidence),
+                kind=("возврат" if (rec.action is not None and not rec.abstained
+                                    and rec.action.id == "return_to_base") else ""),
             ))
             previous_ts = ts
         return steps
@@ -298,6 +306,11 @@ def summarize(steps: list[SimStep], limit: float,
         "шагов": len(steps),
         "исходы": frame["исход"].value_counts().to_dict(),
         "вмешательств": int((frame["исход"] == "меняем уставки").sum()),
+        "из них возвратов к базе": int(sum(1 for item in steps if item.kind == "возврат")),
+        # Раскачку возврат показывает не «сменами направления» — возврат разворачивает
+        # сдвиг по определению, — а качелями: режим вернули, и в течение суток по
+        # тому же тегу снова сдвинули в прежнюю сторону.
+        "качели после возврата": _swings_after_return(steps),
         "применено": int(sum(1 for item in steps if item.applied)),
         "сера_сим": {
             "среднее": round(float(sim.mean()), 3) if len(sim) else None,
@@ -325,6 +338,24 @@ def summarize(steps: list[SimStep], limit: float,
         # НАШИ действия ухудшили её или улучшили?
         "Т95_наш_вклад": _t95_contribution(frame, t95_limit),
     }
+
+
+def _swings_after_return(steps: list[SimStep], hours: float = 24.0) -> int:
+    """Сколько возвратов отменено действием ради качества в течение ``hours``."""
+    count = 0
+    for i, item in enumerate(steps):
+        if item.kind != "возврат":
+            continue
+        for later in steps[i + 1:]:
+            if (later.ts - item.ts).total_seconds() / 3600 > hours:
+                break
+            if later.kind == "возврат":
+                continue
+            if any(tag in later.moved and later.moved[tag] * delta < 0
+                   for tag, delta in item.moved.items()):
+                count += 1
+                break
+    return count
 
 
 def _t95_contribution(frame: pd.DataFrame, limit: float | None = None) -> dict | None:

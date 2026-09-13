@@ -34,6 +34,14 @@ from nefte.config import ROOT, load_config
 RUNS_DIR = ROOT / "reports" / "runs"
 
 
+# Применённый сдвиг меньше этой доли разрешённого шага не возвращаем: гоняться за
+# остатком в сотые доли шага значит дёргать оборудование ради шума.
+RETURN_MIN_STEP_SHARE = 0.25
+# Во сколько раз запас по сере у возврата больше обычного. Выбран на окне
+# валидационного периода (scripts/check_return_to_base.py): 1.0 даёт весь выигрыш,
+# 1.25 и 1.5 возврат почти убивают, 2.0 не возвращает ничего.
+RETURN_MARGIN_FACTOR = 1.0
+
 class Orchestrator:
     """Связывает агентов и разрешает конфликт целей."""
 
@@ -76,6 +84,142 @@ class Orchestrator:
             self.cfg["limits"].get("min_hours_between_actions", 4.0)
             if min_hours_between_actions is None else min_hours_between_actions)
         self._last_action_ts = None
+        # Сдвиги уставок, которые ДЕЙСТВИТЕЛЬНО применены: тег → суммарное изменение.
+        # Копятся только через record_applied — его зовёт тот, кто применяет
+        # рекомендацию (имитатор, оператор в интерфейсе). Считать сдвигом саму
+        # выданную рекомендацию нельзя: в разомкнутом прогоне по истории ничего не
+        # применяется, и система начала бы «возвращать» то, чего никто не делал.
+        self._applied: dict[str, float] = {}
+        # последнее действие РАДИ КАЧЕСТВА (не возврат): от него отсчитывается пауза
+        self._last_quality_action_ts = None
+        self.return_settle_hours = float(
+            self.cfg["limits"].get("return_settle_hours", 14.0))
+        self.return_to_base = bool(self.cfg["limits"].get("return_to_base", False))
+
+    def record_applied(self, moved: dict[str, float]) -> None:
+        """Учесть применённые изменения уставок — от них считается возврат к базе."""
+        for tag, delta in moved.items():
+            if abs(delta) < 1e-9:
+                continue
+            total = self._applied.get(tag, 0.0) + float(delta)
+            if abs(total) < 1e-9:
+                self._applied.pop(tag, None)
+            else:
+                self._applied[tag] = total
+
+    def _return_to_base(self, state, q, r, hold, candidates):
+        """Шаг назад к базовому режиму, если запас по качеству позволяет.
+
+        Зачем. Действие рекомендуется только при риске выше порога, поэтому то, что
+        однажды сделано ради серы, раньше не отменялось никогда: в имитации расход
+        сырья снижался на 40 единиц и не возвращался, а сера оставалась в разы ниже
+        предела — потерянный выпуск без пользы для качества.
+
+        Условия — все сразу:
+
+        * есть применённый сдвиг хотя бы по одному тегу больше четверти его шага;
+        * с последнего действия ради качества прошло ``limits.return_settle_hours``
+          (3τ ≈ 14 ч): без паузы возврат приходил через 4 часа после среза, пока
+          эффект среза проявился наполовину, и контур качался;
+        * риск сейчас ниже ПОЛОВИНЫ порога вмешательства — гистерезис: иначе контур
+          качался бы между «вернуть» и «снова сдвинуть»;
+        * вариант проходит жёсткие ограничения оптимизатора с ГАРАНТИРОВАННЫМ запасом
+          по сере (``RETURN_MARGIN_FACTOR`` — множитель запаса, выбран на валидации);
+        * Т95 у варианта не выше, чем у бездействия, — даже в пределах нормы. Возврат
+          необязателен, и платить за него Т95 незачем. Без этого условия первая
+          версия возвращала T5 вверх, пока T11 оставался поднятым, то есть снимала
+          компенсацию и поднимала Т95 (средний вклад вырос с +0.12 до +0.34 °C);
+        * сам оптимизатор ПРЕДПОЧИТАЕТ вариант бездействию по своей же свёртке
+          критериев — выпуск, энергия, тяжесть режима, штраф за воздействие — при
+          насыщенном запасе качества. Возвращать то, что критериям безразлично,
+          значит дёргать оборудование: первая версия гоняла давление туда-обратно
+          19 раз за месяц;
+        * каждое изменение варианта уменьшает применённый сдвиг своего тега — никаких
+          попутных движений.
+
+        Сначала пробуется вернуть все сдвинутые теги сразу, по шагу каждый, затем по
+        одному, начиная с самого большого сдвига. Запрет частых воздействий
+        соблюдается снаружи: сюда не заходят, пока он действует.
+        """
+        if not self.return_to_base or not self._applied or hold is None:
+            return None
+        if self._last_quality_action_ts is not None:
+            since = (pd.Timestamp(state.ts)
+                     - pd.Timestamp(self._last_quality_action_ts)).total_seconds() / 3600
+            if 0 <= since < self.return_settle_hours:
+                return None
+        risk = q.spec_risk.get("product_sulfur_mgkg", 0.0)
+        if risk >= self.act_risk_threshold / 2:
+            return None
+        optimizer = self.optimizer
+        steps = self.cfg["limits"]["max_step_per_cycle"]
+        bounds = optimizer._effective_bounds(state, r)
+        current = {t: state.telemetry_ht.get(t, state.telemetry_avt.get(t)) for t in bounds}
+
+        def scale(tag: str) -> float | None:
+            if tag.startswith("T"):
+                return float(steps["temperature_c"])
+            if tag.startswith("P"):
+                return float(steps["pressure_mpa"])
+            now = current.get(tag)
+            return None if now is None else abs(float(now)) * float(steps["flow_rel"])
+
+        shifted = []
+        for tag, offset in self._applied.items():
+            size = scale(tag)
+            if tag not in bounds or current.get(tag) is None or not size:
+                continue
+            if abs(offset) > RETURN_MIN_STEP_SHARE * size:
+                shifted.append((abs(offset) / size, tag, offset, size))
+        if not shifted:
+            return None
+        shifted.sort(reverse=True)
+
+        def back(tag, offset, size):
+            return float(current[tag]) - (1.0 if offset > 0 else -1.0) * min(abs(offset), size)
+
+        options = [{tag: back(tag, offset, size) for _, tag, offset, size in shifted}]
+        if len(shifted) > 1:
+            options += [{tag: back(tag, offset, size)} for _, tag, offset, size in shifted]
+
+        t95_limit = float(self.cfg["spec"]["t95_c"]["max"])
+        t95_hold = hold.predicted_quality.get("product_t95_c")
+        saved = list(getattr(optimizer, "_last_violations", []))
+        try:
+            for moves in options:
+                cand = optimizer._candidate("return_to_base", current, moves, bounds)
+                cand = optimizer.evaluate(state, [cand], q, r)[0]
+                if not cand.feasible or not cand.guaranteed:
+                    continue
+                sulfur = cand.predicted_quality.get("product_sulfur_mgkg")
+                margin = float(getattr(optimizer, "_required_margin", 0.0))
+                limit = float(self.cfg["spec"]["product_sulfur_mgkg"]["max"])
+                if sulfur is None or sulfur + RETURN_MARGIN_FACTOR * margin > limit:
+                    continue
+                real = {t: d for t, d in cand.deltas.items() if abs(d) > 1e-6}
+                if not real or any(self._applied.get(t, 0.0) * d >= 0 for t, d in real.items()):
+                    continue
+                t95 = cand.predicted_quality.get("product_t95_c")
+                if t95 is not None and t95_hold is not None and t95 > t95_hold + 1e-6:
+                    continue
+                if t95 is not None and t95 > t95_limit:
+                    continue
+                # Сравнение со всеми вариантами этого цикла: свёртка нормирует
+                # критерии по набору, и в паре «вариант — бездействие» любая мелочь
+                # растянулась бы на весь диапазон. Копии — чтобы не менять оценки
+                # альтернатив, которые покажут оператору.
+                pool = [c.model_copy(deep=True) for c in candidates if c.id != cand.id]
+                if not any(c.id == "hold" for c in pool):
+                    pool.append(hold.model_copy(deep=True))
+                pool.append(cand)
+                optimizer.rank(pool)
+                hold_score = next(c.score for c in pool if c.id == "hold")
+                if hold_score is None or cand.score is None or cand.score <= hold_score + 1e-9:
+                    continue
+                return cand
+        finally:
+            optimizer._last_violations = saved
+        return None
 
     # ------------------------------------------------------------------ #
     def run(self, state: ProcessState) -> Recommendation:
@@ -197,6 +341,30 @@ class Orchestrator:
             )
             return self._finish(rec, state, q, r)
 
+        # --- возврат к базовому режиму: запас позволяет отыграть сделанное ---
+        if risk < self.act_risk_threshold and hold is not None and hold.feasible:
+            back = self._return_to_base(state, q, r, hold, candidates)
+            if back is not None:
+                shifted = ", ".join(f"{t} {v:+.2f}" for t, v in sorted(self._applied.items()))
+                rec = Recommendation(
+                    ts=state.ts, state_summary=state_summary, freshness=freshness,
+                    problem=off_spec_now + t95_alert
+                            + f"Возврат к базовому режиму: риск {risk:.0%}, запас по сере "
+                              f"позволяет отыграть ранее применённые изменения",
+                    action=back, confidence=q.confidence,
+                    expected_effect=self._effect(back, hold, r),
+                    checked_constraints=self._constraint_log(t95_off_spec),
+                    explanation=(
+                        f"Ранее применённые изменения уставок: {shifted}. Качество сейчас "
+                        "с запасом, поэтому шаг назад к исходному режиму возвращает выпуск "
+                        "и не требует жертвовать серой: вариант проходит те же жёсткие "
+                        "ограничения с гарантированным запасом, а риск ниже половины порога "
+                        "вмешательства. Возвращаем не больше одного шага за цикл."),
+                    alternatives=self.optimizer.diverse_alternatives(candidates, 3),
+                )
+                self._last_action_ts = state.ts
+                return self._finish(rec, state, q, r)
+
         # --- нормальный режим: не создаём лишних воздействий ------------
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
             if t95_off_spec:
@@ -239,8 +407,9 @@ class Orchestrator:
             confidence=q.confidence * (1.0 if best.guaranteed else 0.6),
             alternatives=self.optimizer.diverse_alternatives(candidates[1:], 3),
         )
-        self._last_action_ts = state.ts if any(
-            abs(d) > 1e-6 for d in best.deltas.values()) else self._last_action_ts
+        if any(abs(d) > 1e-6 for d in best.deltas.values()):
+            self._last_action_ts = state.ts
+            self._last_quality_action_ts = state.ts
         return self._finish(rec, state, q, r)
 
     # ------------------------------------------------------------------ #
