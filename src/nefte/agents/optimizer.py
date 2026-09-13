@@ -18,7 +18,7 @@ from typing import Callable, Protocol
 import numpy as np
 import pandas as pd
 
-from nefte.agents.quality import spec_risk_normal, t95_sigma
+from nefte.agents.quality import spec_risk_normal, t95_violation_risk
 from nefte.agents.schemas import (
     Candidate,
     ProcessState,
@@ -458,9 +458,8 @@ class OptimizerAgent:
             # иметь две разные неопределённости в двух карточках одного цикла.
             if t95 is not None:
                 t95_meas = state.quality.get("lims_t95_c")
-                c.spec_risk["product_t95_c"] = spec_risk_normal(
-                    float(t95), t95_sigma(t95_meas.age_hours if t95_meas else None),
-                    t95_limit)
+                c.spec_risk["product_t95_c"] = t95_violation_risk(
+                    float(t95), t95_meas.age_hours if t95_meas else None, t95_limit)
             c.throughput = self.throughput_fn(state, c.moves)
             c.energy_proxy = self.energy_fn(state, c.moves)
             # Тяжесть режима У ЭТОГО варианта, а не у текущего: иначе критерий

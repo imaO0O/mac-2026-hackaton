@@ -193,8 +193,15 @@ def test_t95_risk_is_a_probability_not_a_flag():
     near = QualityAgent().assess(make_state(t95=358.0)).spec_risk["product_t95_c"]
     far = QualityAgent().assess(make_state(t95=330.0)).spec_risk["product_t95_c"]
     assert 0.0 < far < near < 1.0
-    assert near > 0.3          # в трёх градусах от предела риск существенный
     assert far < 0.01
+    # Здесь стояло «near > 0.3: в трёх градусах от предела риск существенный». Это
+    # было убеждение, а не измерение, и измерение его опровергло: сырая вероятность
+    # завышена в 2–4 раза на всех периодах (scripts/check_t95_calibration.py). Что
+    # остаётся верным — вблизи предела оператор ПРЕДУПРЕЖДЁН: вероятность выше
+    # порога заметки, во много раз выше, чем вдали от предела.
+    from nefte.agents.quality import t95_note_threshold
+    assert near > t95_note_threshold()
+    assert near > 20 * far
 
 
 def test_optimizer_uses_the_quality_agents_estimator():

@@ -47,6 +47,10 @@ from nefte.config import load_config
 # усложнение оправдано ровно этими двадцатью процентами, а не разами.
 T95_SIGMA_C = 6.79            # запасное значение: возраст анализа неизвестен
 T95_SIGMA_TABLE_PATH = "reports/t95_sigma.json"
+# Поправка к вероятности нарушения Т95 (scripts/check_t95_calibration.py) и порог
+# заметки в карточке при СЫРОЙ вероятности — до поправки он был 0.2.
+T95_RISK_CALIBRATION_PATH = "reports/t95_risk_calibration.json"
+T95_NOTE_RAW_RISK = 0.2
 
 BASELINE_SIGMA_MGKG = 1.7
 
@@ -182,6 +186,69 @@ def t95_sigma(age_hours: float | None) -> float:
 
 
 
+@lru_cache(maxsize=1)
+def _t95_risk_calibration() -> tuple[float, float, float] | None:
+    """Поправка Платта к вероятности нарушения Т95: ``(a, b, частота на обучении)``.
+
+    Зачем. Нормальное приближение по оценке Т95 и σ по возрасту анализа ЗАВЫШАЕТ
+    вероятность нарушения в 2–4 раза на всех трёх периодах (заявлено 14.5 % при
+    наблюдаемых 4.9 % на тесте) и проигрывает по Brier константе «всегда базовая
+    частота». Упорядочивает оно при этом хорошо — ROC-AUC 0.78, — так что лечится
+    монотонной поправкой, подобранной на обучающем периоде.
+
+    Читается из отчёта и только если поправка там ПРИНЯТА по записанному заранее
+    правилу (валидация: Brier лучше и наклон калибровки ближе к единице). Нет
+    отчёта или поправка не принята — вероятность остаётся сырой, как раньше.
+    """
+    path = Path(__file__).resolve().parents[3] / T95_RISK_CALIBRATION_PATH
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not raw.get("принята"):
+        return None
+    try:
+        return (float(raw["поправка"]["a"]), float(raw["поправка"]["b"]),
+                float(raw.get("частота_на_обучении", float("nan"))))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _platt(p: float, a: float, b: float) -> float:
+    p = min(max(p, 1e-4), 1 - 1e-4)
+    return 1.0 / (1.0 + math.exp(-(a + b * math.log(p / (1 - p)))))
+
+
+def t95_violation_risk(t95: float, age_hours: float | None, limit: float) -> float:
+    """Вероятность, что Т95 выше предела, — одна функция для агента и оптимизатора.
+
+    Одна величина не может иметь два разных значения в двух карточках одного
+    цикла: карточка качества и карточки вариантов берут её отсюда.
+    """
+    raw = spec_risk_normal(t95, t95_sigma(age_hours), limit)
+    calibration = _t95_risk_calibration()
+    if calibration is None:
+        return raw
+    a, b, _ = calibration
+    return _platt(raw, a, b)
+
+
+def t95_note_threshold() -> float:
+    """Порог заметки о Т95 в той же шкале, что и показываемая вероятность.
+
+    Поправка монотонна, поэтому порог 0.2 по сырой вероятности переводится через
+    неё же: заметка появляется В ТЕХ ЖЕ МОМЕНТАХ, что и до поправки, только с
+    честным числом. Иначе после поправки она не появлялась бы никогда: на тесте
+    поправленная вероятность выше 0.2 не бывает, а сырой порог отмечал 46 анализов,
+    из которых превышение было в 7 — втрое чаще обычного.
+    """
+    calibration = _t95_risk_calibration()
+    if calibration is None:
+        return T95_NOTE_RAW_RISK
+    a, b, _ = calibration
+    return _platt(T95_NOTE_RAW_RISK, a, b)
+
+
 class QualityAgent:
     """Базовая реализация. Заменяемая часть — ``predict``."""
 
@@ -308,14 +375,17 @@ class QualityAgent:
             predictions["product_t95_c"] = float(t95)
             intervals["product_t95_c"] = (t95 - 1.96 * sigma_t95,
                                           t95 + 1.96 * sigma_t95)
-            risks["product_t95_c"] = spec_risk_normal(t95, sigma_t95, self.t95_limit)
-            if risks["product_t95_c"] > 0.2:
+            risks["product_t95_c"] = t95_violation_risk(t95, t95_age, self.t95_limit)
+            if risks["product_t95_c"] > t95_note_threshold():
                 age_text = ("" if t95_age is None
                             else f", анализу {t95_age:.0f} ч")
+                calibration = _t95_risk_calibration()
+                usual = ("" if calibration is None or calibration[2] != calibration[2]
+                         else f" при обычной частоте {calibration[2]:.1%}")
                 notes.append(
                     f"Т95 {t95:.1f} °C при пределе {self.t95_limit:.0f}: "
-                    f"вероятность выхода {risks['product_t95_c']:.0%}. Уровень взят "
-                    f"из последнего анализа{age_text}, за это время он уезжает "
+                    f"вероятность выхода {risks['product_t95_c']:.0%}{usual}. Уровень "
+                    f"взят из последнего анализа{age_text}, за это время он уезжает "
                     f"на {sigma_t95:.1f} °C.")
 
         return QualityAssessment(

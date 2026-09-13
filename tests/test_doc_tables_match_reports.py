@@ -151,6 +151,30 @@ def weights() -> dict:
     return report("objective_weights.json")
 
 
+def t95(split: str, kind: str) -> dict:
+    return report("t95_risk_calibration.json")["выборки"][split][kind]
+
+
+def t95_row(split: str) -> list[list[float] | None]:
+    raw = t95(split, "как_есть")
+    over = round(raw["частота"] * raw["анализов"])
+    s = raw["наклон"]
+    return [[over, raw["анализов"]], [100 * raw["средняя_заявленная"]], [100 * raw["частота"]],
+            [s["b"], s["b_от"], s["b_до"]], [raw["Brier"]], [raw["Brier_константы"]]]
+
+
+def t95_fix_row(split: str) -> list[list[float]]:
+    raw, fixed = t95(split, "как_есть"), t95(split, "с_поправкой")
+    s = fixed["наклон"]
+    return [[raw["Brier"]], [fixed["Brier"]], [raw["Brier_константы"]],
+            [s["b"], s["b_от"], s["b_до"]]]
+
+
+def edge(variant: str) -> list[list[float]]:
+    v = report("upper_edge_risk.json")["итог"][variant]
+    return [[v["принят_на_сидах"]], [v["на_тесте_хуже_по_полноте_или_форме"]]]
+
+
 QA, HC, OA = "QUALITY_AGENT.md", "HARD_CHECKS.md", "OPTIMIZER_AGENT.md"
 MAIN = "| Горизонт | Выборка | Модель |"
 HORIZONS = "| Горизонт | MAE модели |"
@@ -199,6 +223,13 @@ ROWS = [
       for label, t in (("0.10", 0.10), ("0.15", 0.15), ("0.177 (рабочий)", 0.177),
                        ("0.20", 0.20), ("0.30", 0.30), ("0.40", 0.40), ("0.50", 0.50))],
     Row(HC, "| | отказов всего |", "после", refusals_now),
+    *[Row(QA, "| | превышений | заявлено в среднем |", label, (lambda sp=sp: t95_row(sp)))
+      for label, sp in (("обучение", "train"), ("валидация", "val"), ("тест", "test"))],
+    *[Row(QA, "| | Brier как есть | Brier с поправкой |", label, (lambda sp=sp: t95_fix_row(sp)))
+      for label, sp in (("валидация", "val"), ("тест (проверка)", "test"))],
+    *[Row(QA, "| вариант | принят (сидов из 3) |", name, (lambda name=name: edge(name)))
+      for name in ("эмпирический хвост", "классификатор", "смесь средним", "смесь рангов",
+                   "хвост по квантилям")],
     Row(OA, "| При разбросе весов ±50 % |", "исход (держим / меняем / отказ)",
         lambda: [[100 * weights()["исход сохраняется"]]]),
     Row(OA, "| При разбросе весов ±50 % |", "направление воздействия по T5",
