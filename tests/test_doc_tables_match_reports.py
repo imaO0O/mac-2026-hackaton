@@ -175,7 +175,25 @@ def edge(variant: str) -> list[list[float]]:
     return [[v["принят_на_сидах"]], [v["на_тесте_хуже_по_полноте_или_форме"]]]
 
 
-QA, HC, OA = "QUALITY_AGENT.md", "HARD_CHECKS.md", "OPTIMIZER_AGENT.md"
+def seq_h2(name: str) -> list[list[float]]:
+    d = report(name)["splits"]
+    return [[d["val"]["model"]["roc_auc"]], [d["test"]["model"]["roc_auc"]],
+            [d["test"]["model"]["MAE"]], [d["test"]["model"]["coverage_80"]]]
+
+
+def boost_h2_seeds() -> list[list[float] | None]:
+    m = report("feature_stability_h2.json")["метрики"]
+    auc, mae = [r["ROC-AUC"] for r in m], [r["MAE"] for r in m]
+    return [None, [min(auc), max(auc)], [min(mae), max(mae)], None]
+
+
+def boost_h2_working() -> list[list[float]]:
+    d = report("quality_metrics_h2.json")["splits"]
+    return [[d["val"]["model"]["roc_auc"]], [d["test"]["model"]["roc_auc"]],
+            [d["test"]["model"]["MAE"]], [d["test"]["model"]["coverage_80"]]]
+
+
+QA, HC, OA, GM = "QUALITY_AGENT.md", "HARD_CHECKS.md", "OPTIMIZER_AGENT.md", "GPU_MODELS.md"
 MAIN = "| Горизонт | Выборка | Модель |"
 HORIZONS = "| Горизонт | MAE модели |"
 
@@ -223,6 +241,13 @@ ROWS = [
       for label, t in (("0.10", 0.10), ("0.15", 0.15), ("0.177 (рабочий)", 0.177),
                        ("0.20", 0.20), ("0.30", 0.30), ("0.40", 0.40), ("0.50", 0.50))],
     Row(HC, "| | отказов всего |", "после", refusals_now),
+    *[Row(GM, "| Модель, горизонт 2 ч |", label, (lambda f=f: seq_h2(f)))
+      for label, f in (("TCN 48 + предобучение, сиды 42–44", "sequence_metrics_tcn48_pre_h2.json"),
+                       ("то же, сиды 100–102", "sequence_metrics_tcn48_pre_s100_h2.json"),
+                       ("то же, сиды 200–202", "sequence_metrics_tcn48_pre_s200_h2.json"),
+                       ("TCN 48 без предобучения", "sequence_metrics_tcn48_h2.json"))],
+    Row(GM, "| Модель, горизонт 2 ч |", "CatBoost, рабочая модель (сид 42)", boost_h2_working),
+    Row(GM, "| Модель, горизонт 2 ч |", "CatBoost, пять сидов 42–46", boost_h2_seeds),
     *[Row(QA, "| | превышений | заявлено в среднем |", label, (lambda sp=sp: t95_row(sp)))
       for label, sp in (("обучение", "train"), ("валидация", "val"), ("тест", "test"))],
     *[Row(QA, "| | Brier как есть | Brier с поправкой |", label, (lambda sp=sp: t95_fix_row(sp)))
