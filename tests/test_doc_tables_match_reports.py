@@ -198,6 +198,23 @@ def headline(block: str, key: str) -> list[list[float]]:
     return [[v["значение"]], v["90% интервал"]]
 
 
+def event(run: str, window: str) -> dict:
+    return report("event_response.json")["прогоны"][run]["окна"][window]
+
+
+def event_row_percent(window: str) -> list[list[float]]:
+    e = event("test_period_step1h.json", window)
+    return [[100 * e["перед_превышением"]], [100 * e["перед_нормой"]], [100 * e["разница"]],
+            [100 * x for x in e["90% интервал"]]]
+
+
+def step_row(run: str) -> list[list[float]]:
+    rows = report(run)["summary"]["порог вмешательства"]["перебор"]
+    w = next(r for r in rows if r["рабочий"])
+    per_day = report("event_response.json")["прогоны"][run]["вмешательств_в_сутки"]
+    return [[100 * w["доля пропусков"]], [100 * w["доля ложных тревог"]], [per_day]]
+
+
 QA, HC, OA, GM = "QUALITY_AGENT.md", "HARD_CHECKS.md", "OPTIMIZER_AGENT.md", "GPU_MODELS.md"
 MAIN = "| Горизонт | Выборка | Модель |"
 HORIZONS = "| Горизонт | MAE модели |"
@@ -246,6 +263,26 @@ ROWS = [
       for label, t in (("0.10", 0.10), ("0.15", 0.15), ("0.177 (рабочий)", 0.177),
                        ("0.20", 0.20), ("0.30", 0.30), ("0.40", 0.40), ("0.50", 0.50))],
     Row(HC, "| | отказов всего |", "после", refusals_now),
+    Row(HC, "| шаг | пропуски на рабочей точке |", "12 ч", lambda: step_row("test_period.json")),
+    Row(HC, "| шаг | пропуски на рабочей точке |", "1 ч", lambda: step_row("test_period_step1h.json")),
+    *[Row(HC, "| окно относительно отбора, шаг 1 ч |", label, (lambda w=w: event_row_percent(w)))
+      for label, w in (("за 2 ч до отбора", "[-2, +0)"),
+                       ("от отбора до публикации (+4 ч)", "[+0, +4)"),
+                       ("от −2 до +4 ч", "[-2, +4)"),
+                       ("за 6 ч до отбора", "[-6, +0)"),
+                       ("за сутки до отбора", "[-24, +0)"))],
+    Row("DEFENSE_QUALITY.md", "| утверждение | число | 90 % интервал |",
+        "реакция на пробу с превышением, окно −2 … +4 ч от отбора",
+        lambda: [[event("test_period_step1h.json", "[-2, +4)")["перед_превышением"]], None, None,
+                 [1, event("test_period_step1h.json", "[-2, +4)")["перед_нормой"]]]),
+    Row("DEFENSE_QUALITY.md", "| утверждение | число | 90 % интервал |",
+        "разница с нормальной пробой в том же окне",
+        lambda: [[event("test_period_step1h.json", "[-2, +4)")["разница"]],
+                 event("test_period_step1h.json", "[-2, +4)")["90% интервал"], None, None]),
+    Row("DEFENSE_QUALITY.md", "| утверждение | число | 90 % интервал |",
+        "то же за сутки до отбора",
+        lambda: [[event("test_period_step1h.json", "[-24, +0)")["разница"]],
+                 event("test_period_step1h.json", "[-24, +0)")["90% интервал"], None, None]),
     # шпаргалка защиты: ровно эти числа произносятся вслух
     *[Row("DEFENSE_QUALITY.md", "| утверждение | число | 90 % интервал |", label,
           (lambda b=b, k=k: headline(b, k) + [None, None]))
