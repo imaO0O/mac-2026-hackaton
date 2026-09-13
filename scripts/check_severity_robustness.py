@@ -1,7 +1,7 @@
 """Устойчивость решений к весам severity. Только CPU.
 
-    python scripts/check_severity_robustness.py
-    python scripts/check_severity_robustness.py --draws 200 --stamps 24
+    python scripts/check_severity_robustness.py                # разброс весов ±50 %
+    python scripts/check_severity_robustness.py --spread 0.2   # ±20 %, отдельный отчёт
 
 Веса severity (0.30 WABT, 0.20 ΔP, 0.15 аномалия, 0.15 скорость, 0.10 наработка,
 0.10 печь) подобраны по смыслу: разметки отказов нет, обучать их не на чем. Это
@@ -15,6 +15,15 @@
 
 Если решение переживает разумный разброс весов, значит оно опирается на данные,
 а не на конкретные числа в конфиге.
+
+**Средняя устойчивость сама по себе ничего не доказывает, и это уже стоило
+выводов.** Момент, где система держит режим далеко от порога, сохраняет исход
+при любых весах. Прежний вывод «исход сохраняется в 99 %» был посчитан на восьми
+моментах, из которых действие было ровно в одном, — то есть это была
+устойчивость выборки, а не системы. У участника 1 то же случилось со свёрткой
+оптимизатора. Поэтому устойчивость считается отдельно по каждому базовому исходу,
+а для risk_class — отдельно у границы класса, и скрипт называет, на скольких
+нетривиальных моментах стоит вывод.
 """
 from __future__ import annotations
 
@@ -53,7 +62,8 @@ def main() -> int:
     ap.add_argument("--stamps", type=int, default=24, help="моментов времени")
     ap.add_argument("--decision-draws", type=int, default=10,
                     help="наборов весов для полного цикла (дороже)")
-    ap.add_argument("--decision-stamps", type=int, default=8)
+    ap.add_argument("--decision-stamps", type=int, default=40,
+                    help="моментов для полного цикла; при 8 действие было в одном")
     ap.add_argument("--spread", type=float, default=0.5, help="разброс весов, доля")
     args = ap.parse_args()
 
@@ -93,6 +103,24 @@ def main() -> int:
           f"(худший момент: {class_stability.min():.0%})")
     print(f"      разброс severity (p05…p95): в среднем {np.mean(severity_range):.3f}, "
           f"максимум {np.max(severity_range):.3f}")
+
+    # Класс вдали от порога сохраняется при любых весах, и такие моменты тянут
+    # среднее к единице. Вопрос осмыслен только у границы — считаем её отдельно.
+    thresholds = base_agent.thresholds
+    margin = ReliabilityAgent.CLASS_BOUNDARY_MARGIN
+    near = np.array([min(abs(value - t) for t in thresholds) <= margin
+                     for value in base_severity])
+    n_near = int(near.sum())
+    near_stability = float(class_stability[near].mean()) if n_near else None
+    far_stability = float(class_stability[~near].mean()) if (~near).any() else None
+    print(f"      у границы класса (±{margin} от порогов {thresholds[0]:.2f} / "
+          f"{thresholds[1]:.2f}): {n_near} моментов из {len(states)}")
+    if near_stability is not None and far_stability is not None:
+        print(f"      устойчивость класса у границы {near_stability:.0%}, "
+              f"вдали от неё {far_stability:.0%}")
+    if n_near < 5:
+        print(f"      ВНИМАНИЕ: у границы всего {n_near} моментов — средняя "
+              "устойчивость класса держится на тривиальных случаях")
 
     # ---------- 2. устойчивость итогового решения -------------------------
     from run_cycle import build_system
@@ -135,6 +163,25 @@ def main() -> int:
           f"(худший момент: {decision_stability.min():.0%})")
     print(f"      базовые исходы: {pd.Series(base_outcomes).value_counts().to_dict()}")
 
+    # По исходам отдельно: «держим режим» далеко от порога тривиально устойчив, и
+    # среднее по выборке, где таких семь из восьми, говорит о выборке.
+    by_outcome = {}
+    for label in ("меняем уставки", "держим режим", "отказ"):
+        idx = [i for i, outcome in enumerate(base_outcomes) if outcome == label]
+        if not idx:
+            continue
+        values = decision_stability[idx]
+        by_outcome[label] = {"моментов": len(idx),
+                             "устойчивость": round(float(values.mean()), 3),
+                             "худший момент": round(float(values.min()), 3)}
+        print(f"      {label}: {len(idx)} моментов, исход сохраняется в "
+              f"{values.mean():.0%} (худший момент {values.min():.0%})")
+    n_acting = by_outcome.get("меняем уставки", {}).get("моментов", 0)
+    if n_acting < 5:
+        print(f"      ВНИМАНИЕ: моментов с действием {n_acting} из "
+              f"{len(decision_states)} — вывод об устойчивости решения на них "
+              "не держится, поднимите --decision-stamps")
+
     per_stamp = pd.DataFrame({
         "момент": [str(ts)[:16] for ts in decision_stamps],
         "базовый исход": base_outcomes,
@@ -153,16 +200,26 @@ def main() -> int:
             "mean_stability": round(float(class_stability.mean()), 3),
             "worst_stability": round(float(class_stability.min()), 3),
             "severity_range_mean": round(float(np.mean(severity_range)), 3),
+            "моментов у границы": n_near,
+            "устойчивость у границы": (None if near_stability is None
+                                       else round(near_stability, 3)),
+            "устойчивость вдали": (None if far_stability is None
+                                   else round(far_stability, 3)),
         },
         "decision": {
             "draws": args.decision_draws, "stamps": args.decision_stamps,
             "mean_stability": round(float(decision_stability.mean()), 3),
             "worst_stability": round(float(decision_stability.min()), 3),
             "base_outcomes": pd.Series(base_outcomes).value_counts().to_dict(),
+            "моментов с действием": n_acting,
+            "по исходам": by_outcome,
             "per_stamp": per_stamp.to_dict("records"),
         },
     }
-    out = ROOT / "reports" / "severity_robustness.json"
+    # Основной отчёт — разброс ±50 %; другие пишутся рядом, чтобы таблица
+    # документации сверялась с отчётом по каждой строке, а не по одной.
+    suffix = "" if abs(args.spread - 0.5) < 1e-9 else f"_s{round(args.spread * 100)}"
+    out = ROOT / "reports" / f"severity_robustness{suffix}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     report = {**report_provenance(), **report}
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

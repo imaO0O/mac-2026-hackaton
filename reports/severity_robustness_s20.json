@@ -14,7 +14,7 @@
       "2026-08-07"
     ]
   },
-  "spread": 0.5,
+  "spread": 0.2,
   "weights": {
     "wabt": 0.3,
     "dp_r202": 0.2,
@@ -26,12 +26,12 @@
   "risk_class": {
     "draws": 100,
     "stamps": 24,
-    "mean_stability": 0.94,
-    "worst_stability": 0.72,
-    "severity_range_mean": 0.107,
+    "mean_stability": 0.994,
+    "worst_stability": 0.91,
+    "severity_range_mean": 0.042,
     "моментов у границы": 6,
-    "устойчивость у границы": 0.795,
-    "устойчивость вдали": 0.988
+    "устойчивость у границы": 0.977,
+    "устойчивость вдали": 1.0
   },
   "decision": {
     "draws": 10,

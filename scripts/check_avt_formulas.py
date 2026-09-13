@@ -248,6 +248,25 @@ def main() -> int:  # noqa: PLR0915 — это отчёт, и он линейн�
     print("\n[3] Четыре формулы, которые не воспроизводятся: разбор и гипотезы\n")
     findings = []
 
+    # Для сломанной формулы «лучшая точка» ничего не значит: к ней формула просто
+    # случайно ближе. Документация сверяет каждую формулу со СВОЕЙ точкой блока,
+    # поэтому отчёт несёт и её — иначе таблицу нельзя проверить тестом.
+    block_of = dict(zip(formulas["target"], formulas["block"].astype(str)))
+    own_rows = []
+    for row in table:
+        point = block_point.get(block_of.get(row["формула"], ""))
+        own = next((r for r in per_formula.get(row["формула"], {}).get("ranked", [])
+                    if r["точка"] == point), None)
+        row["своя точка"] = point
+        for key in ("n", "смещение", "MAE", "corr"):
+            row[f"{key} (своя)"] = own[key] if own else None
+        own_rows.append({"формула": row["формула"], "точка": point,
+                         **({k: own[k] for k in ("n", "смещение", "MAE", "corr")}
+                            if own else {})})
+    print()
+    print("  Те же формулы против СВОЕЙ точки блока:")
+    print(pd.DataFrame(own_rows).to_string(index=False))
+
     # --- 3.1 AVT6:240-350:CFPP — скобка поставлена не туда --------------- #
     lab_cfpp = lab_series(lims, block_point.get("ЭЛОУ-АВТ-6. 240-350", "АВТ|3").split("|")[-1],
                           LIMS_PARAM["CFPP"])

@@ -6,21 +6,21 @@
         "D10"
       ],
       "suspicious_negative": {
-        "F5": 0.907,
-        "F26": 0.505,
-        "F63": 0.069
+        "F5": 0.929,
+        "F26": 0.511,
+        "F63": 0.07
       },
       "worst": {
         "D10": 99.99,
-        "F26": 40.04,
-        "T39": 9.62,
-        "F68": 5.69,
+        "F26": 38.51,
+        "T39": 8.91,
+        "F68": 5.7,
         "F69": 5.42,
         "F25": 4.91,
-        "F54": 4.71,
-        "F28": 4.53
+        "F54": 4.65,
+        "F9": 4.28
       },
-      "mean_bad_share_pct": 3.97
+      "mean_bad_share_pct": 3.855
     },
     "ht": {
       "n_tags": 26,
@@ -28,37 +28,37 @@
       "suspicious_negative": {},
       "worst": {
         "Q20": 11.65,
-        "T18": 6.69,
+        "T18": 6.56,
         "F1": 5.27,
-        "F17": 5.23,
-        "F22": 4.61,
-        "F26": 4.1,
+        "F17": 5.03,
+        "F22": 4.52,
         "F9": 4.09,
-        "F2": 3.69
+        "F26": 4.08,
+        "F2": 3.66
       },
-      "mean_bad_share_pct": 2.67
+      "mean_bad_share_pct": 2.613
     }
   },
   "severity": {
     "train": {
       "n": 983,
       "n_over_limit": 148,
-      "roc_auc": 0.587,
-      "mean_severity_ok": 0.48,
-      "mean_severity_over": 0.525
+      "roc_auc": 0.586,
+      "mean_severity_ok": 0.479,
+      "mean_severity_over": 0.524
     },
     "test": {
       "n": 249,
       "n_over_limit": 36,
       "roc_auc": 0.337,
-      "mean_severity_ok": 0.548,
-      "mean_severity_over": 0.459
+      "mean_severity_ok": 0.547,
+      "mean_severity_over": 0.458
     },
-    "dp_growth_spearman": 0.144,
+    "dp_growth_spearman": 0.136,
     "distribution": {
-      "low_%": 53.1,
+      "low_%": 53.2,
       "medium_%": 44.2,
-      "high_%": 2.7
+      "high_%": 2.6
     }
   },
   "analyzer_failures": {
@@ -137,12 +137,12 @@
   },
   "campaigns": {
     "n_campaigns": 4,
-    "median_days": 253.4,
+    "median_days": 254.4,
     "max_days": 759.7,
-    "scale_hours_p95": 10017.1
+    "scale_hours_p95": 10041.0
   },
   "anomaly_detector": {
-    "threshold": 6.03,
+    "threshold": 6.12,
     "columns": [
       "wabt",
       "W10",
@@ -152,16 +152,16 @@
       "pressure"
     ],
     "train_%": 1.0,
-    "test_%": 3.63
+    "test_%": 3.59
   },
   "risk_thresholds": [
-    0.538,
-    0.778
+    0.537,
+    0.777
   ],
   "tradeoff_quality_vs_severity": {
     "train": {
-      "auc_severity": 0.587,
-      "auc_inverse": 0.413
+      "auc_severity": 0.586,
+      "auc_inverse": 0.414
     },
     "test": {
       "auc_severity": 0.337,
