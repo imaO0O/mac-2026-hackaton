@@ -136,6 +136,7 @@ def sweep(threshold: float) -> list[list[float]]:
     rows = report("test_period.json")["summary"]["порог вмешательства"]["перебор"]
     r = next(x for x in rows if abs(x["порог"] - threshold) < 1e-3)
     return [[r["поймано"]], [r["пропущено"], 100 * r["доля пропусков"]],
+            [100 * r["доля пропусков с отказами"]],
             [r["ложных тревог"]], [100 * r["доля ложных тревог"]]]
 
 
