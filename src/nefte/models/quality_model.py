@@ -736,6 +736,69 @@ def probability_metrics(risk: pd.Series, over: pd.Series, bins: int = 5) -> dict
     }
 
 
+def calibration_slope(risk: pd.Series, over: pd.Series, n_boot: int = 1000,
+                      seed: int = 0) -> dict:
+    """Наклон калибровки: ``logit P(превышение) = a + b·logit(заявленная)``.
+
+    Меряет то, чего не видят ни ECE, ни перекос уровня, — ФОРМУ ошибки.
+
+    * ``b ≈ 1`` — вероятности растянуты правильно;
+    * ``b > 1`` — вероятности СЖАТЫ к середине: высокие занижены, низкие завышены;
+    * ``b < 1`` — вероятности излишне уверенные, растянуты к краям.
+
+    Зачем отдельно. Сжатие даёт ошибки РАЗНОГО знака в разных бинах, и в среднем
+    по бинам они гасятся. Так и было на тесте: верхний бин заявлял 36 % при
+    наблюдаемых 50 %, соседний — 16 % при 6 %, а ECE 0.055 и перекос −0.001
+    выглядели как хорошая калибровка.
+
+    Интервал — перцентильный бутстрэп по моментам, 90 %. Бутстрэп-выборки, где
+    одного из классов нет или Ньютон не сошёлся, отбрасываются.
+    """
+    frame = pd.DataFrame({"p": np.asarray(risk, dtype=float),
+                          "y": np.asarray(over, dtype=float)}).dropna()
+    if len(frame) < 20 or frame["y"].nunique() < 2:
+        return {}
+    p = frame["p"].clip(1e-4, 1 - 1e-4).to_numpy()
+    z = np.log(p / (1 - p))
+    o = frame["y"].to_numpy()
+
+    def fit(zz: np.ndarray, oo: np.ndarray) -> np.ndarray | None:
+        A = np.column_stack([np.ones_like(zz), zz])
+        w = np.zeros(2)
+        for _ in range(50):
+            q = 1.0 / (1.0 + np.exp(-(A @ w)))
+            H = (A * (q * (1 - q))[:, None]).T @ A
+            try:
+                step = np.linalg.solve(H, A.T @ (oo - q))
+            except np.linalg.LinAlgError:
+                return None
+            w = w + step
+            if np.abs(step).max() < 1e-8:
+                break
+        return w if np.all(np.isfinite(w)) else None
+
+    base = fit(z, o)
+    if base is None:
+        return {}
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        i = rng.integers(0, len(z), len(z))
+        if o[i].min() == o[i].max():
+            continue
+        w = fit(z[i], o[i])
+        if w is not None:
+            boots.append(w[1])
+    lo, hi = (np.percentile(boots, [5, 95]) if len(boots) >= 100
+              else (float("nan"), float("nan")))
+    return {"b": float(base[1]), "a": float(base[0]),
+            "b_от": float(lo), "b_до": float(hi), "n": int(len(z)),
+            "форма": ("не определена" if lo != lo
+                      else "сжата к середине" if lo > 1
+                      else "излишне растянута" if hi < 1
+                      else "согласуется с верной")}
+
+
 def baseline_metrics(pred: pd.Series, y: pd.Series, limit: float = 10.0) -> dict:
     """Метрики базовой «модели» без интервала — для честного сравнения."""
     common = pred.dropna().index.intersection(y.index)

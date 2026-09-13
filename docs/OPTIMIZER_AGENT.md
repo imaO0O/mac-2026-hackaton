@@ -197,7 +197,7 @@ python scripts/run_cycle.py --window quality_risk --every 10D
 ## Устойчивость к весам свёртки
 
 ```bash
-python scripts/check_objective_weights.py --draws 20 --stamps 10 --spread 0.5
+python scripts/check_objective_weights.py --draws 20 --stamps 40 --spread 0.5
 ```
 
 Веса (0.45 запас по качеству, 0.25 выпуск, 0.15 энергия, 0.15 тяжесть режима)

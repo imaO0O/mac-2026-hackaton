@@ -1,7 +1,7 @@
 """Устойчивость рекомендации к весам свёртки оптимизатора. Только CPU.
 
     python scripts/check_objective_weights.py
-    python scripts/check_objective_weights.py --draws 30 --stamps 12 --spread 0.5
+    python scripts/check_objective_weights.py --draws 30 --stamps 60 --spread 0.5
 
 Веса свёртки (0.45 запас по качеству, 0.25 выпуск, 0.15 энергия, 0.15 тяжесть
 режима) выбраны по смыслу: экономических данных в пакете нет, обучать их не на
@@ -70,7 +70,9 @@ def main() -> int:
     use_utf8_console()
     ap = argparse.ArgumentParser()
     ap.add_argument("--draws", type=int, default=20, help="случайных наборов весов")
-    ap.add_argument("--stamps", type=int, default=10, help="моментов времени")
+    # 40, а не 10: на десяти моментах с действием оказывался ОДИН, и средняя
+    # «величина гуляет» была значением в одной точке (docs/OPTIMIZER_AGENT.md)
+    ap.add_argument("--stamps", type=int, default=40, help="моментов времени")
     ap.add_argument("--spread", type=float, default=0.5, help="разброс весов, доля")
     args = ap.parse_args()
 

@@ -99,6 +99,54 @@ def bucket_metrics(pred: pd.DataFrame, y: pd.Series, risk: pd.Series,
     }
 
 
+def age_or_level(err: pd.Series, age: pd.Series, prev: pd.Series) -> dict:
+    """Смещение от ВОЗРАСТА модели или от УРОВНЯ серы? Они спутаны.
+
+    По кварталам уровень серы падает с возрастом (9.28 → 8.06), и поквартальное
+    смещение одинаково хорошо ложится и на возраст, и на уровень. Если причина —
+    уровень, то «модель стареет» неверно, а верно «модель занижает, когда серы
+    много», и переобучение этого не лечит.
+
+    Разделяем на уровне отдельных анализов. Уровень берём по ПРЕДЫДУЩЕМУ анализу:
+    сама ошибка ``прогноз − факт`` связана с фактом по построению, а с прошлым
+    анализом механической связи у неё нет.
+
+    Два устойчивых способа, потому что первый, обычная регрессия, обманул: выбросы
+    до 46 мг/кг расплющили наклон по уровню до t = −0.8, и уровень выглядел
+    непричастным. Медианы в таблице 2×2 и регрессия по рангу уровня с обрезанной
+    ошибкой выбросов не боятся.
+    """
+    ok = prev.notna() & err.notna()
+    err, age, prev = err[ok], age[ok], prev[ok]
+    if len(err) < 40:
+        return {}
+    e = err.clip(*err.quantile([0.01, 0.99]))
+    rank = prev.rank(pct=True)
+    A = np.column_stack([np.ones(len(e)), age.to_numpy(), rank.to_numpy()])
+    beta, *_ = np.linalg.lstsq(A, e.to_numpy(), rcond=None)
+    resid = e.to_numpy() - A @ beta
+    cov = resid @ resid / (len(e) - 3) * np.linalg.inv(A.T @ A)
+    se = np.sqrt(np.diag(cov))
+
+    old, high = age >= age.median(), prev >= prev.median()
+    cells = {}
+    for a_name, am in (("моложе", ~old), ("старше", old)):
+        for l_name, lm in (("низкий уровень", ~high), ("высокий уровень", high)):
+            m = am & lm
+            cells[f"{a_name}, {l_name}"] = {"медиана смещения": round(float(err[m].median()), 3),
+                                            "анализов": int(m.sum())}
+    return {
+        "анализов": int(len(e)),
+        "граница возраста, мес": round(float(age.median()), 1),
+        "граница уровня, мг/кг": round(float(prev.median()), 2),
+        "таблица 2×2": cells,
+        "возраст: наклон в месяц": round(float(beta[1]), 4),
+        "возраст: t": round(float(beta[1] / se[1]), 1),
+        "уровень: наклон на ранг": round(float(beta[2]), 3),
+        "уровень: t": round(float(beta[2] / se[2]), 1),
+    }
+
+
 def main() -> int:
     use_utf8_console()
     ap = argparse.ArgumentParser()
@@ -280,6 +328,28 @@ def main() -> int:
             f"порчи." + (f" Экстраполяция обещала бы {inside[0]:.1f} мес."
                          if inside else ""))
 
+    split = age_or_level(pred["q50"] - y,
+                         pd.Series((y.index - train_end).days / 30.44, index=y.index),
+                         prev)
+    if split:
+        print(chr(10) + "Возраст или уровень (медиана смещения, в скобках анализов):")
+        for key, cell in split["таблица 2×2"].items():
+            print(f"   {key:32s} {cell['медиана смещения']:+.3f} ({cell['анализов']})")
+        print(f"   регрессия: возраст {split['возраст: наклон в месяц']:+.4f}/мес "
+              f"(t={split['возраст: t']:+.1f}), ранг уровня "
+              f"{split['уровень: наклон на ранг']:+.3f} (t={split['уровень: t']:+.1f})")
+        age_real = abs(split["возраст: t"]) >= 2
+        level_real = abs(split["уровень: t"]) >= 2
+        verdict.append(
+            ("Подозрение, что «старение» — это спутанный с возрастом уровень серы, "
+             "проверено на отдельных анализах. "
+             + ("Возраст устоял: " if age_real else "Возраст НЕ устоял: ")
+             + f"t={split['возраст: t']:+.1f} при учёте уровня. ")
+            + ("Но и уровень оказался отдельной причиной "
+               f"(t={split['уровень: t']:+.1f}): модель занижает, когда серы много, "
+               "независимо от возраста, и переобучение этого не лечит."
+               if level_real else "Уровень отдельной причиной не оказался."))
+
     for line in verdict:
         print("  " + line)
 
@@ -290,6 +360,7 @@ def main() -> int:
         "горизонт": args.horizon, "показатель": args.target, "предел": limit,
         "конец_обучения": str(train_end - pd.Timedelta(days=1)),
         "интервалы": rows, "наклоны_в_месяц": trends, "срок_годности": shelf,
+        "возраст_или_уровень": split,
         "вывод": verdict,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {out.relative_to(ROOT)}")

@@ -51,7 +51,8 @@ from nefte.models.dataset import (  # noqa: E402
     build_feature_matrix,
     build_training_table,
 )
-from nefte.models.quality_model import SulfurModel  # noqa: E402
+from nefte.models.quality_model import (  # noqa: E402
+    SulfurModel, calibration_slope)
 from nefte.utils import use_utf8_console  # noqa: E402
 
 
@@ -166,6 +167,11 @@ def main() -> int:
                   f"частота» — {'лучше' if brier < brier_const else 'ХУЖЕ'}")
             print(f"    ECE {ece:.4f}; средняя заявленная {prob.mean():.3f} "
                   f"против наблюдаемой {base:.3f}")
+            slope = calibration_slope(prob, actual)
+            if slope:
+                print(f"    наклон калибровки {slope['b']:.2f} "
+                      f"[90 %: {slope['b_от']:.2f}…{slope['b_до']:.2f}] — "
+                      f"форма {slope['форма']}")
 
             block["платт" if not raw else "сырой"] = {
                 "Brier": round(brier, 5),
@@ -173,6 +179,8 @@ def main() -> int:
                 "лучше_константы": bool(brier < brier_const),
                 "ECE": None if ece != ece else round(ece, 5),
                 "средняя_заявленная": round(float(prob.mean()), 4),
+                "наклон_калибровки": {k: (round(v, 3) if isinstance(v, float) else v)
+                                      for k, v in slope.items()},
                 "кривая": [] if not len(curve) else [
                     {k: (int(v) if k == "моментов"
                          else bool(v) if k == "согласуется"
@@ -201,6 +209,26 @@ def main() -> int:
         else:
             print("  Перекос в пределах 0.05: вероятность можно показывать "
                   "оператору как вероятность.")
+        # ФОРМА, а не уровень. Сжатие вероятностей к середине даёт ошибки разного
+        # знака в разных бинах, и ECE с перекосом уровня его не видят. Решающий
+        # вопрос — можно ли его поправить ЧЕСТНО, то есть по валидации: только
+        # если валидация показывает то же сжатие. Если валидация согласуется с
+        # верной формой, а тест нет, любой множитель растяжения пришлось бы
+        # подбирать по тесту.
+        sv = val["платт"].get("наклон_калибровки") or {}
+        st = test["платт"].get("наклон_калибровки") or {}
+        if sv and st:
+            print(f"  Наклон калибровки: валидация {sv['b']:.2f} "
+                  f"[{sv['b_от']:.2f}…{sv['b_до']:.2f}], тест {st['b']:.2f} "
+                  f"[{st['b_от']:.2f}…{st['b_до']:.2f}].")
+            if st["форма"] != "согласуется с верной" and sv["форма"] == "согласуется с верной":
+                print(f"  На тесте форма {st['форма']}, а на валидации согласуется с "
+                      "верной. Честной поправки нет: подобрать растяжение можно "
+                      "только по тесту. Вероятность в верхнем диапазоне показывать "
+                      "оператору с этой оговоркой.")
+            elif st["форма"] != "согласуется с верной":
+                print(f"  Форма {st['форма']} и на тесте, и на валидации — это "
+                      "свойство модели, и его можно поправить по валидации.")
         if not test["платт"]["лучше_константы"]:
             print("  ВНИМАНИЕ: на тесте модель проигрывает по Brier константе "
                   "«всегда базовая частота». Как ВЕРОЯТНОСТЬ такой выход "
