@@ -75,6 +75,65 @@ def abstain_kind(rec: Recommendation) -> str:
     return "прочее"
 
 
+# пороги, которые перебираются в отчёте; рабочий добавляется к ним сам
+SWEEP_THRESHOLDS = (0.10, 0.15, 0.20, 0.30, 0.40, 0.50)
+
+
+def threshold_sweep(frame: pd.DataFrame, act_threshold: float, hours: float,
+                    thresholds=SWEEP_THRESHOLDS) -> list[dict]:
+    """Чем платим за снижение порога вмешательства.
+
+    Порог сравнивается с риском, поэтому перебрать его можно по уже
+    сохранённому риску, не пересчитывая цикл. Но правило сложнее, чем
+    «риск ≥ порога», и наивный перебор даёт числа, не сходящиеся с фактическим
+    прогоном. Учитываем оба исключения оркестратора:
+
+    * **вынужденное воздействие** — бездействие недопустимо, текущий режим уже
+      у предела, и система вмешивается при любом пороге;
+    * **отложенное воздействие** — сработал лимит частоты: недавно уже
+      вмешивались и ждём отклика, порог тут ни при чём.
+
+    Оба случая опознаются по расхождению фактического исхода с рабочим порогом,
+    поэтому проверка сходимости в прогоне обязана дать совпадение.
+
+    Функция вынесена на уровень модуля, чтобы тот же перебор работал по
+    СОХРАНЁННЫМ отчётам (``scripts/compare_decision_curves.py``), а не копией.
+    Копия уже однажды жила в черновике и давала таблицу защиты.
+
+    Два счёта пропусков, потому что отказ в первом засчитывается как поимка, и
+    такая метрика поощряет нерешение (``docs/HARD_CHECKS.md``):
+
+    * ``доля пропусков`` — превышение, а система держала режим;
+    * ``доля пропусков с отказами`` — превышение, а система не вмешалась, в том
+      числе потому что отказалась.
+    """
+    column = f"превышение за {hours:.0f} ч"
+    known = frame[frame[column].notna() & frame["риск"].notna()]
+    refused = known["исход"].eq("отказ")
+    forced = known["исход"].eq("меняем уставки") & known["риск"].lt(act_threshold)
+    postponed = known["исход"].eq("держим режим") & known["риск"].ge(act_threshold)
+    over = known[column].astype(bool)
+    n_over, n_calm = max(int(over.sum()), 1), max(int((~over).sum()), 1)
+
+    out = []
+    for threshold in sorted({*(float(t) for t in thresholds),
+                             round(float(act_threshold), 4)}):
+        acts = ~refused & ~postponed & (known["риск"].ge(threshold) | forced)
+        missed = int((over & ~acts & ~refused).sum())
+        false_alarm = int((~over & acts).sum())
+        out.append({
+            "порог": round(float(threshold), 3),
+            "поймано": int((over & (acts | refused)).sum()),
+            "пропущено": missed,
+            "доля пропусков": round(missed / n_over, 3),
+            "доля пропусков с отказами": round(int((over & ~acts).sum()) / n_over, 3),
+            "ложных тревог": false_alarm,
+            "доля ложных тревог": round(false_alarm / n_calm, 3),
+            "рабочий": bool(abs(threshold - act_threshold) < 1e-4),
+        })
+    return out
+
+
 def main() -> int:
     use_utf8_console()
     ap = argparse.ArgumentParser()
@@ -157,47 +216,7 @@ def main() -> int:
 
     checks = {f"{hours:.0f}ч": compare(hours) for hours in CHECK_WINDOWS}
 
-    def threshold_sweep(hours: float) -> list[dict]:
-        """Чем платим за снижение порога вмешательства.
-
-        Порог сравнивается с риском, поэтому перебрать его можно по уже
-        сохранённому риску, не пересчитывая цикл. Но правило сложнее, чем
-        «риск ≥ порога», и наивный перебор даёт числа, не сходящиеся с фактическим
-        прогоном. Учитываем оба исключения оркестратора:
-
-        * **вынужденное воздействие** — бездействие недопустимо, текущий режим уже
-          у предела, и система вмешивается при любом пороге;
-        * **отложенное воздействие** — сработал лимит частоты: недавно уже
-          вмешивались и ждём отклика, порог тут ни при чём.
-
-        Оба случая опознаются по расхождению фактического исхода с рабочим порогом,
-        поэтому проверка сходимости ниже обязана дать совпадение.
-        """
-        column = f"превышение за {hours:.0f} ч"
-        known = frame[frame[column].notna() & frame["риск"].notna()]
-        refused = known["исход"].eq("отказ")
-        forced = known["исход"].eq("меняем уставки") & known["риск"].lt(ACT_THRESHOLD)
-        postponed = known["исход"].eq("держим режим") & known["риск"].ge(ACT_THRESHOLD)
-        over = known[column].astype(bool)
-
-        out = []
-        for threshold in sorted({0.10, 0.15, 0.20, round(float(ACT_THRESHOLD), 4),
-                                 0.30, 0.40, 0.50}):
-            acts = ~refused & ~postponed & (known["риск"].ge(threshold) | forced)
-            missed = int((over & ~acts & ~refused).sum())
-            false_alarm = int((~over & acts).sum())
-            out.append({
-                "порог": round(float(threshold), 3),
-                "поймано": int((over & (acts | refused)).sum()),
-                "пропущено": missed,
-                "доля пропусков": round(missed / max(int(over.sum()), 1), 3),
-                "ложных тревог": false_alarm,
-                "доля ложных тревог": round(false_alarm / max(int((~over).sum()), 1), 3),
-                "рабочий": bool(abs(threshold - ACT_THRESHOLD) < 1e-4),
-            })
-        return out
-
-    sweep = threshold_sweep(MAIN_WINDOW)
+    sweep = threshold_sweep(frame, ACT_THRESHOLD, MAIN_WINDOW)
     # перебор обязан воспроизводить фактический прогон на рабочем пороге —
     # иначе таблица описывает не ту систему, которая только что отработала
     working = next(row for row in sweep if row["рабочий"])
