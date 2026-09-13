@@ -193,6 +193,11 @@ def boost_h2_working() -> list[list[float]]:
             [d["test"]["model"]["MAE"]], [d["test"]["model"]["coverage_80"]]]
 
 
+def headline(block: str, key: str) -> list[list[float]]:
+    v = report("headline_intervals.json")["числа"][block][key]
+    return [[v["значение"]], v["90% интервал"]]
+
+
 QA, HC, OA, GM = "QUALITY_AGENT.md", "HARD_CHECKS.md", "OPTIMIZER_AGENT.md", "GPU_MODELS.md"
 MAIN = "| Горизонт | Выборка | Модель |"
 HORIZONS = "| Горизонт | MAE модели |"
@@ -241,6 +246,20 @@ ROWS = [
       for label, t in (("0.10", 0.10), ("0.15", 0.15), ("0.177 (рабочий)", 0.177),
                        ("0.20", 0.20), ("0.30", 0.30), ("0.40", 0.40), ("0.50", 0.50))],
     Row(HC, "| | отказов всего |", "после", refusals_now),
+    *[Row(QA, "| число | значение | 90 % интервал |", label,
+          (lambda b=b, k=k: headline(b, k)))
+      for label, b, k in (
+          ("MAE, горизонт 0", "бустинг h0", "MAE"),
+          ("MAE модели минус MAE ПАК, горизонт 0 (парно)", "бустинг h0", "MAE минус MAE ПАК"),
+          ("MAE модели минус MAE ПАК, горизонт 2 (парно)", "бустинг h2", "MAE минус MAE ПАК"),
+          ("покрытие 80 %, горизонт 0", "бустинг h0", "coverage_80"),
+          ("ROC-AUC, горизонт 0", "бустинг h0", "roc_auc"),
+          ("полнота тревоги, горизонт 0", "бустинг h0", "recall"),
+          ("точность тревоги, горизонт 0", "бустинг h0", "precision"),
+          ("ROC-AUC, горизонт 2", "бустинг h2", "roc_auc"),
+          ("пропуски на рабочей точке (прогон по тесту)", "решения, рабочая точка бустинга",
+           "доля пропусков"),
+          ("ложные тревоги там же", "решения, рабочая точка бустинга", "доля ложных тревог"))],
     *[Row(GM, "| Модель, горизонт 2 ч |", label, (lambda f=f: seq_h2(f)))
       for label, f in (("TCN 48 + предобучение, сиды 42–44", "sequence_metrics_tcn48_pre_h2.json"),
                        ("то же, сиды 100–102", "sequence_metrics_tcn48_pre_s100_h2.json"),

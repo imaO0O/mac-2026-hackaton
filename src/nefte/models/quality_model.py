@@ -226,9 +226,18 @@ def interval_metrics(pred: pd.DataFrame, y: pd.Series, risk: pd.Series,
         out["roc_auc"] = out["pr_auc"] = None
     out["base_rate"] = float(over_true.mean())
 
-    key = round(float(alarm_threshold), 2)
-    out["spec_precision"] = out.get(f"precision@{key}")
-    out["spec_recall"] = out.get(f"recall@{key}")
+    # «Рабочие» precision и recall — при ТОЧНОМ пороге тревоги. Раньше они брались
+    # из таблицы выше по ключу, округлённому до двух знаков, то есть при 0.18
+    # вместо 0.1771, — хотя доля тревог в той же функции считается при точном.
+    # Разница на тесте горизонта 0 — одна тревога: precision 0.388 против 0.382.
+    # Мелко, но число подписано как рабочее, и порог теперь записан рядом.
+    alarm = risk > float(alarm_threshold)
+    tp = int((alarm & over_true).sum())
+    fp = int((alarm & ~over_true).sum())
+    fn = int((~alarm & over_true).sum())
+    out["spec_threshold"] = float(alarm_threshold)
+    out["spec_precision"] = float(tp / (tp + fp)) if tp + fp else None
+    out["spec_recall"] = float(tp / (tp + fn)) if tp + fn else None
     return out
 
 
