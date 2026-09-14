@@ -57,6 +57,9 @@ run $PY scripts/check_pipeline_point.py
 run $PY scripts/find_delays.py
 run $PY scripts/check_cetane.py
 run $PY scripts/check_catalyst_life.py
+run $PY scripts/check_f65_units.py
+run $PY scripts/find_regime_episodes.py
+run $PY scripts/check_avt_to_ht_lag.py
 run $PY scripts/check_t95_sigma.py
 
 # 5. разбор моделей качества
