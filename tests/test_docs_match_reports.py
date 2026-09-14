@@ -95,10 +95,10 @@ def test_the_table_is_still_there():
 
 
 def _readme_quality_bullet() -> str:
-    """Абзац README про агента качества — тот, который читают первым."""
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    """Абзац журнала про агента качества (до 14.09 он стоял в README)."""
+    text = (ROOT / "docs" / "FINDINGS.md").read_text(encoding="utf-8")
     start = text.find("Виртуальный анализатор на")
-    assert start > 0, "абзац про виртуальный анализатор пропал из README"
+    assert start > 0, "абзац про виртуальный анализатор пропал из docs/FINDINGS.md"
     end = text.find("\n* ", start)
     return text[start:end if end > 0 else len(text)]
 

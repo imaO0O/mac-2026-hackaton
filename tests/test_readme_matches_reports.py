@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Числа README, относящиеся к агенту качества и сравнению моделей, сходятся с отчётами.
+"""Числа README и журнала находок сходятся с отчётами.
+
+14.09 README стал витриной на одну страницу, а подробный журнал переехал в
+`docs/FINDINGS.md`. Сверяются оба: витрина — отдельным списком `README_CLAIMS`,
+журнал — прежним `CLAIMS`.
 
 README читают первым, а его числа стоят в тексте, не в таблицах, и сверка таблиц их
 не видит. За два дня пересчётов числа в README пришлось править руками трижды:
@@ -36,9 +40,9 @@ def report(name: str) -> dict:
     return data
 
 
-@lru_cache(maxsize=1)
-def readme() -> str:
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
+@lru_cache(maxsize=None)
+def document(name: str) -> str:
+    text = (ROOT / name).read_text(encoding="utf-8")
     return re.sub(r"\s+", " ", text.replace("*", ""))
 
 
@@ -84,6 +88,25 @@ def weights() -> dict:
     return report("objective_weights.json")
 
 
+def event_window() -> dict:
+    return report("event_response.json")["прогоны"]["test_period_step1h.json"]["окна"]["[-2, +4)"]
+
+
+def simulation() -> dict:
+    return report("simulation.json")["итог"]
+
+
+def weaker_physics_interventions() -> list[float]:
+    loops = report("kinetic_order.json")["замкнутый_контур"]
+    counts = [r["вмешательств"] for r in loops if r["порядок процесса"] > 1.0]
+    return [min(counts), max(counts)]
+
+
+def first_order_response() -> float:
+    rows = report("kinetic_order.json")["отклик_на_градус"]
+    return next(r for r in rows if r["порядок"] == 1.0)["Δ серы на +1 °C, %"]
+
+
 CLAIMS = [
     ("MAE {} мг/кг на тесте против {} у поточного анализатора",
      lambda: [split0("model")["MAE"], split0("baseline_pak")["MAE"]]),
@@ -113,6 +136,36 @@ CLAIMS = [
               weights()["сера разброс, среднее"]]),
 ]
 
+# Витрина: каждое число таблицы результатов и раздела ограничений.
+README_CLAIMS = [
+    ("MAE {} мг/кг против {} у поточного анализатора, ROC-AUC риска {}",
+     lambda: [split0("model")["MAE"], split0("baseline_pak")["MAE"], split0("model")["roc_auc"]]),
+    ("реагирует на {} % проб с превышением против {} % нормальных",
+     lambda: [100 * event_window()["перед_превышением"], 100 * event_window()["перед_нормой"]]),
+    ("одноагентная система двигает уставки в {} раз больше ({} °C против {} за полгода)",
+     lambda: [report("architectures.json")["конфигурации"]["одноагентная"]["суммарно °C"]
+              / report("architectures.json")["конфигурации"]["полная"]["суммарно °C"],
+              report("architectures.json")["конфигурации"]["одноагентная"]["суммарно °C"],
+              report("architectures.json")["конфигурации"]["полная"]["суммарно °C"]]),
+    ("{} вмешательств за месяц убирают {} из {} шагов с превышением, вклад в Т95 +{} °C",
+     lambda: [simulation()["вмешательств"],
+              simulation()["сера_без_вмешательства_сим"]["выше предела без нас, шагов"]
+              - simulation()["сера_без_вмешательства_сим"]["выше предела с нами, шагов"],
+              simulation()["сера_без_вмешательства_сим"]["выше предела без нас, шагов"],
+              simulation()["Т95_наш_вклад"]["средний сдвиг"]]),
+    ("падает на {} °C/мес (95 % ДИ {}–{})",
+     lambda: [report("catalyst_life.json")["скорость_дезактивации"]["°C/мес"],
+              *report("catalyst_life.json")["скорость_дезактивации"]["95% ДИ"]]),
+    ("{} % «зависаний» поточного анализатора приходятся на остановы",
+     lambda: [report("reliability_metrics.json")["downtime"]["explained_%"]]),
+    ("прогноз на 2 часа у бустинга не работает (ROC-AUC {})",
+     lambda: [report("quality_metrics_h2.json")["splits"]["test"]["model"]["roc_auc"]]),
+    ("Кинетика первого порядка даёт −{} % серы на градус",
+     lambda: [-first_order_response()]),
+    ("замкнутый контур делает {}–{} вмешательств вместо {}",
+     lambda: weaker_physics_interventions() + [simulation()["вмешательств"]]),
+]
+
 NUM = r"([-+−]?\d+(?:[.,]\d+)?)"
 
 
@@ -121,17 +174,27 @@ def _pattern(template: str) -> re.Pattern:
     return re.compile(NUM.join(parts))
 
 
-@pytest.mark.parametrize("template,expected", CLAIMS, ids=[c[0][:40] for c in CLAIMS])
-def test_readme_claim_matches_reports(template, expected):
-    found = _pattern(template).findall(readme())
+def _check(text: str, where: str, template, expected):
+    found = _pattern(template).findall(text)
     assert len(found) == 1, (
-        f"фраза «{template}» найдена в README {len(found)} раз: если её переписали, "
+        f"фраза «{template}» найдена в {where} {len(found)} раз: если её переписали, "
         "обновите и фразу, и эту сверку")
     got = found[0] if isinstance(found[0], tuple) else (found[0],)
     want = expected()
     assert len(got) == len(want)
-    for text, target in zip(got, want):
-        text = text.replace("−", "-").replace(",", ".")
-        decimals = len(text.split(".")[1]) if "." in text else 0
-        assert abs(float(text) - target) <= 0.5 * 10 ** -decimals + 1e-9, (
-            f"«{template}»: в README {text}, в отчёте {target:.4g}")
+    for cell, target in zip(got, want):
+        cell = cell.replace("−", "-").replace(",", ".")
+        decimals = len(cell.split(".")[1]) if "." in cell else 0
+        assert abs(float(cell) - target) <= 0.5 * 10 ** -decimals + 1e-9, (
+            f"«{template}»: в {where} {cell}, в отчёте {target:.4g}")
+
+
+@pytest.mark.parametrize("template,expected", CLAIMS, ids=[c[0][:40] for c in CLAIMS])
+def test_findings_claim_matches_reports(template, expected):
+    _check(document("docs/FINDINGS.md"), "docs/FINDINGS.md", template, expected)
+
+
+@pytest.mark.parametrize("template,expected", README_CLAIMS,
+                         ids=[c[0][:40] for c in README_CLAIMS])
+def test_readme_claim_matches_reports(template, expected):
+    _check(document("README.md"), "README", template, expected)
