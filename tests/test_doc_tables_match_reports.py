@@ -220,6 +220,14 @@ def step_row(run: str) -> list[list[float]]:
     return [[100 * w["доля пропусков"]], [100 * w["доля ложных тревог"]], [per_day]]
 
 
+def ablation(h: int, key: str) -> list[list[float]]:
+    """Строка абляции формул справочника: [без ВАК], [с ВАК]."""
+    def value(name: str) -> float:
+        data = report(name)
+        return data["n_features"] if key == "n_features" else data["splits"]["test"]["model"][key]
+    return [[value(f"quality_metrics_h{h}_novak.json")], [value(f"quality_metrics_h{h}.json")]]
+
+
 QA, HC, OA, GM = "QUALITY_AGENT.md", "HARD_CHECKS.md", "OPTIMIZER_AGENT.md", "GPU_MODELS.md"
 MAIN = "| Горизонт | Выборка | Модель |"
 HORIZONS = "| Горизонт | MAE модели |"
@@ -501,6 +509,7 @@ def robustness(spread: int) -> list[list[float] | None]:
 
 
 CL, AT, RA = "CATALYST_LIFE.md", "AVT_TAGS.md", "RELIABILITY_AGENT.md"
+VF = "VAK_FEATURES.md"
 REMAINING = "| Способ | Оценка | На чём держится |"
 EA_KEYS = ("70.0", "85.0", "100.0", "115.0", "130.0")
 SULFUR_KEYS = ("5.0", "8.0", "10.0")
@@ -564,6 +573,19 @@ ROWS += [
     *[Row(RA, "| Разброс весов | risk_class сохраняется |", label,
           (lambda s=spread: robustness(s)))
       for label, spread in (("±20 %", 20), ("±50 %", 50))],
+    # Абляция формул справочника. Таблицы простояли на старой сборке матрицы и
+    # тестами не сверялись: при пересчёте на горизонте 0 разница сменила знак, а
+    # «прирост ROC-AUC на 0.09» на горизонте 2 ч сжался до 0.009.
+    *[Row(VF, "| Метрика (test, горизонт 0) |", label, (lambda k=key: ablation(0, k)))
+      for label, key in (("MAE, мг/кг", "MAE"), ("ROC-AUC риска", "roc_auc"),
+                         ("Покрытие 80 % интервала", "coverage_80"),
+                         ("Precision тревоги", "spec_precision"),
+                         ("Recall тревоги", "spec_recall"),
+                         ("Признаков после отбора", "n_features"))],
+    *[Row(VF, "| Метрика (test, горизонт 2) |", label, (lambda k=key: ablation(2, k)))
+      for label, key in (("MAE, мг/кг", "MAE"), ("ROC-AUC риска", "roc_auc"),
+                         ("Recall тревоги", "spec_recall"),
+                         ("Признаков после отбора", "n_features"))],
 ]
 
 
