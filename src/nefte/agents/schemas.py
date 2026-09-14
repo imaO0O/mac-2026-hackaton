@@ -151,6 +151,47 @@ class BlendRecipe(BaseModel):
         return float(sum(self.fractions.values()))
 
 
+def effect_text(effect: dict | None) -> str:
+    """Ожидаемый эффект одной строкой для оператора.
+
+    Раньше в карточку шёл словарь как есть: «{'сера, мг/кг': 8.12, 'тяжесть
+    режима': 0.73, …}». Здесь известные поля собираются в фразу — сера и Т95
+    вместе с разницей к бездействию, затем выпуск, энергия, тяжесть режима, — а
+    незнакомые дописываются в конец, чтобы новое поле не пропало молча.
+    """
+    if not effect:
+        return "н/д"
+    rest = dict(effect)
+
+    def number(value, digits: int, signed: bool = False) -> str:
+        if not isinstance(value, (int, float)):
+            return str(value)
+        return f"{value:+.{digits}f}" if signed else f"{value:.{digits}f}"
+
+    parts = []
+    if "сера, мг/кг" in rest:
+        text = f"сера {number(rest.pop('сера, мг/кг'), 2)} мг/кг"
+        delta = rest.pop("сера к бездействию", None)
+        if isinstance(delta, (int, float)):
+            text += f" ({number(delta, 2, True)} к бездействию)"
+        parts.append(text)
+    if "Т95, °C" in rest:
+        text = f"Т95 {number(rest.pop('Т95, °C'), 1)} °C"
+        delta = rest.pop("Т95 к бездействию", None)
+        if isinstance(delta, (int, float)):
+            text += f" ({number(delta, 2, True)})"
+        parts.append(text)
+    for key, label in (("выпуск, %", "выпуск"), ("энергия, %", "энергия")):
+        if key in rest:
+            parts.append(f"{label} {number(rest.pop(key), 2, True)} %")
+    if "тяжесть режима" in rest:
+        parts.append(f"тяжесть режима {number(rest.pop('тяжесть режима'), 2)}")
+    if "выпуск смеси, т/ч" in rest:
+        parts.append(f"выпуск смеси {number(rest.pop('выпуск смеси, т/ч'), 1)} т/ч")
+    parts += [f"{key} {value}" for key, value in rest.items()]
+    return ", ".join(parts)
+
+
 class Recommendation(BaseModel):
     """Итог цикла. Структура повторяет п.5 ТЗ «Пример рекомендаций оператору»."""
     ts: datetime
@@ -206,7 +247,7 @@ class Recommendation(BaseModel):
             text = (
                 f"{head}{self.problem}\n"
                 f"  Действие: {moves or 'без изменений'}\n"
-                f"  Эффект: {self.expected_effect}\n"
+                f"  Эффект: {effect_text(self.expected_effect)}\n"
                 f"  Проверено: {'; '.join(self.checked_constraints)}\n"
                 f"  Уверенность: {self.confidence:.2f}\n"
                 f"  Почему: {self.explanation}"
