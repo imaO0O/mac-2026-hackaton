@@ -35,6 +35,10 @@ from nefte.config import load_config
 from nefte.data.loaders import load_vak_formulas, parse_vak_formula
 
 # Ссылки на ЛИМС внутри формул → ряды из нашего длинного формата.
+# «Pipeline» в выгрузке нет; стоит точка 2 (товарное ДТ). Точка 1 (сырьё) проверена
+# как альтернатива после сессии 11.09: для Т95 прочтения неразличимы, для плотности
+# точка 2 заметно лучше, решения от прочтения не зависят —
+# scripts/check_pipeline_point.py, docs/VAK_FEATURES.md.
 LIMS_TOKENS: dict[str, tuple[str, str]] = {
     "LIMS:24-2000.Pipeline.D15": ("LIMS_D15", "Гидроочистка|2|D15"),
     "LIMS:24-2000.Pipeline.95%.T": ("LIMS_T95", "Гидроочистка|2|95%.T"),

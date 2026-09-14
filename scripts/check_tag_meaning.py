@@ -146,16 +146,61 @@ def main() -> int:
     for row in rows:
         print(f"  {row['тег']:4s} {row['что это по данным']}")
 
+    # Двойники: тот же физический поток или та же зона, записанные разными тегами.
+    # Отношение массового расхода к объёмному обязано быть плотностью сырья, и это
+    # опознаёт величину надёжнее порядка значений. Проверено после сессии вопросов
+    # 11.09, где другая команда показала F19/объёмный расход = 0.832.
+    stubs = {307.0, 313.0, 240.0}
+    work = ht[~down]
+    twins = {}
+    for a, b, kind in (("F19", "F26", "отношение"), ("T11", "T6", "разность"),
+                       ("T11", "T5", "разность"), ("P8", "P13", "отношение")):
+        if a not in work.columns or b not in work.columns:
+            continue
+        pair = work[[a, b]].dropna()
+        pair = pair[~pair[a].isin(stubs) & ~pair[b].isin(stubs)]
+        if kind == "отношение":
+            pair = pair[(pair[a] > 0) & (pair[b] > 0)]
+            stat = pair[a] / pair[b]
+        else:
+            stat = pair[a] - pair[b]
+        twins[f"{a}~{b}"] = {
+            kind: round(float(stat.median()), 4),
+            "p05": round(float(stat.quantile(0.05)), 4),
+            "p95": round(float(stat.quantile(0.95)), 4),
+            "corr": round(float(pair[a].corr(pair[b])), 3),
+            "отсчётов": int(len(pair)),
+        }
+    print("\nДвойники на работающей установке:")
+    for name, row in twins.items():
+        print(f"  {name}: {row}")
+    if "F19~F26" in twins:
+        ratio = twins["F19~F26"]["отношение"]
+        print(f"  F19 / F26 = {ratio:.3f} — плотность дизельного сырья в т/м3: F19 — "
+              "МАССОВЫЙ расход сырья, F26 — объёмный. Описание «расход сырья "
+              "массовый», данное организаторами коду T11, по данным принадлежит F19, "
+              "а T11 — температура реакторного блока (corr с T6 выше 0.98). Наш рычаг "
+              "F26 — тот же физический расход.")
+
     named = {"P8": "температура ГСС на входе Р-202", "T11": "расход сырья массовый",
              "F19": "давление на входе Р-202"}
+    # По порядку величины 363 подходит и температуре, и расходу, и прежняя проверка
+    # объявляла T11 «сходится». Двойник решает однозначно: тег, идущий с
+    # температурой Р-202 при корреляции 0.99 и разнице меньше градуса, — температура.
+    by_twin = {}
+    if twins.get("T11~T6", {}).get("corr", 0) > 0.95:
+        by_twin["T11"] = "температура реактора (двойник T6)"
+    if 0.78 < twins.get("F19~F26", {}).get("отношение", 0) < 0.88:
+        by_twin["F19"] = "массовый расход сырья (F19/F26 — плотность)"
     print("\nУправляющие переменные, названные организаторами:")
     for code, meaning in named.items():
         row = next((r for r in rows if r["тег"] == code), None)
         if row is None:
             continue
         fits = meaning.split()[0][:4].lower()
-        print(f"  {code}: заявлено «{meaning}», медиана {row['медиана']} — "
-              f"{'сходится' if fits in row['что это по данным'].lower() else 'НЕ СХОДИТСЯ'}")
+        found = by_twin.get(code, row["что это по данным"])
+        print(f"  {code}: заявлено «{meaning}», медиана {row['медиана']}, по данным — "
+              f"{found}: {'сходится' if fits in found.lower() else 'НЕ СХОДИТСЯ'}")
 
     print("\nВывод, и читать его надо вместе с scripts/find_delays.py.")
     print("  1. Слабая связь с ЛАБОРАТОРИЕЙ сама по себе ничего не доказывает. "
@@ -178,7 +223,7 @@ def main() -> int:
 
     out = ROOT / "reports" / "tag_meaning.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"tags": rows, "named_by_organizers": named},
+    out.write_text(json.dumps({"tags": rows, "named_by_organizers": named, "twins": twins},
                               ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {out.relative_to(ROOT)}")
     return 0

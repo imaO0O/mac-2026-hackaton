@@ -35,7 +35,14 @@
 * взаимное влияние установок (АВТ ↔ гидроочистка) не моделируется: сырьё
   остаётся историческим;
 * постоянная времени отклика качества — единственное, что перестало быть
-  допущением: 4.6 ч измерены по данным (`scripts/find_delays.py`).
+  допущением: 4.6 ч измерены по данным (`scripts/find_delays.py`);
+* на останове установки накопленные сдвиги уставок сбрасываются: продукт не идёт,
+  а после пуска режим выставляют заново.
+
+Что сделано, чтобы контур был замкнут на самом деле, а не на словах: модель
+качества системы видит последствия действий через ``FeedbackModel``, а сравнение
+«без вмешательства» идёт с той же имитацией без наших сдвигов, а не с
+лабораторией (`docs/HARD_CHECKS.md` §10).
 """
 from __future__ import annotations
 
@@ -59,6 +66,59 @@ RESPONSE_TAU_HOURS = 4.6
 # режим куда угодно, и эксперимент перестал бы что-либо значить.
 MAX_DRIFT = {"T5": 8.0, "T6": 8.0, "T11": 8.0, "P13": 0.3, "F26": 40.0,
              "F15": 400.0, "P24": 0.3, "T55": 10.0}
+
+
+class FeedbackModel:
+    """Модель качества, которая видит последствия действий системы в имитации.
+
+    **Зачем, и это был дефект.** Обученная модель берёт признаки из матрицы по
+    метке времени среза, то есть из ИСТОРИИ. Имитатор подменял в срезе измеренную
+    серу смоделированной и считал контур замкнутым, но прогноз и риск, по которым
+    оркестратор решает, действовать ли, от этой подмены не зависели вовсе:
+    подставленные 2 и 15 мг/кг давали одинаковый прогноз, риск и решение. Система
+    не видела, что её действия уже снизили серу, и продолжала давить до предела
+    дрейфа — отсюда «сера 2.6 при пределе 10» в прежних прогонах.
+
+    Здесь к прогнозу добавляется сдвиг: насколько смоделированная сера отличается
+    от уровня, который был бы без наших воздействий. Риск классификатора сдвигается
+    так же, через нормальное приближение с σ модели: ``Φ(Φ⁻¹(p) + сдвиг/σ)``. При
+    нулевом сдвиге модель отвечает ровно как без обёртки.
+    """
+
+    def __init__(self, model):
+        self._model = model
+        self.shift = 0.0
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def predict_with_sigma(self, state):
+        mean, sigma = self._model.predict_with_sigma(state)
+        return float(mean) + self.shift, sigma
+
+    def risk_for_state(self, state):
+        risk = self._model.risk_for_state(state)
+        if risk is None or risk != risk or not self.shift:
+            return risk
+        _, sigma = self._model.predict_with_sigma(state)
+        if not sigma or sigma != sigma or math.isinf(sigma):
+            return risk
+        from scipy.stats import norm
+
+        p = min(max(float(risk), 1e-9), 1.0 - 1e-9)
+        return float(norm.cdf(norm.ppf(p) + self.shift / float(sigma)))
+
+
+def _shifted_surrogate(fn, feedback: FeedbackModel):
+    """Суррогат, к прогнозу серы которого добавлен сдвиг имитации."""
+    def _fn(state, moves):
+        out = dict(fn(state, moves))
+        value = out.get("product_sulfur_mgkg")
+        if value is not None and value == value:
+            out["product_sulfur_mgkg"] = float(value) + feedback.shift
+        return out
+    _fn.kind = getattr(fn, "kind", None)
+    return _fn
 
 
 @dataclass
@@ -86,6 +146,12 @@ class SimStep:
     # по себе, и приписывать её выход за предел нашему управлению нечестно.
     t95_hist: float | None = None
     confidence: float = 0.0
+    # Сера процесса в ТОЙ ЖЕ имитации, но без наших воздействий. Сравнивать
+    # смоделированную серу надо с ней, а не с лабораторией: процесс в имитации идёт
+    # от уровня модели, а он глаже лабораторного ряда и реже выходит за предел.
+    sulfur_untouched: float | None = None
+    # на этом шаге установка стояла, и накопленные сдвиги уставок сброшены
+    reset: bool = False
 
 
 class ClosedLoopSimulator:
@@ -112,6 +178,40 @@ class ClosedLoopSimulator:
         # накопленные смещения уставок относительно истории
         self.offsets: dict[str, float] = {}
         self.sulfur: float | None = None
+        # Процесс отвечает по ИСХОДНОМУ суррогату (он уже сохранён выше), а система
+        # получает модель и суррогат, видящие последствия своих действий.
+        self.feedback = self._close_quality_loop()
+
+    def _unit_down(self, state: ProcessState) -> bool:
+        """Стоит ли установка — по агенту надёжности системы, если он есть."""
+        check = getattr(getattr(self.system, "reliability", None), "is_unit_down", None)
+        return bool(check(state)) if callable(check) else False
+
+    def _close_quality_loop(self) -> FeedbackModel | None:
+        """Подключает к системе модель качества со сдвигом имитации. См. FeedbackModel."""
+        from nefte.models.kinetics import make_kinetic_surrogate
+
+        quality = getattr(self.system, "quality", None)
+        model = getattr(quality, "model", None)
+        if model is None:
+            # персистенция читает измерения из среза, и подмены серы ей хватает
+            return None
+        feedback = FeedbackModel(model)
+        quality.model = feedback
+        optimizer = getattr(self.system, "optimizer", None)
+        current = getattr(optimizer, "surrogate", None)
+        if current is None:
+            return feedback
+        if getattr(current, "kind", None) == "kinetic" and hasattr(current, "order"):
+            base = current.base_surrogate
+            optimizer.surrogate = make_kinetic_surrogate(
+                feedback,
+                base_surrogate=None if base is None else _shifted_surrogate(base, feedback),
+                strength=current.strength, tag_prefix=current.tag_prefix,
+                order=current.order)
+        else:
+            optimizer.surrogate = _shifted_surrogate(current, feedback)
+        return feedback
 
     # ------------------------------------------------------------------ #
     def _apply_offsets(self, state: ProcessState) -> ProcessState:
@@ -212,6 +312,16 @@ class ClosedLoopSimulator:
         for ts in stamps:
             ts = pd.Timestamp(ts)
             base = self.sb.build(ts)
+            # Останов обнуляет наши сдвиги уставок. Продукт не идёт, а после пуска
+            # режим выставляют заново. Без сброса имитация применяла сдвиг −2 °C,
+            # сделанный до останова, к реактору при 40 °C, и Аррениус при такой
+            # температуре раздувал его в четырёхкратный рост серы: на окне с
+            # остановом 15 «превышений» пришлись на шаги, где система отказывалась.
+            reset = bool(self.offsets) and self._unit_down(base)
+            if reset:
+                if hasattr(self.system, "record_applied"):
+                    self.system.record_applied({t: -v for t, v in self.offsets.items()})
+                self.offsets = {}
             shifted = self._apply_offsets(base)
 
             target = self._target_level(shifted)
@@ -236,6 +346,15 @@ class ClosedLoopSimulator:
             # воспроизвести руками.
             t95_now = self._t95_level(base)
             observed = self._with_simulated_t95(observed, t95_now)
+
+            # сдвиг для модели системы: смоделированная сера минус уровень без наших
+            # воздействий в этот момент
+            untouched = self.surrogate(shifted, {}).get("product_sulfur_mgkg")
+            if self.feedback is not None:
+                self.feedback.shift = (
+                    float(self.sulfur - untouched)
+                    if (self.sulfur == self.sulfur and untouched is not None
+                        and untouched == untouched) else 0.0)
 
             # лимит частоты воздействий здесь ОСМЫСЛЕН: прогон хронологический
             rec = self.system.run(observed)
@@ -262,6 +381,9 @@ class ClosedLoopSimulator:
                 offsets=dict(self.offsets),
                 moved=moved,
                 confidence=float(rec.confidence),
+                sulfur_untouched=(None if untouched is None or untouched != untouched
+                                  else float(untouched)),
+                reset=reset,
                 kind=("возврат" if (rec.action is not None and not rec.abstained
                                     and rec.action.id == "return_to_base") else ""),
             ))
@@ -277,6 +399,7 @@ def summarize(steps: list[SimStep], limit: float,
     frame = pd.DataFrame([{
         "ts": s.ts, "исход": s.outcome, "сера": s.sulfur_sim,
         "сера_история": s.sulfur_hist,
+        "сера_без_нас": s.sulfur_untouched,
         "Т95": s.t95_sim,
         "Т95_история": s.t95_hist,
         **{f"смещение_{k}": v for k, v in s.offsets.items()},
@@ -312,6 +435,7 @@ def summarize(steps: list[SimStep], limit: float,
         # тому же тегу снова сдвинули в прежнюю сторону.
         "качели после возврата": _swings_after_return(steps),
         "применено": int(sum(1 for item in steps if item.applied)),
+        "сбросов сдвигов на останове": int(sum(1 for item in steps if item.reset)),
         "сера_сим": {
             "среднее": round(float(sim.mean()), 3) if len(sim) else None,
             "доля выше предела": round(float((sim > limit).mean()), 3) if len(sim) else None,
@@ -320,6 +444,10 @@ def summarize(steps: list[SimStep], limit: float,
             "среднее": round(float(hist.mean()), 3) if len(hist) else None,
             "доля выше предела": round(float((hist > limit).mean()), 3) if len(hist) else None,
         },
+        # Правильная точка сравнения: та же имитация без наших воздействий, на тех же
+        # шагах. «Лаборатория без вмешательства» — другой ряд: 6 % превышений против
+        # 0 % в имитации получались и тогда, когда система ничего не делала.
+        "сера_без_вмешательства_сим": _paired_sulfur(frame, limit),
         "уставки": per_tag,
         # Второй обязательный показатель. Смотрим на него именно здесь: за один
         # цикл контур добавляет к Т95 меньше градуса, и поштучно это незаметно, а
@@ -337,6 +465,22 @@ def summarize(steps: list[SimStep], limit: float,
         # Ответ на единственный вопрос, ради которого Т95 здесь считается:
         # НАШИ действия ухудшили её или улучшили?
         "Т95_наш_вклад": _t95_contribution(frame, t95_limit),
+    }
+
+
+def _paired_sulfur(frame: pd.DataFrame, limit: float) -> dict:
+    """Сера с нашими воздействиями и без них — на одних и тех же шагах имитации."""
+    pair = frame.dropna(subset=["сера", "сера_без_нас"])
+    if pair.empty:
+        return {}
+    ours, base = pair["сера"], pair["сера_без_нас"]
+    return {
+        "шагов": int(len(pair)),
+        "среднее без нас": round(float(base.mean()), 3),
+        "среднее с нами": round(float(ours.mean()), 3),
+        "выше предела без нас, шагов": int((base > limit).sum()),
+        "выше предела с нами, шагов": int((ours > limit).sum()),
+        "средний наш сдвиг": round(float((ours - base).mean()), 3),
     }
 
 

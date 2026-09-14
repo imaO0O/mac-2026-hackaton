@@ -68,7 +68,7 @@ def arrhenius_factor(t_from_c: float, t_to_c: float,
 
 
 def make_kinetic_surrogate(model, base_surrogate=None, strength: float = 1.0,
-                           tag_prefix: str = "ht_"):
+                           tag_prefix: str = "ht_", order: float = 1.0):
     """Суррогат «режим → качество»: уровень от модели, приращение от кинетики.
 
     Parameters
@@ -79,6 +79,12 @@ def make_kinetic_surrogate(model, base_surrogate=None, strength: float = 1.0,
     strength : 0…1, доля кинетического приращения. 1.0 — чистая физика,
         0.0 — поведение прежнего суррогата. Позволяет показать на защите, как
         решение зависит от силы допущения.
+    order : кажущийся порядок реакции по сере. Рабочее значение 1.0. Отклик на
+        градус определяется порядком сильнее, чем энергией активации: при сере
+        сырья 9000 и продукта 8 мг/кг первый порядок даёт около −19 % на градус,
+        1.5 — около −6 %, второй — около −3 % (Ea 100 кДж/моль). Параметр нужен
+        для проверки «что, если физика слабее, чем думает система»
+        (scripts/check_kinetic_order.py), а не для рабочего контура.
     """
 
     # Уровень серы от модели зависит ТОЛЬКО от момента среза: строка признаков
@@ -94,10 +100,13 @@ def make_kinetic_surrogate(model, base_surrogate=None, strength: float = 1.0,
 
     def _model_level(state: ProcessState) -> float:
         nonlocal cached_ts, cached_level
-        ts = state.ts
-        if ts != cached_ts:
+        # В имитации модель обёрнута `sim.FeedbackModel`, и её уровень зависит ещё
+        # и от сдвига — последствий уже применённых действий. Сдвиг входит в ключ,
+        # иначе кэш вернул бы уровень, посчитанный до изменения.
+        key = (state.ts, getattr(model, "shift", None))
+        if key != cached_ts:
             mean, _ = model.predict_with_sigma(state)
-            cached_ts, cached_level = ts, float(mean)
+            cached_ts, cached_level = key, float(mean)
         return cached_level
 
     def _fn(state: ProcessState, moves: dict[str, float]) -> dict[str, float]:
@@ -135,12 +144,22 @@ def make_kinetic_surrogate(model, base_surrogate=None, strength: float = 1.0,
             if a and b and a > 0 and b > 0:
                 factor *= (b / a) ** H2_ORDER
 
-        tau_new = tau * (1.0 + strength * (factor - 1.0))
-        tau_new = max(tau_new, 0.0)
-        value = feed_sulfur * math.exp(-tau_new)
+        scale = max(1.0 + strength * (factor - 1.0), 0.0)
+        if abs(order - 1.0) < 1e-9:
+            value = feed_sulfur * math.exp(-tau * scale)
+        else:
+            # порядок n: S_out^(1−n) − S_in^(1−n) = (n−1)·k/LHSV, комплекс снова
+            # вычисляется из текущих серы сырья и продукта без подгонки
+            p = 1.0 - order
+            complex_now = (level ** p - feed_sulfur ** p) / (order - 1.0)
+            value = (feed_sulfur ** p + (order - 1.0) * complex_now * scale) ** (1.0 / p)
         return {"product_sulfur_mgkg": float(value)}
 
     # Метка для оркестратора: приращение эффекта посчитано по физике, а не
     # измерено. Оператору это надо сказать, иначе «−3.4 мг/кг» читается как факт.
     _fn.kind = "kinetic"
+    # параметры построения — чтобы имитация могла собрать такой же суррогат поверх
+    # модели, видящей последствия действий (sim.ClosedLoopSimulator)
+    _fn.model, _fn.base_surrogate = model, base_surrogate
+    _fn.strength, _fn.order, _fn.tag_prefix = strength, order, tag_prefix
     return _fn
