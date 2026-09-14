@@ -61,3 +61,22 @@ def test_present_ht_value_wins_over_avt_namesake():
     lo, hi = _optimizer()._effective_bounds(state, _reliability(state))["T11"]
     # 365 гидроочистки ± шаг, а не 64.7 АВТ
     assert 360.0 <= lo <= hi <= 370.0
+
+
+def test_flag_lists_keep_the_unit_of_each_code():
+    """Брак одноимённых тегов на двух установках не сливается в одну запись."""
+    from nefte.pipeline import flagged_tags, tag_listing
+
+    avt = {"F19": ["заглушка"], "D10": ["датчик не даёт сигнала", "заглушка"]}
+    ht = {"F19": ["заглушка"], "F2": ["заглушка"], "T5": ["полка"]}
+    tags = flagged_tags(avt, ht, "заглушка")
+    assert tags == ["avt:D10", "avt:F19", "ht:F19", "ht:F2"]
+    assert tag_listing(tags) == "АВТ: D10, F19; 24-2000: F19, F2"
+    assert flagged_tags(avt, ht, "полка") == ["ht:T5"]
+
+
+def test_long_flag_lists_are_cut_per_unit():
+    from nefte.pipeline import tag_listing
+
+    tags = [f"avt:F{i}" for i in range(1, 9)] + ["ht:F2"]
+    assert tag_listing(tags) == "АВТ: F1, F2, F3, F4, F5 и ещё 3; 24-2000: F2"

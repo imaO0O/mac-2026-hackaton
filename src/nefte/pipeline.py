@@ -43,6 +43,37 @@ def is_state_usable(missing_share: float, pak_is_frozen: bool,
                 and lims_age_hours > stale["lims"] * 3)
 
 
+# Имена установок в списках тегов. Код без установки ничего не значит: восемь кодов
+# есть и на АВТ, и на 24-2000 с разным смыслом (docs/AVT_SCHEMES.md §4) — `F19` на
+# АВТ это орошение К-2, на гидроочистке расход сырья.
+UNIT_NAMES = {"avt": "АВТ", "ht": "24-2000"}
+LISTED_PER_UNIT = 5
+
+
+def flagged_tags(avt_flags: dict[str, list[str]], ht_flags: dict[str, list[str]],
+                 reason: str) -> list[str]:
+    """Теги с причиной брака ``reason`` в виде «установка:код».
+
+    Раньше флаги двух установок сливались в один словарь по голому коду, и при
+    браке одноимённых тегов на обеих установках причина АВТ перезаписывалась.
+    """
+    return sorted([f"avt:{t}" for t, r in avt_flags.items() if reason in r]
+                  + [f"ht:{t}" for t, r in ht_flags.items() if reason in r])
+
+
+def tag_listing(tags: list[str]) -> str:
+    """«АВТ: D10, F12, F19; 24-2000: F2» — по установкам, не больше пяти на каждую."""
+    parts = []
+    for unit, name in UNIT_NAMES.items():
+        codes = [t.split(":", 1)[1] for t in tags if t.startswith(f"{unit}:")]
+        if not codes:
+            continue
+        shown = ", ".join(codes[:LISTED_PER_UNIT])
+        rest = len(codes) - LISTED_PER_UNIT
+        parts.append(f"{name}: {shown}" + (f" и ещё {rest}" if rest > 0 else ""))
+    return "; ".join(parts)
+
+
 class StateBuilder:
     """Готовит данные один раз, затем быстро отдаёт срез на любой момент."""
 
@@ -179,9 +210,9 @@ class StateBuilder:
 
         # причины брака по каждому тегу на этот момент — это и есть объяснение,
         # почему часть данных не используется
-        flags = {**self.avt_validity.flags_at(ts), **self.ht_validity.flags_at(ts)}
-        frozen_tags = [t for t, r in flags.items() if "полка" in r]
-        sentinel_tags = [t for t, r in flags.items() if "заглушка" in r]
+        avt_flags, ht_flags = self.avt_validity.flags_at(ts), self.ht_validity.flags_at(ts)
+        frozen_tags = flagged_tags(avt_flags, ht_flags, "полка")
+        sentinel_tags = flagged_tags(avt_flags, ht_flags, "заглушка")
 
         notes = []
         if pak_is_frozen:
@@ -189,9 +220,9 @@ class StateBuilder:
         if lims_age is not None and lims_age > stale["lims"]:
             notes.append(f"Последний анализ ЛИМС старше {stale['lims']} ч ({lims_age:.0f} ч).")
         if sentinel_tags:
-            notes.append(f"Значения-заглушки в тегах: {', '.join(sorted(sentinel_tags)[:5])}.")
+            notes.append(f"Значения-заглушки в тегах: {tag_listing(sentinel_tags)}.")
         if frozen_tags:
-            notes.append(f"Сигнал не меняется в тегах: {', '.join(sorted(frozen_tags)[:5])}.")
+            notes.append(f"Сигнал не меняется в тегах: {tag_listing(frozen_tags)}.")
 
         dq = DataQuality(
             missing_share=missing_share,

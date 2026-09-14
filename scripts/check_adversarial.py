@@ -83,9 +83,10 @@ def damage(state: ProcessState, cfg: dict, *, drop_pak: bool = False,
         sum(v is None for v in s.telemetry_ht.values())
     s.data_quality.missing_share = missing / total if total else 1.0
     if blank_ht:
-        s.data_quality.sentinel_tags = sorted(set(s.data_quality.sentinel_tags) | set(blank_ht))
+        s.data_quality.sentinel_tags = sorted(set(s.data_quality.sentinel_tags)
+                                              | {f"ht:{t}" for t in blank_ht})
         s.data_quality.notes.append(
-            f"Значения-заглушки в тегах: {', '.join(sorted(blank_ht))}.")
+            f"Значения-заглушки в тегах: 24-2000: {', '.join(sorted(blank_ht))}.")
     if freeze_pak:
         s.data_quality.frozen_tags = sorted(set(s.data_quality.frozen_tags) | {"pak_sulfur"})
         s.data_quality.notes.append("Поточный анализатор серы заморожен.")
