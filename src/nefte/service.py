@@ -16,7 +16,10 @@
 * ``GET /health`` — жив ли сервис и какая модель качества подключена;
 * ``GET /decide?ts=2026-02-18T00:00`` — решение на момент истории (срез собирается
   из выданных файлов, как в демо);
-* ``POST /decide`` — решение по присланному срезу ``ProcessState`` в JSON.
+* ``POST /decide`` — решение по присланному срезу ``ProcessState`` в JSON;
+* ``POST /ask`` — вопрос оператора по решению: ``{"question": …, "ts": …}`` или
+  ``{"question": …, "state": {…}}``. Работает, только если включён слой локальной
+  LLM (``llm.enabled``); ответ с числом, которого нет в решении, отклоняется.
 
 Ответ — ``Recommendation`` в JSON (с трассой по агентам), плюс ``outcome`` и
 ``text`` — карточка оператора.
@@ -50,9 +53,10 @@ class DecisionService:
     поэтому запросы к одному сервису обрабатываются по очереди.
     """
 
-    def __init__(self, system=None, state_builder=None):
+    def __init__(self, system=None, state_builder=None, explainer=None):
         self._system = system
         self._sb = state_builder
+        self._explainer = explainer
         self._lock = threading.Lock()
 
     def _ensure(self) -> None:
@@ -62,16 +66,28 @@ class DecisionService:
         from nefte.pipeline import StateBuilder
         from scripts.run_cycle import build_system
 
+        from nefte.llm_explain import LocalLLMExplainer
+
         cfg = load_config()
         self._sb = StateBuilder(cfg)
         self._system = build_system(self._sb, cfg)
         self._system.log_runs = False
+        if self._explainer is None:
+            self._explainer = LocalLLMExplainer.from_config(cfg)
 
     def health(self) -> dict:
         model = getattr(getattr(self._system, "quality", None), "model", None)
         source = getattr(model, "source_path", None)
         return {"status": "ok", "system_loaded": self._system is not None,
-                "quality_model": None if source is None else str(source)}
+                "quality_model": None if source is None else str(source),
+                "llm": self._explainer is not None}
+
+    def ask(self, question: str, rec: Recommendation) -> dict:
+        if self._explainer is None:
+            raise PermissionError("слой локальной LLM выключен (llm.enabled: false)")
+        answer = self._explainer.ask(rec, question)
+        return {"answer": answer.text, "from_llm": answer.from_llm, "note": answer.note,
+                "rejected_numbers": answer.rejected_numbers, "outcome": rec.outcome()}
 
     def decide_state(self, state: ProcessState) -> Recommendation:
         self._ensure()
@@ -122,19 +138,38 @@ def make_handler(service: DecisionService):
             return self._send(HTTPStatus.NOT_FOUND, {"error": "нет такого метода"})
 
         def do_POST(self):                       # noqa: N802
-            if urlparse(self.path).path != "/decide":
+            path = urlparse(self.path).path
+            if path not in ("/decide", "/ask"):
                 return self._send(HTTPStatus.NOT_FOUND, {"error": "нет такого метода"})
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0 or length > MAX_BODY_BYTES:
                 return self._send(HTTPStatus.BAD_REQUEST,
-                                  {"error": "тело запроса — срез ProcessState в JSON"})
+                                  {"error": "тело запроса — JSON (срез ProcessState "
+                                            "или вопрос)"})
+            raw = self.rfile.read(length)
+            if path == "/ask":
+                return self._ask(raw)
             try:
-                state = ProcessState.model_validate_json(self.rfile.read(length))
+                state = ProcessState.model_validate_json(raw)
             except ValueError as err:
                 return self._send(HTTPStatus.UNPROCESSABLE_ENTITY,
                                   {"error": "срез не соответствует контракту ProcessState",
                                    "detail": str(err)[:2000]})
             return self._send(HTTPStatus.OK, _payload(service.decide_state(state)))
+
+        def _ask(self, raw: bytes):
+            try:
+                body = json.loads(raw.decode("utf-8"))
+                question = str(body["question"]).strip()
+                rec = (service.decide_state(ProcessState.model_validate(body["state"]))
+                       if "state" in body else service.decide_at(str(body["ts"])))
+            except (KeyError, ValueError, LookupError) as err:
+                return self._send(HTTPStatus.BAD_REQUEST,
+                                  {"error": "нужны question и ts или state", "detail": str(err)})
+            try:
+                return self._send(HTTPStatus.OK, service.ask(question, rec))
+            except PermissionError as err:
+                return self._send(HTTPStatus.CONFLICT, {"error": str(err)})
 
     return Handler
 

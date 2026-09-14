@@ -127,6 +127,23 @@ def trace_block(rec) -> None:
                 st.json(step.details, expanded=False)
 
 
+def ask_block(cfg: dict, rec) -> None:
+    """Вопрос оператора локальной LLM — только если слой включён в конфиге."""
+    from nefte.llm_explain import LocalLLMExplainer
+
+    explainer = LocalLLMExplainer.from_config(cfg)
+    if explainer is None:
+        return
+    st.subheader("Спросить систему")
+    question = st.text_input("Вопрос по этому решению",
+                             placeholder="Почему расход, а не температура?")
+    if question:
+        answer = explainer.ask(rec, question)
+        (st.success if answer.from_llm else st.warning)(answer.text)
+        if answer.note:
+            st.caption(answer.note)
+
+
 def main() -> None:
     cfg, sb, system = load_system()
     limit = cfg["spec"]["product_sulfur_mgkg"]["max"]
@@ -234,6 +251,7 @@ def main() -> None:
             st.markdown(f"**Почему:** {rec.explanation}")
 
     trace_block(rec)
+    ask_block(cfg, rec)
 
     # ---------- данные и достоверность --------------------------------- #
     st.subheader("Качество продукта и достоверность данных")
