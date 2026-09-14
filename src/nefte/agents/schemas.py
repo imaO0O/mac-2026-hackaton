@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -192,6 +192,20 @@ def effect_text(effect: dict | None) -> str:
     return ", ".join(parts)
 
 
+class TraceStep(BaseModel):
+    """Один шаг цикла решения: какой агент что вернул.
+
+    ТЗ требует, чтобы взаимодействие ролей было явно показано в коде и на
+    демонстрации. Ответы агентов и раньше лежали в журнале цикла, но путь решения —
+    в каком порядке их спросили и какое правило оркестратора сработало — оставался
+    в коде. Трасса делает его частью самой рекомендации: её показывает дашборд и
+    пишет журнал.
+    """
+    agent: str
+    summary: str
+    details: dict[str, Any] = {}
+
+
 class Recommendation(BaseModel):
     """Итог цикла. Структура повторяет п.5 ТЗ «Пример рекомендаций оператору»."""
     ts: datetime
@@ -209,6 +223,8 @@ class Recommendation(BaseModel):
         default=None, description="рецептура смешения при рекомендуемом режиме")
     abstained: bool = False
     abstain_reason: str = ""
+    trace: list[TraceStep] = Field(default_factory=list,
+                                   description="путь решения по агентам")
 
     def outcome(self) -> Literal["отказ", "меняем уставки", "держим режим"]:
         """Что система решила — одним словом.

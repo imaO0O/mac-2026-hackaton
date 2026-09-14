@@ -661,10 +661,21 @@ class OptimizerAgent:
         cands = self.evaluate(state, self.generate(state, reliability), quality, reliability)
         ranked = self.rank(cands)
         if not ranked:
+            self._last_stats = {"вариантов": len(cands), "допустимых": 0,
+                                "на фронте Парето": 0, "с запасом": 0}
             return []
         extra = self.evaluate(state, self.refine(state, reliability, ranked[0]),
                               quality, reliability)
-        return self.rank(cands + extra)
+        final = self.rank(cands + extra)
+        # счёт для трассы цикла: сколько вариантов рассмотрено и сколько прошло
+        self._last_stats = {"вариантов": len(cands) + len(extra), "допустимых": len(final),
+                            "на фронте Парето": sum(1 for c in final if c.pareto_rank == 0),
+                            "с запасом": sum(1 for c in final if c.guaranteed)}
+        return final
+
+    def last_stats(self) -> dict[str, int]:
+        """Счёт последнего подбора вариантов — для трассы цикла решения."""
+        return dict(getattr(self, "_last_stats", {}))
 
 
 def _distance(a: Candidate, b: Candidate) -> float:

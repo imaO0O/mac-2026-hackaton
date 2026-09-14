@@ -29,6 +29,7 @@ from nefte.agents.schemas import (
     QualityAssessment,
     Recommendation,
     Source,
+    TraceStep,
 )
 from nefte.config import ROOT, load_config
 
@@ -290,7 +291,8 @@ class Orchestrator:
                 abstained=True, confidence=q.confidence,
                 abstain_reason="; ".join(r.notes),
             )
-            return self._finish(rec, state, q, r, blend=False)
+            return self._finish(rec, state, q, r, blend=False,
+                                rule="отказ: установка не в работе")
 
         # --- отказ 2: данные непригодны ---------------------------------
         if not state.data_quality.usable or q.confidence < self.min_confidence:
@@ -304,7 +306,9 @@ class Orchestrator:
                     for n in q.notes + state.data_quality.notes if n)
                 or "низкая уверенность прогноза",
             )
-            return self._finish(rec, state, q, r, blend=False)
+            return self._finish(rec, state, q, r, blend=False,
+                                rule="отказ: данные недостоверны или уверенность ниже "
+                                     f"{self.min_confidence:.2f}")
 
         risk = q.spec_risk.get("product_sulfur_mgkg", 0.0)
         pred = q.predictions.get("product_sulfur_mgkg")
@@ -323,7 +327,9 @@ class Orchestrator:
                 abstain_reason=". ".join(x for x in reasons if x) + ". "
                                "Требуется решение технолога.",
             )
-            return self._finish(rec, state, q, r)
+            return self._finish(
+                rec, state, q, r, optimized=True,
+                rule="отказ: ни один вариант не проходит жёсткие ограничения")
 
         best = candidates[0]
         # точка отсчёта — всегда оценённое бездействие, даже если оно недопустимо
@@ -348,7 +354,10 @@ class Orchestrator:
                     "Спецификация при этом не нарушена."),
                 alternatives=self.optimizer.diverse_alternatives(candidates, 3),
             )
-            return self._finish(rec, state, q, r)
+            return self._finish(
+                rec, state, q, r, optimized=True,
+                rule=("запрет частых воздействий: прошло меньше "
+                      f"{self.min_hours_between_actions:g} ч"))
 
         # --- возврат к базовому режиму: запас позволяет отыграть сделанное ---
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
@@ -372,7 +381,9 @@ class Orchestrator:
                     alternatives=self.optimizer.diverse_alternatives(candidates, 3),
                 )
                 self._last_action_ts = state.ts
-                return self._finish(rec, state, q, r)
+                return self._finish(
+                    rec, state, q, r, optimized=True,
+                    rule="возврат к базовому режиму: запас по сере позволяет")
 
         # --- нормальный режим: не создаём лишних воздействий ------------
         if risk < self.act_risk_threshold and hold is not None and hold.feasible:
@@ -424,7 +435,10 @@ class Orchestrator:
                 explanation=why,
                 alternatives=self.optimizer.diverse_alternatives(candidates, 3),
             )
-            return self._finish(rec, state, q, r)
+            return self._finish(
+                rec, state, q, r, optimized=True,
+                rule=(f"риск {risk:.0%} ниже порога {self.act_risk_threshold:.0%}, "
+                      "текущий режим допустим — держим"))
 
         # --- есть риск: рекомендуем действие ----------------------------
         # Действие при риске НИЖЕ порога бывает, когда у бездействия нет
@@ -459,7 +473,12 @@ class Orchestrator:
         if any(abs(d) > 1e-6 for d in best.deltas.values()):
             self._last_action_ts = state.ts
             self._last_quality_action_ts = state.ts
-        return self._finish(rec, state, q, r)
+        return self._finish(
+            rec, state, q, r, optimized=True,
+            rule=(f"риск {risk:.0%} не ниже порога {self.act_risk_threshold:.0%} — "
+                  "выбираем лучший допустимый вариант"
+                  if risk >= self.act_risk_threshold else
+                  "у бездействия нет гарантированного запаса — нужна поправка"))
 
     # ------------------------------------------------------------------ #
     def _too_soon(self, ts) -> bool:
@@ -612,10 +631,79 @@ class Orchestrator:
         value = q.predictions.get("product_sulfur_mgkg")
         return None if value is None else float(value)
 
+    def _trace(self, rec: Recommendation, state, q, r, rule: str,
+               optimized: bool) -> list[TraceStep]:
+        """Путь решения: что вернул каждый агент и какое правило сработало."""
+        steps: list[TraceStep] = []
+        dq = state.data_quality
+        lims, pak = state.quality.get("lims_sulfur_mgkg"), state.quality.get("pak_sulfur_ppm")
+
+        def measurement(m, name: str) -> str:
+            if m is None or m.value is None:
+                return f"{name} нет"
+            age = "" if m.age_hours is None else f", {m.age_hours:.0f} ч"
+            flag = ", завис" if getattr(m, "is_frozen", False) else ""
+            return f"{name} {m.value:.2f}{age}{flag}"
+
+        steps.append(TraceStep(
+            agent="срез состояния",
+            summary=(f"{measurement(lims, 'ЛИМС')}; {measurement(pak, 'ПАК')}; пропусков "
+                     f"{dq.missing_share:.1%}; заглушек в {len(dq.sentinel_tags)} тегах, "
+                     f"«полок» в {len(dq.frozen_tags)}"
+                     + ("" if dq.usable else "; срез непригоден")),
+            details={"возраст источников, ч": dict(rec.freshness), "замечания": list(dq.notes)}))
+
+        sulfur = q.predictions.get("product_sulfur_mgkg")
+        t95 = q.predictions.get("product_t95_c")
+        steps.append(TraceStep(
+            agent="агент качества",
+            summary=(f"источник {q.source.value}; прогноз серы "
+                     + ("нет" if sulfur is None else f"{sulfur:.2f} мг/кг")
+                     + f", риск {q.spec_risk.get('product_sulfur_mgkg', 0.0):.0%}; "
+                     + ("" if t95 is None else f"Т95 {t95:.1f} °C; ")
+                     + f"уверенность {q.confidence:.2f}"),
+            details={"прогнозы": dict(q.predictions), "риски": dict(q.spec_risk),
+                     "замечания": list(q.notes)}))
+
+        steps.append(TraceStep(
+            agent="агент надёжности",
+            summary=(f"тяжесть режима {r.severity_index:.2f} ({r.risk_class}); режим "
+                     + ("допустим" if r.admissible else "НЕДОПУСТИМ")
+                     + ("; ограничил " + ", ".join(sorted(r.constraints)) if r.constraints
+                        else "")),
+            details={"факторы": dict(r.factors), "ограничения": {
+                k: list(v) for k, v in r.constraints.items()}, "замечания": list(r.notes)}))
+
+        if optimized:
+            stats = self.optimizer.last_stats()
+            chosen = rec.action.id if rec.action is not None else "нет"
+            summary = (f"вариантов {stats.get('вариантов', 0)}, допустимых "
+                       f"{stats.get('допустимых', 0)}, с гарантированным запасом "
+                       f"{stats.get('с запасом', 0)}, на фронте Парето "
+                       f"{stats.get('на фронте Парето', 0)}; лучший — {chosen}")
+            if not stats.get("допустимых"):
+                summary += "; отсев: " + self.optimizer.rejection_summary()
+            steps.append(TraceStep(agent="оптимизатор", summary=summary, details=stats))
+
+        if rec.blend is not None:
+            steps.append(TraceStep(
+                agent="смешение",
+                summary=(f"рецептура {'допустима' if rec.blend.feasible else 'НЕДОПУСТИМА'}, "
+                         f"сумма долей {rec.blend.fractions_sum() * 100:.1f} %, выпуск "
+                         f"{rec.blend.throughput_tph:.1f} т/ч"),
+                details={"доли": dict(rec.blend.fractions),
+                         "нарушения": list(rec.blend.violations)}))
+
+        steps.append(TraceStep(agent="оркестратор",
+                               summary=f"{rule or 'правило не названо'} → {rec.outcome()}"))
+        return steps
+
     def _finish(self, rec: Recommendation, state, q, r,
-                blend: bool = True) -> Recommendation:
+                blend: bool = True, rule: str = "", optimized: bool = False
+                ) -> Recommendation:
         if blend:
             self._attach_blend(rec, state, q)
+        rec.trace = self._trace(rec, state, q, r, rule, optimized)
         if self.log_runs:
             RUNS_DIR.mkdir(parents=True, exist_ok=True)
             path: Path = RUNS_DIR / f"{state.ts:%Y%m%dT%H%M}.json"

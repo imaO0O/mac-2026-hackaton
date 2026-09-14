@@ -22,6 +22,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+from nefte.agents.schemas import effect_text  # noqa: E402
 from nefte.config import load_config  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
 from nefte.data.loaders import lims_series  # noqa: E402
@@ -91,6 +92,41 @@ def pareto_chart(candidates) -> go.Figure:
     return fig
 
 
+def scene_moments() -> list[tuple[str, pd.Timestamp, str]]:
+    """Моменты сцен защиты — те же, что в консольном `scripts/demo.py`.
+
+    Дашборд и консольное демо обязаны показывать одно и то же: сцены подобраны по
+    журналам прогонов, и две независимые копии списка разошлись бы при первой
+    правке.
+    """
+    from demo import SCENES
+
+    out = []
+    for scene in SCENES:
+        stamps = scene["ts"] if isinstance(scene["ts"], list) else [scene["ts"]]
+        for ts in stamps:
+            stamp = pd.Timestamp(ts)
+            out.append((f"{scene['title']} — {stamp:%d.%m.%Y %H:%M}", stamp, scene["point"]))
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def load_cetane() -> pd.Series:
+    return lims_series("Гидроочистка|2|CetaneNumber").sort_index()
+
+
+def trace_block(rec) -> None:
+    """Цикл решения по шагам: какой агент что вернул и какое правило сработало."""
+    st.subheader("Цикл решения: кто что сказал")
+    for number, step in enumerate(rec.trace, start=1):
+        left, right = st.columns([1, 4])
+        left.markdown(f"**{number}. {step.agent}**")
+        right.markdown(step.summary)
+        if step.details:
+            with right.expander("подробности"):
+                st.json(step.details, expanded=False)
+
+
 def main() -> None:
     cfg, sb, system = load_system()
     limit = cfg["spec"]["product_sulfur_mgkg"]["max"]
@@ -100,20 +136,23 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Момент времени")
-        windows = cfg["demo_windows"]
-        titles = {
-            "stable": "устойчивый режим",
-            "quality_risk": "риск по качеству",
-            "bad_data_frozen_pak": "завис поточный анализатор",
-            "bad_data_lims_outlier": "выброс в лаборатории",
-        }
-        choice = st.selectbox("Демо-сценарий", list(windows),
-                              format_func=lambda k: f"{titles.get(k, k)}")
-        lo, hi = pd.Timestamp(windows[choice][0]), pd.Timestamp(windows[choice][1])
-        ts = st.slider("Время", min_value=lo.to_pydatetime(), max_value=hi.to_pydatetime(),
-                       value=lo.to_pydatetime(), step=pd.Timedelta(hours=6).to_pytimedelta(),
-                       format="DD.MM.YYYY HH:mm")
+        mode = st.radio("Что смотреть", ["Сцены защиты", "Любой момент"])
+        point = None
+        if mode == "Сцены защиты":
+            scenes = scene_moments()
+            index = st.selectbox("Сцена", range(len(scenes)),
+                                 format_func=lambda i: scenes[i][0])
+            _, ts, point = scenes[index]
+        else:
+            day = st.date_input("Дата", value=pd.Timestamp("2026-02-18").date(),
+                                min_value=sb.ht.index[0].date(),
+                                max_value=sb.ht.index[-1].date())
+            hour = st.slider("Час", 0, 23, 0)
+            ts = pd.Timestamp(day) + pd.Timedelta(hours=hour)
         st.caption("Данные и модель кэшируются, пересчёт занимает доли секунды.")
+
+    if point:
+        st.info(f"**Что показывает сцена.** {point}")
 
     state = sb.build(pd.Timestamp(ts))
     # Лимит частоты воздействий — состояние оркестратора, и осмыслен он только в
@@ -126,7 +165,7 @@ def main() -> None:
     r = system.reliability.assess(state)
 
     # ---------- строка состояния -------------------------------------- #
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     pak = state.quality.get("pak_sulfur_ppm")
     lims = state.quality.get("lims_sulfur_mgkg")
     c1.metric("ПАК, мг/кг", f"{pak.value:.2f}" if pak and pak.value else "—",
@@ -140,6 +179,24 @@ def main() -> None:
               f"риск {q.spec_risk.get('product_sulfur_mgkg', 0):.0%}" if q.spec_risk else None,
               delta_color="inverse")
     c4.metric("Тяжесть режима", f"{r.severity_index:.2f}", r.risk_class, delta_color="off")
+    # Т95 и цетановое число — второй и третий обязательные показатели. Без них в
+    # строке состояния оператор видел одну серу и не знал, что другой показатель
+    # уже за пределом.
+    t95 = q.predictions.get("product_t95_c")
+    t95_limit = cfg["spec"]["t95_c"]["max"]
+    c5.metric("Т95 по анализу, °C", "—" if t95 is None else f"{t95:.1f}",
+              None if t95 is None else (f"выше {t95_limit:.0f}" if t95 > t95_limit
+                                        else f"предел {t95_limit:.0f}"),
+              delta_color="inverse" if t95 is not None and t95 > t95_limit else "off")
+    cetane = load_cetane().loc[:pd.Timestamp(ts)]
+    cetane_min = cfg["spec"].get("cetane_number", {}).get("min", 51.0)
+    if len(cetane):
+        value, when = float(cetane.iloc[-1]), cetane.index[-1]
+        c6.metric("Цетановое число", f"{value:.1f}",
+                  f"норматив ≥ {cetane_min:g}, анализ {when:%d.%m}",
+                  delta_color="inverse" if value < cetane_min else "off")
+    else:
+        c6.metric("Цетановое число", "—")
 
     # ---------- рекомендация ------------------------------------------ #
     st.subheader("Рекомендация оператору")
@@ -156,20 +213,27 @@ def main() -> None:
         with left:
             st.markdown("**Действие**")
             if moves:
+                # точность — та, при которой ход виден: давление двигается на
+                # тысячные МПа, и при двух знаках «Δ 0» читалось как «не трогать»
+                def digits(delta: float) -> int:
+                    return 3 if abs(delta) < 0.01 else 2
                 st.dataframe(pd.DataFrame([
-                    {"тег": t, "сейчас": round(rec.action.moves[t] - d, 2),
-                     "рекомендуется": round(rec.action.moves[t], 2), "Δ": round(d, 2)}
+                    {"тег": t, "сейчас": f"{rec.action.moves[t] - d:.{digits(d)}f}",
+                     "рекомендуется": f"{rec.action.moves[t]:.{digits(d)}f}",
+                     "Δ": f"{d:+.{digits(d)}f}"}
                     for t, d in moves.items()]), hide_index=True, use_container_width=True)
             else:
                 st.write("Изменение уставок не требуется.")
             st.markdown("**Ожидаемый эффект**")
-            st.json(rec.expected_effect, expanded=True)
+            st.write(effect_text(rec.expected_effect))
         with right:
             st.markdown("**Проверенные ограничения**")
             for item in rec.checked_constraints:
                 st.markdown(f"- {item}")
             st.markdown(f"**Уверенность:** {rec.confidence:.2f}")
             st.markdown(f"**Почему:** {rec.explanation}")
+
+    trace_block(rec)
 
     # ---------- данные и достоверность --------------------------------- #
     st.subheader("Качество продукта и достоверность данных")
