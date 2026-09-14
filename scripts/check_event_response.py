@@ -89,7 +89,15 @@ def main() -> int:
     all_lab = StateBuilder(cfg).lims_sulfur
 
     result = {}
-    for run in (sys.argv[1:] or DEFAULT_RUNS):
+    # --out <файл>: отчёт по другим прогонам (например, подбору на валидации) не
+    # должен затирать рабочий event_response.json — так однажды и случилось
+    args = sys.argv[1:]
+    report_path = REPORT
+    if "--out" in args:
+        at = args.index("--out")
+        report_path = ROOT / args[at + 1]
+        args = args[:at] + args[at + 2:]
+    for run in (args or DEFAULT_RUNS):
         path = ROOT / run
         if not path.exists():
             print(f"[пропуск] нет {run}")
@@ -133,11 +141,11 @@ def main() -> int:
                   f"{f'{ci[0]:+.0%}…{ci[1]:+.0%}':>16s} {auc:>14.3f}")
         result[path.name] = block
 
-    REPORT.write_text(json.dumps({**report_provenance(cfg), "предел": limit,
-                                  "бутстрэп": {"блок": "неделя", "выборок": BOOTSTRAP},
-                                  "прогоны": result}, ensure_ascii=False, indent=2),
-                      encoding="utf-8")
-    print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")
+    report_path.write_text(json.dumps({**report_provenance(cfg), "предел": limit,
+                                       "бутстрэп": {"блок": "неделя", "выборок": BOOTSTRAP},
+                                       "прогоны": result}, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+    print(f"\nОтчёт: {report_path.relative_to(ROOT)}")
     return 0
 
 
