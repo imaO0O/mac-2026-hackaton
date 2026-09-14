@@ -628,3 +628,64 @@ def feed_normalized_wabt(wabt: pd.Series, feed: pd.Series, feed_reference: float
                                                  - np.log(feed_reference))
     inverse = 1.0 / (wabt + 273.15) + shift
     return 1.0 / inverse.where(inverse > 0) - 273.15
+
+
+# --------------------------------------------------------------------------- #
+# ряды для агента надёжности
+# --------------------------------------------------------------------------- #
+
+def hours_since_marks(index: pd.DatetimeIndex, marks) -> pd.Series:
+    """Часы с последней отметки (замены катализатора) на момент каждого отсчёта.
+
+    До первой отметки — часы от начала данных: катализатор в первом цикле уже
+    какого-то возраста, и какого, неизвестно — ровно так же считает и прежний
+    вариант по остановам.
+    """
+    stamps = sorted(pd.Timestamp(m) for m in marks)
+    last = pd.Series(pd.NaT, index=index, dtype="datetime64[ns]")
+    for stamp in stamps:
+        last[index >= stamp] = stamp
+    since = (index.to_series() - last).dt.total_seconds() / 3600
+    start = (index.to_series() - index[0]).dt.total_seconds() / 3600
+    return since.fillna(start)
+
+
+def activity_level_series(ht: pd.DataFrame, raw_feed: pd.Series,
+                          train: tuple[str, str], window_days: int = 30,
+                          min_days: int = 7) -> pd.Series | None:
+    """Износ катализатора для severity: уровень WABT, приведённой к нагрузке.
+
+    Медиана за ``window_days`` суток по ПРОШЛОМУ, нормированная на p05…p95
+    обучающего периода — той же шкалой, что остальные факторы тяжести режима.
+
+    Почему уровень, а не дрейф от начала цикла: дрейф требует даты начала, то есть
+    той самой даты сброса, в которой и была ошибка. Уровень её не требует — после
+    замены катализатора оператор держит ту же серу холоднее, и уровень падает сам,
+    а после ремонта без замены — нет.
+
+    Причинность соблюдена везде: маска останова причинная, часовые значения
+    помечены правой границей часа, скользящая медиана кончается в текущем часе.
+    """
+    temps = [t for t in REACTOR_TEMPS if t in ht.columns]
+    if not temps or FEED not in ht.columns:
+        return None
+    feed = ht[FEED]
+    reference = float(feed.loc[train[0]:train[1]].median())
+    if not reference > 0:
+        return None
+    down = outage_mask(raw_feed.reindex(ht.index), min_outage_hours=6.0, train_bounds=train)
+    # Малый расход на пуске и в провалах нагрузки делает логарифм нагрузки
+    # огромным — такие отсчёты не рабочий режим и в уровень не идут.
+    working = ~down & (feed > 0.5 * reference)
+    wabt = ht[temps].mean(axis=1).where(working)
+    level = feed_normalized_wabt(wabt, feed.where(working), reference)
+    hourly = level.resample("1h", label="right", closed="right").mean()
+    smooth = hourly.rolling(f"{window_days}D", min_periods=min_days * 24).median()
+    train_part = smooth.loc[train[0]:train[1]].dropna()
+    if len(train_part) < 100:
+        return None
+    low, high = train_part.quantile([0.05, 0.95])
+    if not high > low:
+        return None
+    factor = ((smooth - low) / (high - low)).clip(0.0, 1.5)
+    return factor.reindex(ht.index, method="ffill")

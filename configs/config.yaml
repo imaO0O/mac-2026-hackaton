@@ -286,6 +286,25 @@ limits:
   repeat_min_risk_increase: null
   assumption_note: "Промышленные уставки не выданы; исторический min/max не выдаётся за предел."
 
+reliability:
+  # Как агент надёжности судит об износе катализатора. Прежнее поведение —
+  # age + outage_48h; правило, по которому их включать, записано
+  # в docs/PLAN.md ДО счёта, сравнение — scripts/check_catalyst_factor.py.
+  #
+  # catalyst_factor: age — наработка с последнего сброса, activity — уровень WABT,
+  #   приведённой к нагрузке, за 30 суток (models/catalyst.activity_level_series).
+  #   Включён activity: прошёл правило приёмки, docs/CATALYST_FACTOR.md.
+  catalyst_factor: activity
+  # catalyst_reset: outage_48h — сброс на любом останове дольше 48 ч; catalyst_log —
+  #   только на заменах из catalyst_changes. Из трёх длительных остановов истории
+  #   заменами были два (docs/CATALYST_LIFE.md §1).
+  catalyst_reset: outage_48h
+  # Журнал замен катализатора: пуски после замены. ДОПУЩЕНИЕ: в пакете журнала нет,
+  # даты восстановлены по шагу нормированной температуры через останов
+  # (scripts/check_catalyst_life.py). На установке их знают из журнала ремонтов.
+  catalyst_changes: ["2024-04-17 15:00", "2026-04-23 11:20"]
+  catalyst_changes_assumption: true
+
 controls:
   # Управляемые переменные. Для АВТ — по трём листам схем с кодами тегов (14.09) и
   # справочнику КИП, разбор — docs/AVT_SCHEMES.md §3. В цикле решений теги АВТ
