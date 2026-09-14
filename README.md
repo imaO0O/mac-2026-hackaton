@@ -67,8 +67,10 @@ python scripts/demo.py                      # семь сцен защиты, ~3
 Дашборд оператора — `streamlit run app/dashboard.py`: сцены защиты и путь решения
 по агентам. Проверка — `pytest -q`; на машине без выданных данных —
 `NEFTE_NO_DATA=1 pytest -q` (так тесты идут в GitHub Actions). Пересобрать все
-отчёты одной командой — `bash scripts/reproduce_all.sh`. Остальные команды —
-`docs/FINDINGS.md`.
+отчёты одной командой — `bash scripts/reproduce_all.sh`. Для интеграции с системой
+сбора данных цикл решения поднимается локальным HTTP-сервисом без внешних
+зависимостей — `python -m nefte.service` (`GET /health`, `GET /decide?ts=…`,
+`POST /decide` со срезом `ProcessState`). Остальные команды — `docs/FINDINGS.md`.
 
 ## Что получилось — по критериям ТЗ
 
