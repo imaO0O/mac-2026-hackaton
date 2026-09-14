@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.agents.orchestrator import Orchestrator  # noqa: E402
-from nefte.provenance import report_provenance  # noqa: E402
+from nefte.provenance import reliability_provenance, report_provenance  # noqa: E402
 from nefte.agents.schemas import Candidate, ReliabilityAssessment  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
@@ -68,6 +68,12 @@ class RuleOptimizer:
         self.surrogate = real.surrogate
         self.bounds = real.bounds
         self._hold: Candidate | None = None
+
+    # Трасса цикла решения (orchestrator._trace) спрашивает у оптимизатора счёт
+    # подбора. У правила подбора нет — так и отвечаем, а не падаем: без этого
+    # сравнение архитектур перестало запускаться, когда появилась трасса.
+    def last_stats(self) -> dict[str, int]:
+        return {}
 
     def propose(self, state, quality, reliability) -> list[Candidate]:
         step = float(self.cfg["limits"]["max_step_per_cycle"]["temperature_c"])
@@ -222,7 +228,7 @@ def main() -> int:
 
     out = ROOT / "reports" / "architectures.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({**report_provenance(),
+    out.write_text(json.dumps({**report_provenance(), **reliability_provenance(),
                                "период": [str(lo), str(hi)], "шаг": args.every,
                                "конфигурации": table}, ensure_ascii=False, indent=2),
                    encoding="utf-8")

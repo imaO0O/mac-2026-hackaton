@@ -14,6 +14,10 @@
       "2026-08-07"
     ]
   },
+  "reliability_settings": {
+    "catalyst_factor": "activity",
+    "catalyst_reset": "outage_48h"
+  },
   "ts": "2026-06-15 12:00:00",
   "cases": [
     {
@@ -64,8 +68,8 @@
       "источник качества": "lims",
       "выполнено": true,
       "severity спокойно/скачок": [
-        0.507,
-        0.589
+        0.502,
+        0.583
       ]
     },
     {

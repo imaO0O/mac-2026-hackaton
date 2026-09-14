@@ -14,6 +14,10 @@
       "2026-08-07"
     ]
   },
+  "reliability_settings": {
+    "catalyst_factor": "activity",
+    "catalyst_reset": "outage_48h"
+  },
   "окно": "quality_risk",
   "шаг": "4h",
   "отклик_на_градус": [
