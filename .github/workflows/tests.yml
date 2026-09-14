@@ -1,0 +1,32 @@
+# Тесты на чистой машине без выданных данных.
+#
+# Данные хакатона в репозитории не хранятся, поэтому тесты, которым нужен файл из
+# выдачи, в режиме NEFTE_NO_DATA отмечаются пропущенными с именем файла
+# (tests/conftest.py). Всё остальное — контракты агентов, отказы, трасса решения,
+# работа без сети, сверка документации с закоммиченными отчётами — проверяется.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      NEFTE_NO_DATA: "1"
+      NEFTE_DATA_DIR: ${{ github.workspace }}/.no-data
+      NEFTE_SOURCE_DIR: ${{ github.workspace }}/.no-data
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Зависимости
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+      - name: Тесты
+        run: pytest -q

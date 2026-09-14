@@ -423,13 +423,26 @@ def test_banned_tags_do_not_enter_through_vak_formulas():
 # 15. решения об отборе признаков — только по обучающему периоду
 # --------------------------------------------------------------------------- #
 
-def test_negative_share_is_measured_on_train_only():
+def _flow_dictionary(monkeypatch) -> None:
+    """Справочник, в котором F7 — расход: детектор знака решает по описанию КИП.
+
+    Без подстановки тест зависел от выданного справочника и на машине без данных
+    проверял не правило, а отсутствие файла.
+    """
+    frame = pd.DataFrame({"unit": ["avt", "avt"], "code": ["F7", "T1"],
+                          "description": ["Расход обессоленной нефти", "Температура верха К1"]})
+    monkeypatch.setattr("nefte.data.validity.load_tag_dictionary", lambda: frame)
+
+
+def test_negative_share_is_measured_on_train_only(monkeypatch):
     """Было: доля отрицательных считалась по всей истории вместе с тестом.
 
     Это такое же выведенное из данных правило, как нормировка severity, и
     выводить его по будущему нельзя.
     """
     from nefte.data.validity import SignalValidity
+
+    _flow_dictionary(monkeypatch)
 
     idx = pd.date_range("2024-01-01", periods=400, freq="1h", name="date")
     values = np.r_[np.full(200, 5.0), np.full(200, -5.0)]      # брак только «после»
@@ -542,7 +555,7 @@ def test_kinetic_effect_is_declared_as_physics_not_measurement():
 # 19. модель и оператор видят ОДНИ И ТЕ ЖЕ данные
 # --------------------------------------------------------------------------- #
 
-def test_training_and_serving_clean_data_the_same_way():
+def test_training_and_serving_clean_data_the_same_way(monkeypatch):
     """Было: два пути очистки. Модель училась на одних данных, оператор видел другие.
 
     В обучающем пути отрицательные расходы не маскировались, а вердикты по тегам
@@ -552,6 +565,7 @@ def test_training_and_serving_clean_data_the_same_way():
     import nefte.models.dataset as dataset
     from nefte.data.validity import SignalValidity
 
+    _flow_dictionary(monkeypatch)
     idx = pd.date_range("2024-01-01", periods=300, freq="10min", name="date")
     raw = pd.DataFrame({"F7": np.r_[np.full(150, 5.0), np.full(150, -5.0)],
                         "T1": np.linspace(300, 320, 300)}, index=idx)

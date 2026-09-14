@@ -64,8 +64,11 @@ python scripts/train_quality.py --horizon 0 # модель качества, CPU
 python scripts/demo.py                      # семь сцен защиты, ~3 минуты
 ```
 
-Дашборд оператора — `streamlit run app/dashboard.py`. Проверка — `pytest -q`.
-Все остальные команды — `docs/FINDINGS.md`.
+Дашборд оператора — `streamlit run app/dashboard.py`: сцены защиты и путь решения
+по агентам. Проверка — `pytest -q`; на машине без выданных данных —
+`NEFTE_NO_DATA=1 pytest -q` (так тесты идут в GitHub Actions). Пересобрать все
+отчёты одной командой — `bash scripts/reproduce_all.sh`. Остальные команды —
+`docs/FINDINGS.md`.
 
 ## Что получилось — по критериям ТЗ
 
