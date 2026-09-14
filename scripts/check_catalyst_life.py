@@ -51,6 +51,8 @@ from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
 from nefte.data.loaders import lims_series, load_telemetry  # noqa: E402
 from nefte.models.catalyst import (  # noqa: E402
+    CHECKPOINT_LEVEL_MARGIN_C,
+    CHECKPOINT_MAX_RATE_C_PER_MONTH,
     DAYS_IN_MONTH,
     REFERENCE_SULFUR_MGKG,
     Cycle,
@@ -180,8 +182,10 @@ def checkpoint_block(fit, reference, checkpoint_day: int, today: pd.Timestamp) -
             print(f"    а на сутках 60…{checkpoint_day} шёл со скоростью "
                   f"{pace:+.2f} °C/мес — то есть уже вышел на полку.")
         print(f"    Если на {checkpoint_day}-е сутки NWABT окажется выше "
-              f"{target['уровень, °C'] + 5:.0f} °C или скорость на этом же участке")
-        print("    останется выше +1 °C/мес, оценку ресурса надо пересматривать вниз.")
+              f"{target['уровень, °C'] + CHECKPOINT_LEVEL_MARGIN_C:.0f} °C "
+              "или скорость на этом же участке")
+        print(f"    останется выше {CHECKPOINT_MAX_RATE_C_PER_MONTH:+.0f} °C/мес, "
+              "оценку ресурса надо пересматривать вниз.")
 
     if reached:
         ours = level_at_runday(fit.frame, current.index, checkpoint_day)
