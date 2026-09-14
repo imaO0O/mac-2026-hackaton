@@ -202,16 +202,26 @@ class ClosedLoopSimulator:
         current = getattr(optimizer, "surrogate", None)
         if current is None:
             return feedback
-        if getattr(current, "kind", None) == "kinetic" and hasattr(current, "order"):
-            base = current.base_surrogate
-            optimizer.surrogate = make_kinetic_surrogate(
+        optimizer.surrogate = self._with_feedback(current, feedback)
+        # пессимистичная кинетика оптимизатора обязана видеть тот же сдвиг, иначе
+        # гарантия проверялась бы по уровню, которого система уже не наблюдает
+        robust = getattr(optimizer, "robust_surrogate", None)
+        if robust is not None:
+            optimizer.robust_surrogate = self._with_feedback(robust, feedback)
+        return feedback
+
+    @staticmethod
+    def _with_feedback(fn, feedback: "FeedbackModel"):
+        """Тот же суррогат, но поверх модели, видящей последствия действий."""
+        from nefte.models.kinetics import make_kinetic_surrogate
+
+        if getattr(fn, "kind", None) == "kinetic" and hasattr(fn, "order"):
+            base = fn.base_surrogate
+            return make_kinetic_surrogate(
                 feedback,
                 base_surrogate=None if base is None else _shifted_surrogate(base, feedback),
-                strength=current.strength, tag_prefix=current.tag_prefix,
-                order=current.order)
-        else:
-            optimizer.surrogate = _shifted_surrogate(current, feedback)
-        return feedback
+                strength=fn.strength, tag_prefix=fn.tag_prefix, order=fn.order)
+        return _shifted_surrogate(fn, feedback)
 
     # ------------------------------------------------------------------ #
     def _apply_offsets(self, state: ProcessState) -> ProcessState:

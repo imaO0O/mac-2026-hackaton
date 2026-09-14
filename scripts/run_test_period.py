@@ -161,12 +161,17 @@ def main() -> int:
                     help="какой период проходить; подбирать что-либо можно только на val")
     ap.add_argument("--lockout-hours", type=float, default=None,
                     help="переопределить limits.min_hours_between_actions")
+    ap.add_argument("--robust-order", type=float, default=None,
+                    help="включить робастную гарантию с кинетикой этого порядка")
     args = ap.parse_args()
 
     cfg = load_config()
     if args.lockout_hours is not None:
         cfg = {**cfg, "limits": {**cfg["limits"],
                                  "min_hours_between_actions": float(args.lockout_hours)}}
+    if args.robust_order is not None:
+        cfg = {**cfg, "optimization": {**cfg["optimization"],
+                                       "robust_kinetic_order": float(args.robust_order)}}
     limit_mgkg = cfg["spec"]["product_sulfur_mgkg"]["max"]
     lo, hi = cfg["split"][args.split]
 
@@ -318,6 +323,8 @@ def main() -> int:
     # служат подбору и не должны подменять рабочий прогон по тесту
     if args.lockout_hours is not None:
         tag = "_".join(x for x in (tag, f"lock{args.lockout_hours:g}") if x)
+    if args.robust_order is not None:
+        tag = "_".join(x for x in (tag, f"robust{args.robust_order:g}") if x)
     stem = "test_period" if args.split == "test" else "val_period"
     report_path = (REPORT.with_name(f"{stem}.json") if not tag
                    else REPORT.with_name(f"{stem}_{tag}.json"))

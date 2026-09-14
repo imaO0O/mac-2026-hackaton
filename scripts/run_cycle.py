@@ -203,8 +203,12 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
               "(запустите scripts/train_quality.py)")
         surrogate = linear_surrogate(SENSITIVITIES)
 
+    robust_order = (cfg.get("optimization") or {}).get("robust_kinetic_order")
+    robust = (make_kinetic_surrogate(model, base_surrogate=make_model_surrogate(model),
+                                     order=float(robust_order))
+              if model is not None and robust_order else None)
     optimizer = OptimizerAgent(bounds=bounds, surrogate=surrogate, cfg=cfg,
-                               reliability_agent=reliability)
+                               reliability_agent=reliability, robust_surrogate=robust)
 
     # ЛИМС читается один раз: компоненты смешения собираются на каждом такте,
     # перечитывать книгу на каждый момент времени незачем

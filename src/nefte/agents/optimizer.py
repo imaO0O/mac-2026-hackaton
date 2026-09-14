@@ -264,13 +264,20 @@ class OptimizerAgent:
                  energy_fn: Callable[[ProcessState, dict[str, float]], float] | None = None,
                  grid_levels: int = 5,
                  reliability_agent=None,
-                 t95_fn: Callable[[ProcessState, dict[str, float]], float | None] | None = None):
+                 t95_fn: Callable[[ProcessState, dict[str, float]], float | None] | None = None,
+                 robust_surrogate: QualitySurrogate | None = None):
         # Агент надёжности нужен, чтобы пересчитать тяжесть режима под каждый
         # вариант. Необязателен: без него severity берётся текущий, как раньше,
         # и это честно видно по тому, что критерий перестаёт различать варианты.
         self.reliability_agent = reliability_agent
         self.bounds = bounds                 # модельные диапазоны (допущение!)
         self.surrogate = surrogate
+        # Пессимистичная кинетика для проверки гарантии. Отклик серы на уставки не
+        # измерен, а принят: первый порядок даёт −22 % на градус при литературных
+        # 5–10 %. С этим суррогатом «гарантированный запас» у варианта есть, только
+        # если он держится и при втрое более слабом отклике. Бездействие не
+        # затрагивается: без хода обе оценки совпадают. None — проверки нет.
+        self.robust_surrogate = robust_surrogate
         self.cfg = cfg or load_config()
         self.throughput_fn = throughput_fn or default_throughput()
         self.energy_fn = energy_fn or default_energy_proxy()
@@ -457,6 +464,11 @@ class OptimizerAgent:
                 violations.append("нет прогноза качества")
             else:
                 guaranteed = sulfur + margin <= limit
+                if guaranteed and self.robust_surrogate is not None and c.id != "hold":
+                    weak = self.robust_surrogate(state, c.moves).get("product_sulfur_mgkg")
+                    if weak is not None and weak == weak:
+                        pred["product_sulfur_mgkg_weak_kinetics"] = float(weak)
+                        guaranteed = float(weak) + margin <= limit
                 improving = hold_pred is not None and sulfur < hold_pred - 1e-9
                 if not guaranteed and not improving:
                     violations.append(
