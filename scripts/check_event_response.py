@@ -86,9 +86,7 @@ def main() -> int:
     use_utf8_console()
     cfg = load_config()
     limit = float(cfg["spec"]["product_sulfur_mgkg"]["max"])
-    lo_test, hi_test = cfg["split"]["test"]
-    lab = StateBuilder(cfg).lims_sulfur.loc[lo_test:hi_test]
-    print(f"проб серы в тесте: {len(lab)}, из них с превышением {int((lab > limit).sum())}")
+    all_lab = StateBuilder(cfg).lims_sulfur
 
     result = {}
     for run in (sys.argv[1:] or DEFAULT_RUNS):
@@ -97,6 +95,11 @@ def main() -> int:
             print(f"[пропуск] нет {run}")
             continue
         data = json.loads(path.read_text(encoding="utf-8"))
+        # пробы — из периода САМОГО прогона: прогоны бывают и по валидации
+        period_lo, period_hi = data["summary"].get("период", cfg["split"]["test"])
+        lab = all_lab.loc[str(period_lo):str(period_hi)]
+        print(f"\n{path.name}: проб серы в периоде {len(lab)}, "
+              f"из них с превышением {int((lab > limit).sum())}")
         rows = pd.DataFrame(data["rows"])
         rows["ts"] = pd.to_datetime(rows["ts"])
         rows = rows.set_index("ts").sort_index()

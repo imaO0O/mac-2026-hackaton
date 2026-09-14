@@ -2,6 +2,12 @@
 
     python scripts/run_test_period.py                 # шаг 12 часов
     python scripts/run_test_period.py --every 6h
+    python scripts/run_test_period.py --split val --every 1h --lockout-hours 8
+
+Второй вариант нужен для подбора того, что подбирать на тесте нельзя: прогон по
+валидационному периоду пишет отчёт с префиксом `val_`, а переопределённый запрет
+частых воздействий — с суффиксом `lock<часы>`, так что рабочие отчёты не
+затираются.
 
 Тестовый период (`configs/config.yaml → split.test`) при разработке не трогали:
 модель обучена на train, пороги подобраны на val. Здесь система проходит его
@@ -151,11 +157,18 @@ def main() -> int:
                          "без него берётся основная конфигурация по валидации")
     ap.add_argument("--tag", default="", help="суффикс имени отчёта, чтобы прогоны "
                                               "разных конфигураций не затирали друг друга")
+    ap.add_argument("--split", choices=("test", "val"), default="test",
+                    help="какой период проходить; подбирать что-либо можно только на val")
+    ap.add_argument("--lockout-hours", type=float, default=None,
+                    help="переопределить limits.min_hours_between_actions")
     args = ap.parse_args()
 
     cfg = load_config()
+    if args.lockout_hours is not None:
+        cfg = {**cfg, "limits": {**cfg["limits"],
+                                 "min_hours_between_actions": float(args.lockout_hours)}}
     limit_mgkg = cfg["spec"]["product_sulfur_mgkg"]["max"]
-    lo, hi = cfg["split"]["test"]
+    lo, hi = cfg["split"][args.split]
 
     sb = StateBuilder(cfg)
     system = build_system(sb, cfg, model_kind=args.model, seq_horizon=args.seq_horizon,
@@ -231,6 +244,8 @@ def main() -> int:
 
     summary = {
         "период": [str(lo), str(hi)],
+        "выборка": args.split,
+        "запрет частых воздействий, ч": float(cfg["limits"]["min_hours_between_actions"]),
         "шаг": args.every,
         "модель": args.model,
         "горизонт сети": args.seq_horizon,
@@ -258,7 +273,8 @@ def main() -> int:
         },
     }
 
-    print(f"\nТестовый период {lo} … {hi}, шаг {args.every}, {len(frame)} моментов\n")
+    print(f"\nПериод {args.split} {lo} … {hi}, шаг {args.every}, {len(frame)} моментов, "
+          f"запрет частых воздействий {cfg['limits']['min_hours_between_actions']:g} ч\n")
     print("Исходы:")
     for name, count in sorted(summary["исходы"].items(), key=lambda kv: -kv[1]):
         print(f"  {name:20s} {count:5d}  ({count / len(frame):.0%})")
@@ -298,8 +314,13 @@ def main() -> int:
             seed = re.search(r"_s(\d+)_h", Path(args.seq_path).name)
             if seed:
                 tag = f"{args.model}_s{seed.group(1)}_h{horizon:g}"
-    report_path = (REPORT if not tag
-                   else REPORT.with_name(f"test_period_{tag}.json"))
+    # переопределённый запрет и валидационный период пишутся в свои отчёты: их числа
+    # служат подбору и не должны подменять рабочий прогон по тесту
+    if args.lockout_hours is not None:
+        tag = "_".join(x for x in (tag, f"lock{args.lockout_hours:g}") if x)
+    stem = "test_period" if args.split == "test" else "val_period"
+    report_path = (REPORT.with_name(f"{stem}.json") if not tag
+                   else REPORT.with_name(f"{stem}_{tag}.json"))
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         # Версия матрицы и разбиение — чтобы отчёт попадал под контракт

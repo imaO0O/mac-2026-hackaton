@@ -34,7 +34,7 @@ REPORTS = sorted((ROOT / "reports").glob("*.json"))
 # пропуск в падение: если семейство отчётов зависит от матрицы, оно обязано
 # сказать, на какой матрице снято.
 MUST_CARRY_VERSION = ("quality_metrics_", "sequence_metrics_", "alarm_budget_",
-                      "test_period", "simulation", "calibration_", "drift_",
+                      "test_period", "val_period", "simulation", "calibration_", "drift_",
                       "feature_stability_", "sensitivity_", "objective_weights",
                       "adversarial", "architectures", "severity_robustness",
                       "vak_vs_lims")
