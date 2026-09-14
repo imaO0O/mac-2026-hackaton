@@ -280,6 +280,10 @@ limits:
   # добавился шаг с превышением серы. Числа — scripts/check_return_to_base.py,
   # разбор — docs/OPTIMIZER_AGENT.md. Включение — осознанное решение, не умолчание.
   return_to_base: false
+  # Повтор действия, пока прошлое ещё проявляется (в пределах return_settle_hours),
+  # разрешён только при росте риска не меньше этой величины; null — правила нет.
+  # Правило приёмки — docs/PLAN.md, подбор на валидационном периоде.
+  repeat_min_risk_increase: null
   assumption_note: "Промышленные уставки не выданы; исторический min/max не выдаётся за предел."
 
 controls:

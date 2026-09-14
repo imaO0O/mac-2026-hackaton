@@ -163,6 +163,8 @@ def main() -> int:
                     help="переопределить limits.min_hours_between_actions")
     ap.add_argument("--robust-order", type=float, default=None,
                     help="включить робастную гарантию с кинетикой этого порядка")
+    ap.add_argument("--repeat-risk-increase", type=float, default=None,
+                    help="повтор действия до проявления прошлого — только при росте риска")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -172,6 +174,9 @@ def main() -> int:
     if args.robust_order is not None:
         cfg = {**cfg, "optimization": {**cfg["optimization"],
                                        "robust_kinetic_order": float(args.robust_order)}}
+    if args.repeat_risk_increase is not None:
+        cfg = {**cfg, "limits": {**cfg["limits"],
+                                 "repeat_min_risk_increase": float(args.repeat_risk_increase)}}
     limit_mgkg = cfg["spec"]["product_sulfur_mgkg"]["max"]
     lo, hi = cfg["split"][args.split]
 
@@ -325,6 +330,8 @@ def main() -> int:
         tag = "_".join(x for x in (tag, f"lock{args.lockout_hours:g}") if x)
     if args.robust_order is not None:
         tag = "_".join(x for x in (tag, f"robust{args.robust_order:g}") if x)
+    if args.repeat_risk_increase is not None:
+        tag = "_".join(x for x in (tag, f"repeat{args.repeat_risk_increase:g}") if x)
     stem = "test_period" if args.split == "test" else "val_period"
     report_path = (REPORT.with_name(f"{stem}.json") if not tag
                    else REPORT.with_name(f"{stem}_{tag}.json"))

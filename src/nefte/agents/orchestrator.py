@@ -97,6 +97,14 @@ class Orchestrator:
         self.return_settle_hours = float(
             self.cfg["limits"].get("return_settle_hours", 14.0))
         self.return_to_base = bool(self.cfg["limits"].get("return_to_base", False))
+        # Повторное действие, пока прошлое не проявилось. Запрет частых воздействий
+        # режет вмешательства без разбора — на валидации 8 ч сняли 14 пунктов реакции
+        # на превышения. Здесь повтор в пределах return_settle_hours (3τ) разрешён,
+        # только если риск с прошлого действия вырос не меньше чем на порог; None —
+        # правила нет. Проверка — docs/PLAN.md, правило записано до счёта.
+        repeat = self.cfg["limits"].get("repeat_min_risk_increase")
+        self.repeat_min_risk_increase = None if repeat is None else float(repeat)
+        self._last_action_risk: float | None = None
 
     def record_applied(self, moved: dict[str, float]) -> None:
         """Учесть применённые изменения уставок — от них считается возврат к базе."""
@@ -440,6 +448,32 @@ class Orchestrator:
                 rule=(f"риск {risk:.0%} ниже порога {self.act_risk_threshold:.0%}, "
                       "текущий режим допустим — держим"))
 
+        # --- повтор до проявления прошлого воздействия ------------------
+        repeat_hours = self._hours_since(self._last_quality_action_ts, state.ts)
+        if (self.repeat_min_risk_increase is not None and hold is not None
+                and not already_off_spec and self._last_action_risk is not None
+                and repeat_hours is not None and repeat_hours < self.return_settle_hours
+                and risk < self._last_action_risk + self.repeat_min_risk_increase):
+            rec = Recommendation(
+                ts=state.ts, state_summary=state_summary, freshness=freshness,
+                problem=off_spec_now + t95_alert + f"Риск нарушения спецификации: {risk:.0%}",
+                action=hold, confidence=q.confidence,
+                expected_effect=self._effect(hold, hold, r),
+                checked_constraints=self._constraint_log(t95_off_spec),
+                explanation=(
+                    f"Предыдущее воздействие было {repeat_hours:.0f} ч назад, а отклик "
+                    f"качества проявляется почти полностью за {self.return_settle_hours:g} ч. "
+                    f"Риск с тех пор не вырос ({self._last_action_risk:.0%} → {risk:.0%}), "
+                    "поэтому новое вмешательство наложилось бы на незавершённое — ждём. "
+                    "Если риск вырастет или продукт выйдет за спецификацию, система "
+                    "предложит действие."),
+                alternatives=self.optimizer.diverse_alternatives(candidates, 3),
+            )
+            return self._finish(
+                rec, state, q, r, optimized=True,
+                rule=(f"прошлое воздействие {repeat_hours:.0f} ч назад ещё проявляется, "
+                      "риск не вырос — ждём"))
+
         # --- есть риск: рекомендуем действие ----------------------------
         # Действие при риске НИЖЕ порога бывает, когда у бездействия нет
         # гарантированного запаса по сере. На тесте это 10 случаев из 99, и во всех
@@ -473,6 +507,7 @@ class Orchestrator:
         if any(abs(d) > 1e-6 for d in best.deltas.values()):
             self._last_action_ts = state.ts
             self._last_quality_action_ts = state.ts
+            self._last_action_risk = float(risk)
         return self._finish(
             rec, state, q, r, optimized=True,
             rule=(f"риск {risk:.0%} не ниже порога {self.act_risk_threshold:.0%} — "
@@ -481,6 +516,13 @@ class Orchestrator:
                   "у бездействия нет гарантированного запаса — нужна поправка"))
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _hours_since(then, now) -> float | None:
+        if then is None:
+            return None
+        hours = (pd.Timestamp(now) - pd.Timestamp(then)).total_seconds() / 3600
+        return hours if hours >= 0 else None
+
     def _too_soon(self, ts) -> bool:
         if self._last_action_ts is None:
             return False
