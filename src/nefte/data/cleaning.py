@@ -118,8 +118,11 @@ def clean_telemetry(df: pd.DataFrame, unit: str = "avt",
     drop_dead : выбросить теги из ``telemetry.dead_tags`` (например ``D10``).
     mask_frozen : занулить «полки» длиннее ``telemetry.frozen_min_samples``.
     nonnegative : теги, где отрицательное значение физически невозможно.
-        Для АВТ буква имени соответствует смыслу (F — расход), для 24-2000 —
-        НЕ соответствует, поэтому список нужно задавать явно.
+        Задаётся явно, а не по букве F. Буква тут ни при чём — она совпадает с
+        величиной и на АВТ, и у проверенных тегов 24-2000 (ошибались описания
+        ``T11``/``F19``, а не буквы), — но из «это расход» не следует «это
+        неотрицательно»: ``F5`` расход и по букве, и по описанию, а значения в
+        основном отрицательные.
     """
     cfg = load_config()["telemetry"]
     rep = CleaningReport(n_rows=len(df))
@@ -170,17 +173,3 @@ def clean_lims_sulfur(series: pd.Series, max_plausible: float | None = None) -> 
 def clean_lims_distillation(series: pd.Series) -> pd.Series:
     """Нули в температурах разгонки — это пропуск, а не 0 °C."""
     return series[series > 0]
-
-
-def data_quality_flags(snapshot: pd.Series, frozen: dict[str, bool] | None = None) -> dict:
-    """Сводка достоверности для одного среза — уходит в рекомендацию оператору."""
-    n = len(snapshot)
-    n_nan = int(snapshot.isna().sum())
-    frozen = frozen or {}
-    return {
-        "n_tags": n,
-        "n_missing": n_nan,
-        "missing_share": round(n_nan / n, 3) if n else 1.0,
-        "frozen_tags": sorted(k for k, v in frozen.items() if v),
-        "usable": n_nan / n < 0.2 if n else False,
-    }
