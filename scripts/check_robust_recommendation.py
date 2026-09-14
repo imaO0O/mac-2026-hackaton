@@ -48,20 +48,31 @@ ORDERS = (1.0, 1.5, 2.0)
 EVENT_WINDOW = (-2, 4)
 
 
-def step_share_movement(steps, cfg) -> float:
-    """Суммарный ход уставок в долях разрешённого шага — единая шкала для тегов."""
+def step_share_movement(steps, cfg, sb) -> float:
+    """Суммарный ход уставок в долях разрешённого шага — единая шкала для тегов.
+
+    Шаг расхода задан долей от ТЕКУЩЕГО значения, поэтому база — расход в срезе на
+    этот момент. В первой версии база бралась из накопленного сдвига, и каждый
+    ход расхода засчитывался как 1/flow_rel шагов: мера давала сотни «шагов» и
+    ничего не значила.
+    """
     limits = cfg["limits"]["max_step_per_cycle"]
     total = 0.0
     for step in steps:
+        if not step.moved:
+            continue
+        state = None
         for tag, delta in step.moved.items():
             if tag.startswith("T"):
                 total += abs(delta) / float(limits["temperature_c"])
             elif tag.startswith("P"):
                 total += abs(delta) / float(limits["pressure_mpa"])
             else:
-                base = abs(step.offsets.get(tag, 0.0) - delta) or 1.0
-                total += abs(delta) / max(base * float(limits["flow_rel"]), 1e-6)
-    return round(total, 2)
+                state = state or sb.build(step.ts)
+                now = state.telemetry_ht.get(tag, state.telemetry_avt.get(tag))
+                if now:
+                    total += abs(delta) / (abs(float(now)) * float(limits["flow_rel"]))
+    return round(total, 3)
 
 
 def closed_loop(sb, cfg, robust: float | None, process_order: float, stamps) -> dict:
@@ -82,7 +93,7 @@ def closed_loop(sb, cfg, robust: float | None, process_order: float, stamps) -> 
             "выше предела с нами, шагов": paired.get("выше предела с нами, шагов"),
             "выше предела без нас, шагов": paired.get("выше предела без нас, шагов"),
             "сера с нами": paired.get("среднее с нами"),
-            "ход уставок, долей шага": step_share_movement(steps, cfg),
+            "ход уставок, долей шага": step_share_movement(steps, cfg, sb),
             "ход температур, °C": round(float(temps), 2),
             "вклад в Т95, °C": (rep.get("Т95_наш_вклад") or {}).get("средний сдвиг")}
 

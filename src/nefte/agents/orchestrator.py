@@ -610,9 +610,23 @@ class Orchestrator:
         )
         # конфликт целей: качество тянет вверх по температуре, надёжность — вниз
         if not best.guaranteed:
-            text += (" ВНИМАНИЕ: запас по неопределённости не гарантирован — вариант "
-                     "снижает серу относительно бездействия, но остаётся близко к пределу. "
-                     "Нужен контрольный лабораторный анализ.")
+            sulfur = best.predicted_quality.get("product_sulfur_mgkg")
+            weak = best.predicted_quality.get("product_sulfur_mgkg_weak_kinetics")
+            margin = float(getattr(self.optimizer, "_required_margin", 0.0))
+            limit = float(self.cfg["spec"]["product_sulfur_mgkg"]["max"])
+            if (weak is not None and sulfur is not None
+                    and sulfur + margin <= limit < weak + margin):
+                # Запас есть при принятой кинетике и пропадает при слабой: причина не
+                # «близко к пределу», а неизмеренная сила отклика — назвать её прямо.
+                text += (f" ВНИМАНИЕ: запас по сере держится при принятой кинетике "
+                         f"({sulfur:.2f} + {margin:.2f} мг/кг), но не при втрое более "
+                         f"слабом отклике ({weak:.2f} + {margin:.2f} при пределе {limit:g}). "
+                         "Отклик на режим не измерен, поэтому гарантии нет: нужен "
+                         "контрольный лабораторный анализ, и может понадобиться ещё шаг.")
+            else:
+                text += (" ВНИМАНИЕ: запас по неопределённости не гарантирован — вариант "
+                         "снижает серу относительно бездействия, но остаётся близко к "
+                         "пределу. Нужен контрольный лабораторный анализ.")
         if r.constraints:
             limited = ", ".join(sorted(r.constraints))
             text += (f" Агент надёжности ограничил {limited}, поэтому вариант выбран "

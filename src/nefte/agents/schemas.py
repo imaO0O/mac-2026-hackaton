@@ -99,6 +99,11 @@ class Candidate(BaseModel):
     # True — прогноз укладывается в предел С ЗАПАСОМ на неопределённость;
     # False — вариант лишь улучшает качество относительно бездействия, гарантии нет
     guaranteed: bool = True
+    # Запас держится при ПРИНЯТОЙ кинетике, но не обязательно при пессимистичной
+    # (optimization.robust_kinetic_order). Без робастной проверки совпадает с
+    # guaranteed. Нужен ранжированию: когда при слабом отклике запаса нет ни у кого,
+    # вариант с запасом хотя бы при принятой кинетике лучше просто улучшающего.
+    guaranteed_nominal: bool = True
     violations: list[str] = []
     score: float | None = None
     pareto_rank: int | None = None

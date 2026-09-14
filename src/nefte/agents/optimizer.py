@@ -448,6 +448,7 @@ class OptimizerAgent:
             sulfur = pred.get("product_sulfur_mgkg")
             violations = []
             guaranteed = False
+            c.guaranteed_nominal = False
 
             # Второй обязательный показатель. Проверяем ДО ранжирования: вариант,
             # который чинит серу ценой Т95, недопустим, а не «чуть хуже по баллам».
@@ -464,6 +465,7 @@ class OptimizerAgent:
                 violations.append("нет прогноза качества")
             else:
                 guaranteed = sulfur + margin <= limit
+                c.guaranteed_nominal = bool(guaranteed)
                 if guaranteed and self.robust_surrogate is not None and c.id != "hold":
                     weak = self.robust_surrogate(state, c.moves).get("product_sulfur_mgkg")
                     if weak is not None and weak == weak:
@@ -599,8 +601,11 @@ class OptimizerAgent:
                          & np.any(grid > grid[i], axis=1))
             c.pareto_rank = int(dominated.sum())
 
-        return sorted(feas, key=lambda c: (not c.guaranteed, -(c.score or 0.0),
-                                           c.pareto_rank or 0))
+        # Ступени гарантии: запас при обеих кинетиках → только при принятой → нет.
+        # Без второй ступени при слабом отклике «гарантированных» не оставалось, и
+        # ранжирование брало вариант без запаса даже при принятой кинетике.
+        return sorted(feas, key=lambda c: (not c.guaranteed, not c.guaranteed_nominal,
+                                           -(c.score or 0.0), c.pareto_rank or 0))
 
     # ------------------------------------------------------------------ #
     def last_hold(self) -> Candidate | None:

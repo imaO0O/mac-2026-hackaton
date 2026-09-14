@@ -58,3 +58,22 @@ def test_hold_is_not_touched():
     plain, robust = _evaluate(None), _evaluate(_surrogate(-0.3))
     assert plain["hold"].guaranteed == robust["hold"].guaranteed
     assert "product_sulfur_mgkg_weak_kinetics" not in robust["hold"].predicted_quality
+
+
+def test_nominal_guarantee_ranks_above_plain_improvement():
+    """Когда при слабом отклике запаса нет ни у кого, выше стоит вариант с запасом
+    хотя бы при принятой кинетике — а не просто лучший по свёртке."""
+    from nefte.agents.optimizer import OptimizerAgent
+
+    optimizer = OptimizerAgent(bounds=BOUNDS, surrogate=_surrogate(-1.5),
+                               robust_surrogate=_surrogate(-0.01), t95_fn=lambda s, m: None)
+    state = make_state(lims=(9.0, 1.0), pak=(9.0, 0.1))
+    reliability = ReliabilityAgent(NORMS)
+    r = reliability.assess(state)
+    q = QualityAgent().assess(state)
+    ranked = optimizer.rank(optimizer.evaluate(state, optimizer.generate(state, r), q, r))
+    assert not any(c.guaranteed for c in ranked if c.id != "hold")
+    nominal = [c for c in ranked if c.guaranteed_nominal]
+    assert nominal, "при принятой кинетике запас должен быть хоть у кого-то"
+    first_plain = next((i for i, c in enumerate(ranked) if not c.guaranteed_nominal), len(ranked))
+    assert all(ranked.index(c) < first_plain for c in nominal)
