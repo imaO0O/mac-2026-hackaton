@@ -11,15 +11,36 @@
 #
 # Обучение детерминировано: на тех же данных отчёты совпадают с закоммиченными.
 # После пересборки `pytest -q` сверяет с ними документацию.
+#
+# Пересборка идёт часами, и остановка посередине — выключенная машина — не должна
+# начинать её заново. Каждый успешный шаг оставляет отметку в .reproduce/<ключ>/;
+# повторный запуск такие шаги пропускает. Ключ — версия матрицы признаков и
+# содержимое src/, scripts/, configs/ (закоммиченное плюс незакоммиченные правки):
+# поменяли код или конфиг — отметки не действуют, и всё считается заново. Правки
+# документации ключ не меняют.
+#
+#   REPRODUCE_FRESH=1 bash scripts/reproduce_all.sh   # игнорировать отметки
 set -u
 cd "$(dirname "$0")/.."
 PY=${PY:-.venv/Scripts/python.exe}
 [ -x "$PY" ] || PY=python
 LOG_DIR=${LOG_DIR:-/tmp}
 FAILED=()
+VERSION=$($PY -c 'import sys; sys.path.insert(0, "src"); from nefte.models.dataset import FEATURE_VERSION; print(FEATURE_VERSION)')
+CODE_KEY=$( { git rev-parse HEAD:src HEAD:scripts HEAD:configs; git diff HEAD -- src scripts configs; } | md5sum | cut -c1-12)
+STAMPS=".reproduce/v${VERSION}_${CODE_KEY}"
+mkdir -p "$STAMPS"
+echo "отметки шагов: $STAMPS"
 run () {
+  local stamp="$STAMPS/$(printf '%s' "$*" | md5sum | cut -c1-16)"
+  if [ -z "${REPRODUCE_FRESH:-}" ] && [ -f "$stamp" ]; then
+    echo "########## $(date +%H:%M) уже сделано: $* ##########"
+    return
+  fi
   echo "########## $(date +%H:%M) $* ##########"
-  if ! "$@" > "$LOG_DIR/reproduce_step.log" 2>&1; then
+  if "$@" > "$LOG_DIR/reproduce_step.log" 2>&1; then
+    printf '%s\n' "$*" > "$stamp"
+  else
     FAILED+=("$*"); tail -5 "$LOG_DIR/reproduce_step.log"
   fi
 }
@@ -68,6 +89,8 @@ run $PY scripts/check_drift.py --horizon 0
 run $PY scripts/check_sensitivity.py --horizon 0
 run $PY scripts/check_t95_calibration.py
 run $PY scripts/check_upper_edge_risk.py
+# модель серы против Q21 — второго анализатора серы в телеметрии (ответы 15.09)
+run $PY scripts/check_q21_baseline.py
 run $PY scripts/check_alarm_budget.py --horizon 0
 if $PY -c "import torch" 2>/dev/null; then
   run $PY scripts/check_alarm_budget.py --horizon 2 --model seq --arch tcn --window 48 --pretrain

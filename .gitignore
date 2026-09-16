@@ -33,3 +33,6 @@ reports/runs/*
 .vscode/
 .idea/
 .DS_Store
+
+# отметки пройденных шагов пересборки (scripts/reproduce_all.sh)
+/.reproduce/
