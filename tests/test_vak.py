@@ -116,11 +116,12 @@ def test_all_expected_targets_are_covered():
     usable, skipped = compile_formulas()
     assert len(usable) == 17
     assert skipped == []
-    # шесть от организаторов плюс две наши; AVT6:240-350:CFPP есть в обоих
-    # списках, и наше прочтение перекрывает присланное
-    assert sum(1 for i in usable if i["corrected"]) == 7
+    # девять по ответам организаторов: пять формул 24-2000 и четыре АВТ из
+    # официальной таблицы 15.09; наших прочтений в расчёте после неё не осталось
+    assert sum(1 for i in usable if i["corrected"]) == 9
     by_source = {i["target"]: i["correction_source"] for i in usable if i["corrected"]}
-    assert by_source["AVT6:240-350:CFPP"] == "наше прочтение"
+    assert by_source["AVT6:240-350:CFPP"] == "организаторы"
+    assert set(by_source.values()) == {"организаторы"}
     assert by_source["24-2000:GODT:T95"] == "организаторы"
 
 

@@ -75,8 +75,27 @@ fi
 for h in 0 1 2; do slow $PY scripts/check_feature_stability.py --horizon "$h" --seeds 5; done
 
 # 6. прогоны системы
+# Подбор частоты вмешательств на валидации (два измеренных отказа, docs/PLAN.md) —
+# отдельной дорожкой параллельно: прогоны независимы и детерминированы.
+lane_val () {
+  FAILED=()
+  for h in 4 8 14; do
+    run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --lockout-hours "$h"
+  done
+  for d in 0.05 0.1; do
+    run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --repeat-risk-increase "$d"
+  done
+  if [ ${#FAILED[@]} -gt 0 ]; then printf 'не удалось: %s\n' "${FAILED[@]}"; fi
+}
+LOG_DIR_MAIN=$LOG_DIR
+LOG_DIR="$LOG_DIR/val_lane"; mkdir -p "$LOG_DIR"
+lane_val > "$LOG_DIR_MAIN/reproduce_val_lane.log" 2>&1 &
+VAL_LANE=$!
+LOG_DIR=$LOG_DIR_MAIN
 run $PY scripts/run_test_period.py
 run $PY scripts/run_test_period.py --every 1h --tag step1h
+# робастная гарантия включена по умолчанию; база для её проверки — прогон без неё
+run $PY scripts/run_test_period.py --every 1h --tag step1h --no-robust
 # износ катализатора в severity: было / (б) журнал замен / (в) активность (п. 1 участника 2);
 # настройки — явно, чтобы «было» не зависело от того, что сейчас включено в конфиге
 for split in test val; do
@@ -106,7 +125,17 @@ slow $PY scripts/check_severity_robustness.py
 slow $PY scripts/check_severity_robustness.py --spread 0.2
 
 # 7. сравнения, читающие отчёты прогонов
+wait "$VAL_LANE"
+cat "$LOG_DIR/reproduce_val_lane.log"
+grep -q "не удалось" "$LOG_DIR/reproduce_val_lane.log" && FAILED+=("дорожка валидации")
 run $PY scripts/check_event_response.py
+run $PY scripts/check_event_response.py reports/val_period_step1h_lock4.json \
+  reports/val_period_step1h_lock8.json reports/val_period_step1h_lock14.json \
+  --out reports/lockout_val_event_response.json
+run $PY scripts/check_event_response.py reports/val_period_step1h_lock4.json \
+  reports/val_period_step1h_repeat0.05.json reports/val_period_step1h_repeat0.1.json \
+  --out reports/repeat_val_event_response.json
+run $PY scripts/check_robust_recommendation.py
 run $PY scripts/check_catalyst_factor.py
 run $PY scripts/check_offspec_followup.py
 run $PY scripts/compare_decision_curves.py

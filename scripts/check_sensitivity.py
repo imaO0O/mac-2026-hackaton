@@ -30,9 +30,10 @@ from nefte.models.dataset import build_feature_matrix  # noqa: E402
 from nefte.models.quality_model import SulfurModel  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 
-# Шаги, на которых меряем реакцию: соответствуют limits.max_step_per_cycle.
+# Шаги, на которых меряем реакцию: соответствуют limits.max_step_per_cycle
+# (расходы — 3 % от медианы: квенч F14 ~6 т/ч, свежий ВСГ F25 ~13 600 нм3/ч).
 STEPS = {"T5": 2.0, "T11": 2.0, "T6": 2.0, "P13": 0.05, "F26": -8.0,
-         "F15": 100.0, "P24": 0.05}
+         "F14": 0.2, "F25": 400.0}
 
 
 def measure(model: SulfurModel, matrix: pd.DataFrame, steps: dict[str, float],

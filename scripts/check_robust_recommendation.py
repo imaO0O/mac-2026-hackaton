@@ -1,6 +1,6 @@
 """Робастная гарантия: чего она стоит и что даёт. Только CPU.
 
-    python scripts/run_test_period.py --every 1h --tag step1h --robust-order 2
+    python scripts/run_test_period.py --every 1h --tag step1h --no-robust
     python scripts/check_robust_recommendation.py
 
 Зачем. Отклик серы на уставки в системе принят: кинетика первого порядка даёт
@@ -16,8 +16,10 @@
 4. на тесте (шаг 1 ч) реакция на пробы с превышением в окне −2 … +4 ч не хуже.
 
 Имитация — июнь 2026, шаг 4 ч, процесс отвечает по порядку 1, 1.5 и 2; система —
-с робастной гарантией и без. Прогон по тесту с гарантией делается отдельной
-командой выше (около получаса), без неё — уже есть в reports/test_period_step1h.json.
+с робастной гарантией и без. Гарантия включена по умолчанию, поэтому прогон по тесту
+с ней — reports/test_period_step1h.json, а без неё делается отдельной командой выше
+(около получаса). Пока гарантия была выключена, было наоборот: рабочий прогон — без
+неё, отдельный (`--robust-order 2`) — с ней; скрипт понимает оба положения.
 
 Результат: reports/robust_recommendation.json.
 """
@@ -137,10 +139,16 @@ def main() -> int:
         for name, row in loops[str(order)].items():
             print(f"процесс порядка {order:g}, {name}: {row}", flush=True)
 
+    default = cfg["optimization"].get("robust_kinetic_order")
+    on_by_default = default is not None and float(default) == args.robust_order
+    reports = ROOT / "reports"
     events = {
-        "без гарантии": event_reaction(ROOT / "reports" / "test_period_step1h.json", cfg),
+        "без гарантии": event_reaction(
+            reports / ("test_period_step1h_norobust.json" if on_by_default
+                       else "test_period_step1h.json"), cfg),
         "с гарантией": event_reaction(
-            ROOT / "reports" / f"test_period_step1h_robust{args.robust_order:g}.json", cfg),
+            reports / ("test_period_step1h.json" if on_by_default
+                       else f"test_period_step1h_robust{args.robust_order:g}.json"), cfg),
     }
     print("\nТест, шаг 1 ч, окно −2 … +4 ч:", events)
 

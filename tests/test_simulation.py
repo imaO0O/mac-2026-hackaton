@@ -27,7 +27,7 @@ class _Builder:
             ts=pd.Timestamp(ts).to_pydatetime(),
             telemetry_avt={"T55": 380.0},
             telemetry_ht={"T5": 360.0, "T6": 358.0, "T11": 362.0,
-                          "F26": 250.0, "P13": 3.9, "W10": 2.5},
+                          "F26": 250.0, "P13": 3.9, "P8": 0.18},
             quality={"pak_sulfur_ppm": Measurement(
                 value=self.sulfur, unit="мг/кг", source=Source.PAK, age_hours=0.1)},
             data_quality=DataQuality(missing_share=0.0, usable=True),

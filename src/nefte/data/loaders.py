@@ -15,7 +15,7 @@ import re
 
 import pandas as pd
 
-from nefte.config import cache_dir, data_file, source_file
+from nefte.config import ROOT, cache_dir, data_file, source_file
 
 # --------------------------------------------------------------------------- #
 # телеметрия
@@ -177,17 +177,22 @@ def load_pak(use_cache: bool = True) -> dict[str, pd.Series]:
 # справочники
 # --------------------------------------------------------------------------- #
 
-def load_tag_dictionary(use_cache: bool = True) -> pd.DataFrame:
-    """Расшифровка тегов КИП: ``unit, code, description``.
+def load_tag_dictionary(use_cache: bool = True, source: str = "organizers") -> pd.DataFrame:
+    """Расшифровка тегов КИП: ``unit, code, description`` (+ ``quantity``).
 
-    ВНИМАНИЕ: на установке 24-2000 описания части кодов не отвечают данным. У
-    ``T11`` описание «расход сырья массовый», а по данным это температура (с ``T6``
-    corr 0.994); у ``F19`` описание «давление на входе Р-202», а по данным массовый
-    расход сырья (``F19``/``F26`` = 0.832). Ошибаются тексты описаний, а не буквы.
-    Поэтому ни описанию, ни букве слепо не верим: смысл подтверждается данными —
-    диапазоном, двойниками, знаком отклика (``docs/DATA_NOTES.md`` §2.4). На АВТ
-    описания сходятся со схемами и балансами (``docs/AVT_SCHEMES.md``).
+    ``source="organizers"`` — таблица, присланная организаторами 15.09
+    (``configs/tags_2026-09-15.csv``), по умолчанию. ``source="package"`` — лист
+    «КИП» из выданного пакета: на 24-2000 в нём описания перемешаны со строками —
+    25 из 26 не на своём коде (у ``T11`` «расход сырья массовый», у ``W10`` «перепад
+    давления Р-202», у ``P24`` «расход свежего ВСГ»). Буквы при этом верны, и новая
+    таблица с данными сходится: ``W10``/``F1`` = 0.746 — плотность бензина, ``Q21`` —
+    ПАК серы, ``P8`` — перепад 0.19 МПа (``docs/DATA_NOTES.md`` §5б). Пакетный лист
+    оставлен для воспроизведения прежних разборов.
     """
+    if source == "organizers":
+        table = ROOT / "configs" / "tags_2026-09-15.csv"
+        if table.exists():
+            return pd.read_csv(table, encoding="utf-8")
     cache = cache_dir() / "tags.parquet"
     if use_cache and cache.exists():
         return pd.read_parquet(cache)

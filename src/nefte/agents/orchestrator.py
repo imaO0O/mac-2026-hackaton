@@ -589,9 +589,19 @@ class Orchestrator:
                "уставки внутри модельного диапазона (допущение, p05–p95 истории)",
                "шаг изменения за цикл ограничен"]
         if self.blending is not None:
+            # норматив ЦЧ и плотности — у марки, которую получает смешение, а не у
+            # ГО ДТ: у него ЦЧ не нормируется (ответ организаторов 15.09)
+            blend_spec = getattr(self.blending, "spec", spec)
+            grade = (blend_spec.get("grade") or {}).get("name")
+            floor = (blend_spec.get("cetane_number") or {}).get("min")
+            density = blend_spec.get("density_15c_kgm3") or {}
+            head = f"смесь — {grade}: " if grade else ""
+            cetane = (f"цетановое число ≥ {floor}" if floor is not None
+                      else "цетановое число не нормируется")
             out.append(
-                f"цетановое число ≥ {spec['cetane_number']['min']}, плотность и ПТФ — "
-                "по последнему анализу, при смене режима НЕ прогнозируются")
+                f"{head}{cetane}, плотность {density.get('min')}–{density.get('max')}; "
+                "плотность, ЦЧ и ПТФ — по последнему анализу, при смене режима "
+                "НЕ прогнозируются")
         # Строку про сумму долей добавляет _finish, когда рецептура действительно
         # посчитана: дублировать её здесь значит обещать проверку там, где
         # смешение вообще не считалось.

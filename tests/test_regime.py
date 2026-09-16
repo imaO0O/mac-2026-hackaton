@@ -21,7 +21,7 @@ def _ht(n: int = 400, feed: float = 250.0) -> pd.DataFrame:
     return pd.DataFrame({
         "T5": np.full(n, 370.0), "T6": np.full(n, 365.0), "T11": np.full(n, 360.0),
         "F26": np.full(n, feed), "F2": np.full(n, 90000.0),
-        "P24": np.full(n, 0.6), "F15": np.full(n, 3400.0), "P13": np.full(n, 3.9),
+        "F25": np.full(n, 13600.0), "F14": np.full(n, 6.0), "P13": np.full(n, 3.9),
     }, index=idx)
 
 
@@ -133,7 +133,7 @@ def _state_with_feed(feed_sulfur: float = 9000.0):
 
     state = make_state()
     state.telemetry_ht.update({"T5": 370.0, "T6": 365.0, "T11": 360.0,
-                               "F26": 250.0, "P13": 3.9, "P24": 0.6})
+                               "F26": 250.0, "P13": 3.9, "F25": 13600.0})
     state.quality["lims_feed_sulfur_mgkg"] = Measurement(
         value=feed_sulfur, unit="мг/кг", source=Source.LIMS, age_hours=10.0)
     return state

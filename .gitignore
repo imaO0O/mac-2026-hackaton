@@ -5,6 +5,9 @@
 *.xlsx
 *.parquet
 !docs/**/*.csv
+# материалы организаторов 15.09 — таблица тегов и официальные формулы ВАК: маленькие, без них ошибки пакета не видны
+!configs/tags_*.csv
+!configs/vak_official_*.csv
 
 # python
 __pycache__/

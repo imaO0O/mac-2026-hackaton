@@ -72,35 +72,49 @@ def _against_lab(series: pd.Series, point: str, param: str,
             "mae": float(np.mean(np.abs(model - truth)))}
 
 
+def _same_formula(a: str, b: str) -> bool:
+    """Одна и та же формула, записанная по-разному: сверяем значениями, не текстом."""
+    names = set(TAG_RE.findall(a)) | set(TAG_RE.findall(b))
+    rng = np.random.default_rng(0)
+    for _ in range(3):
+        env = {name: float(rng.uniform(50.0, 300.0)) for name in names}
+        left = eval(compile(a, "<a>", "eval"), {"__builtins__": {}}, dict(env))    # noqa: S307
+        right = eval(compile(b, "<b>", "eval"), {"__builtins__": {}}, dict(env))   # noqa: S307
+        if abs(left - right) > 1e-9 * max(1.0, abs(left)):
+            return False
+    return True
+
+
 def test_data_derived_readings_never_pass_as_organizer_corrections():
     """Прочтение, выведенное нами, не должно выдаваться за присланное заказчиком.
 
-    Сначала этот тест держал другое: что наши прочтения в рабочий расчёт вообще
-    не попадают. Решение изменилось — участник 1 дал им приоритет над поправками
-    организаторов, и правильно: у нашего прочтения есть измеримое свидетельство
-    (MAE 2.3 °C против 62), а у присланного нет.
-
-    Но тогда инвариант становится строже, а не слабее. Раз формула применяется,
-    единственное, что отделяет «прислано заказчиком» от «вывели сами», — поле
-    происхождения. На защите это разные вещи, и подменять одно другим нельзя.
+    Сначала этот тест держал, что наши прочтения в рабочий расчёт не попадают;
+    потом — что попадают, но с видимым источником. После официальной таблицы
+    организаторов 15.09 действующих прочтений не осталось: оба сверены с ней и
+    перенесены в историю с вердиктом. Инвариант прежний — источник виден всегда.
     """
     vak = load_config()["vak"]
-    proposed = vak.get("proposed_corrections") or {}
-    assert proposed, "разобранные прочтения должны быть записаны в конфиге"
-
     usable, _ = compile_formulas()
     by_target = {item["target"]: item for item in usable}
-    for target, item in proposed.items():
+    for target, item in (vak.get("proposed_corrections") or {}).items():
         assert item.get("assumption") is True
-        assert "НЕ подтверждено" in item["source"], \
-            f"{target}: у прочтения должен быть виден источник"
-
+        assert "НЕ подтверждено" in item["source"], (
+            f"{target}: у прочтения должен быть виден источник")
         compiled = by_target[target]
-        assert compiled["expr"] == parse_vak_formula(item["formula"]), \
-            f"{target}: применяется не наше прочтение"
+        assert compiled["expr"] == parse_vak_formula(item["formula"]), (
+            f"{target}: применяется не наше прочтение")
         assert compiled["correction_source"] == "наше прочтение"
-        assert compiled["correction_confirmed"] is False, \
-            f"{target}: помечено как подтверждённое организаторами"
+        assert compiled["correction_confirmed"] is False
+
+    history = vak.get("superseded_proposals") or {}
+    assert set(history) == {"AVT6:240-350:CFPP", "AVT6:350:I350"}, (
+        "закрытые прочтения должны остаться в конфиге как история")
+    for target, item in history.items():
+        assert item["verdict"] and item["source"]
+        confirmed = item["verdict"].startswith("подтверждено")
+        same = _same_formula(by_target[target]["expr"], parse_vak_formula(item["formula"]))
+        # подтверждённое совпадает с рабочей формулой, опровергнутое — нет
+        assert same == confirmed, f"{target}: вердикт не отвечает рабочей формуле"
 
 
 def test_organizer_corrections_are_still_marked_as_theirs():
@@ -116,43 +130,65 @@ def test_organizer_corrections_are_still_marked_as_theirs():
 
 
 def test_proposed_cfpp_reading_reproduces_the_laboratory(avt, formulas):
-    """Скобка не там: проверяем оба прочтения по лаборатории точки АВТ|3.
+    """Скобка не там: первая присланная поправка против прочтения участника 2.
 
     Формула обещает предельную температуру фильтруемости фракции 240-350.
     В лаборатории это ряд ``FilterabilityLimit.T`` точки АВТ|3 — привязку блока
-    к точке даёт ``scripts/check_avt_formulas.py``.
+    к точке даёт ``scripts/check_avt_formulas.py``. Официальная таблица 15.09
+    подтвердила прочтение: рабочая формула теперь совпадает с ним.
     """
     config = load_config()["vak"]
-    sent = _evaluate(parse_vak_formula(
+    history = config["superseded_proposals"]["AVT6:240-350:CFPP"]
+    sent = _evaluate(parse_vak_formula(history["first_organizer_answer"]), avt)
+    ours = _evaluate(parse_vak_formula(history["formula"]), avt)
+    official = _evaluate(parse_vak_formula(
         config["corrections"]["AVT6:240-350:CFPP"]["formula"]), avt)
-    ours = _evaluate(parse_vak_formula(
-        config["proposed_corrections"]["AVT6:240-350:CFPP"]["formula"]), avt)
 
     sent_fit = _against_lab(sent, "3", "FilterabilityLimit.T")
     our_fit = _against_lab(ours, "3", "FilterabilityLimit.T")
     assert our_fit["n"] >= 50, "анализов слишком мало, вывод не на чем строить"
 
-    # присланное прочтение промахивается на десятки градусов ПТФ
+    # первая присланная поправка промахивается на десятки градусов ПТФ
     assert sent_fit["mae"] > 40.0
-    # наше — в пределах точности самой лаборатории по этому показателю
+    # прочтение — в пределах точности самой лаборатории по этому показателю
     assert our_fit["mae"] < 5.0
     assert abs(our_fit["bias"]) < 3.0
+    # и официальная формула — ровно оно
+    # float32: порядок деления даёт расхождение в младших разрядах
+    assert np.allclose(official.to_numpy(), ours.to_numpy(), rtol=1e-4, atol=0.05,
+                       equal_nan=True)
 
 
-def test_proposed_i350_constant_restores_a_physical_level(avt):
-    """Потерянная первая цифра константы: −265 % отгона против 93 % в лаборатории."""
+def test_official_i350_fixes_the_sign_not_the_constant(avt, formulas):
+    """Прочтение «потеряна первая цифра константы» официальная таблица не подтвердила.
+
+    В пакете I350 давала −265 % отгона. Мы восстановили уровень константой 399.562;
+    у организаторов константа прежняя, а знак при T6 — плюс. Уровень физический у
+    обеих, связи с лабораторией нет ни у одной — это и закрепляем.
+    """
     config = load_config()["vak"]
-    fixed = _evaluate(parse_vak_formula(
-        config["proposed_corrections"]["AVT6:350:I350"]["formula"]), avt)
-    lab = _against_lab(fixed, "1", "I350", positive_only=True)
+    official = _evaluate(parse_vak_formula(
+        config["corrections"]["AVT6:350:I350"]["formula"]), avt)
+    ours = _evaluate(parse_vak_formula(
+        config["superseded_proposals"]["AVT6:350:I350"]["formula"]), avt)
+    lab = _against_lab(official, "1", "I350", positive_only=True)
     assert lab["n"] >= 100
     assert abs(lab["bias"]) < 10.0
-    assert 0.0 <= float(fixed.median()) <= 100.0
+    assert 0.0 <= float(official.median()) <= 100.0
+    assert not np.allclose(official.to_numpy(), ours.to_numpy(), equal_nan=True)
 
-    # выданная константа даёт величину, которой отгон быть не может
-    original = _evaluate(parse_vak_formula(
-        load_vak_formulas().set_index("target").loc["AVT6:350:I350", "formula"]), avt)
+    original = _evaluate(parse_vak_formula(formulas["AVT6:350:I350"]), avt)
     assert float(original.median()) < -100.0
+
+
+def test_official_t50_of_the_350_block_is_a_working_analyzer(avt):
+    """В пакете на месте T50 стоял дубль плотности; официальная формула — настоящая."""
+    official = _evaluate(parse_vak_formula(
+        load_config()["vak"]["corrections"]["AVT6:350:T50"]["formula"]), avt)
+    lab = _against_lab(official, "1", "50%.T", positive_only=True)
+    assert lab["n"] >= 500
+    assert abs(lab["bias"]) < 3.0
+    assert lab["mae"] < 8.0
 
 
 def test_t50_cell_of_the_350_block_duplicates_the_density_formula(avt, formulas):

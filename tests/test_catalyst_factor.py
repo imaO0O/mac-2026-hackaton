@@ -38,7 +38,7 @@ def _history(days: int = 330, outages: list[tuple[int, int, float]] | None = Non
         wabt[a:b] = 40.0
         wabt[b:] += shift
     ht = pd.DataFrame({"T5": wabt - 1.0, "T6": wabt, "T11": wabt + 1.0,
-                       "W10": 1.2 + rng.normal(0, 0.02, len(index)), "F26": feed,
+                       "P8": 0.18 + rng.normal(0, 0.003, len(index)), "F26": feed,
                        "F2": 30000.0 + rng.normal(0, 300, len(index)),
                        "P13": 3.9 + rng.normal(0, 0.01, len(index))}, index=index)
     avt = pd.DataFrame({"T55": 380.0 + rng.normal(0, 1.0, len(index))}, index=index)
@@ -113,7 +113,7 @@ def test_activity_switch_puts_the_series_into_severity():
     avt, ht = _history(outages=[(200, 3, -20.0)], seed=2)
     agent = ReliabilityAgent.from_history(avt, ht, _cfg(catalyst_factor="activity"))
     assert agent.catalyst_series is not None
-    frame = pd.DataFrame({"wabt": ht[["T5", "T6", "T11"]].mean(axis=1), "W10": ht["W10"],
+    frame = pd.DataFrame({"wabt": ht[["T5", "T6", "T11"]].mean(axis=1), "P8": ht["P8"],
                           "T55": avt["T55"]})
     _, factors = agent.severity_series(frame, with_factors=True)
     joined = pd.concat([factors["catalyst"], agent.catalyst_series.clip(0, 1.5)],

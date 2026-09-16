@@ -47,7 +47,7 @@ from nefte.utils import use_utf8_console  # noqa: E402
 
 # Кандидатные управляющие воздействия: модель обязана их видеть, иначе оптимизатор
 # не сможет оценивать сценарии (см. configs/config.yaml → controls).
-CONTROL_TAGS = ["T5", "T11", "F26", "P13", "F15", "P24"]
+CONTROL_TAGS = ["T5", "T11", "F26", "P13", "F14", "F25"]
 CONTROL_COLUMNS = ([f"ht_{t}" for t in CONTROL_TAGS] + ["avt_T55"]
                    + INSTANT_FEATURES)   # признаки режима тоже обязаны остаться
 

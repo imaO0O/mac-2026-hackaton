@@ -24,14 +24,14 @@ def make_state(*, lims=(6.0, 2.0), pak=(6.2, 0.1), frozen=False, usable=True) ->
     return ProcessState(
         ts=datetime(2026, 4, 20, 12, 0),
         telemetry_avt={"T55": 380.0},
-        telemetry_ht={"T5": 370.0, "T11": 365.0, "F26": 250.0, "P13": 3.9, "W10": 2.8, "T6": 362.0},
+        telemetry_ht={"T5": 370.0, "T11": 365.0, "F26": 250.0, "P13": 3.9, "P8": 0.19, "T6": 362.0},
         quality=quality,
         data_quality=DataQuality(missing_share=0.0, usable=usable),
     )
 
 
 def build_system(cfg=None) -> Orchestrator:
-    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0), "W10": (1.0, 4.0), "T55": (370.0, 395.0)})
+    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0), "P8": (0.13, 0.23), "T55": (370.0, 395.0)})
     bounds = {"T5": (365.0, 375.0), "T11": (360.0, 370.0),
               "F26": (200.0, 300.0), "P13": (3.5, 4.2)}
     opt = OptimizerAgent(bounds=bounds,

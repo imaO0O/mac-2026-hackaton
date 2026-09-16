@@ -206,14 +206,18 @@ def main() -> None:
                                         else f"предел {t95_limit:.0f}"),
               delta_color="inverse" if t95 is not None and t95 > t95_limit else "off")
     cetane = load_cetane().loc[:pd.Timestamp(ts)]
-    cetane_min = cfg["spec"].get("cetane_number", {}).get("min", 51.0)
+    # норматив ЦЧ — у товарной марки, у самого ГО ДТ его нет (ответ 15.09)
+    grades = cfg["spec"].get("grades") or {}
+    blend_grade = grades.get(cfg["spec"].get("blend_grade"), {})
+    cetane_min = blend_grade.get("cetane_number_min",
+                                 cfg["spec"].get("cetane_number", {}).get("min", 51.0))
     if len(cetane):
         value, when = float(cetane.iloc[-1]), cetane.index[-1]
-        c6.metric("Цетановое число", f"{value:.1f}",
-                  f"норматив ≥ {cetane_min:g}, анализ {when:%d.%m}",
+        c6.metric("ЦЧ ГО ДТ", f"{value:.1f}",
+                  f"{blend_grade.get('name', 'товарное')} ≥ {cetane_min:g}, анализ {when:%d.%m}",
                   delta_color="inverse" if value < cetane_min else "off")
     else:
-        c6.metric("Цетановое число", "—")
+        c6.metric("ЦЧ ГО ДТ", "—")
 
     # ---------- рекомендация ------------------------------------------ #
     st.subheader("Рекомендация оператору")

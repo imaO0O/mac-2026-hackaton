@@ -36,7 +36,7 @@ def make_state(t95: float | None = 355.0, t6: float = 362.0) -> ProcessState:
         ts=datetime(2026, 4, 20, 12, 0),
         telemetry_avt={"T55": 380.0},
         telemetry_ht={"T5": 370.0, "T11": 365.0, "F26": 250.0, "P13": 3.9,
-                      "W10": 2.8, "T6": t6, "F9": 120.0, "F2": 50000.0},
+                      "P8": 0.19, "T6": t6, "F9": 120.0, "F2": 50000.0},
         quality=quality,
         data_quality=DataQuality(missing_share=0.0, usable=True),
     )
@@ -110,7 +110,7 @@ def test_no_lab_analysis_means_unknown_not_zero():
 
 def _evaluate(state, optimizer):
     quality = QualityAgent().assess(state)
-    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0), "W10": (1.0, 4.0),
+    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0), "P8": (0.13, 0.23),
                                   "T55": (370.0, 395.0)})
     reliability = ReliabilityAgent(norms).assess(state)
     return optimizer.evaluate(state, optimizer.generate(state, reliability),

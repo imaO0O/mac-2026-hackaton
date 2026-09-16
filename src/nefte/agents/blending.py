@@ -114,6 +114,32 @@ def mix(components: list[BlendComponent], fractions: dict[str, float],
     return props
 
 
+def grade_spec(spec: dict, grade: str | None = None) -> dict:
+    """Спецификация смеси для марки ДТ (ответ организаторов 15.09).
+
+    Сера, Т95, ПТФ и сумма долей от марки не зависят, плотность и цетановое число —
+    зависят: у ДТ с гидроочистки ЦЧ не нормируется, у летнего товарного не ниже 51,
+    у зимнего — не ниже 49 и плотность от 800, а не от 820. ``grade=None`` — марка из
+    ``spec.blend_grade``; конфиг без марок возвращается как есть.
+    """
+    grades = spec.get("grades") or {}
+    grade = grade or spec.get("blend_grade")
+    if not grades or grade is None:
+        return spec
+    if grade not in grades:
+        raise ValueError(f"марка ДТ {grade!r} не описана, есть: {sorted(grades)}")
+    chosen = grades[grade]
+    out = dict(spec)
+    lo, hi = chosen["density_15c_kgm3"]
+    out["density_15c_kgm3"] = {**spec.get("density_15c_kgm3", {}),
+                               "min": float(lo), "max": float(hi)}
+    floor = chosen.get("cetane_number_min")
+    out["cetane_number"] = {**spec.get("cetane_number", {}),
+                            "min": None if floor is None else float(floor)}
+    out["grade"] = {"key": grade, "name": chosen["name"]}
+    return out
+
+
 class BlendingAgent:
     """Подбирает рецептуру: максимум выпуска при соблюдении спецификации.
 
@@ -126,10 +152,12 @@ class BlendingAgent:
     # гидроочистки, ЛИМС «Гидроочистка, точка 2».
     HYDROTREATED = "ГО ДТ"
 
-    def __init__(self, cfg: dict | None = None, step: float = 0.01):
+    def __init__(self, cfg: dict | None = None, step: float = 0.01,
+                 grade: str | None = None):
         self.cfg = cfg or load_config()
         self.step = step
-        self.spec = self.cfg["spec"]
+        self.spec = grade_spec(self.cfg["spec"], grade)
+        self.grade_name = (self.spec.get("grade") or {}).get("name")
 
     # ------------------------------------------------------------------ #
     def check(self, props: dict[str, float], fractions: dict[str, float]) -> list[str]:
@@ -152,7 +180,8 @@ class BlendingAgent:
         if density is not None:
             lo, hi = self.spec["density_15c_kgm3"]["min"], self.spec["density_15c_kgm3"]["max"]
             if not lo <= density <= hi:
-                violations.append(f"плотность {density:.1f} вне диапазона {lo}–{hi} (допущение)")
+                violations.append(f"плотность {density:.1f} вне диапазона {lo}–{hi}"
+                                  f"{self._grade_note()}")
 
         t95 = props.get("t95_c")
         if t95 is not None and t95 > self.spec["t95_c"]["max"]:
@@ -171,10 +200,20 @@ class BlendingAgent:
         # оно уходит в «не подтверждено» (см. uncertified) и остаётся видимым, но
         # не блокирует рецептуру целиком.
         cetane = props.get("cetane_number")
-        floor = self.spec.get("cetane_number", {}).get("min", CETANE_SPEC_MIN)
-        if cetane is not None and cetane < floor:
-            violations.append(f"цетановое число {cetane:.1f} ниже {floor} (допущение)")
+        floor = self._cetane_floor()
+        if cetane is not None and floor is not None and cetane < floor:
+            violations.append(f"цетановое число {cetane:.1f} ниже {floor}{self._grade_note()}")
         return violations
+
+    def _cetane_floor(self) -> float | None:
+        """Норматив ЦЧ марки; None — у марки он не нормируется (ДТ с гидроочистки)."""
+        section = self.spec.get("cetane_number")
+        if section is None:
+            return CETANE_SPEC_MIN
+        return section.get("min")
+
+    def _grade_note(self) -> str:
+        return f" (марка «{self.grade_name}»)" if self.grade_name else " (допущение)"
 
     def uncertified(self, props: dict[str, float]) -> list[str]:
         """Обязательные показатели, которые проверить не удалось.
@@ -187,7 +226,7 @@ class BlendingAgent:
         missing = []
         if props.get("t95_c") is None:
             missing.append("Т95")
-        if props.get("cetane_number") is None:
+        if props.get("cetane_number") is None and self._cetane_floor() is not None:
             missing.append("цетановое число")
         return missing
 
@@ -213,7 +252,9 @@ class BlendingAgent:
         cetane = props.get("cetane_number")
         if cetane is None:
             return 0.0
-        floor = self.spec.get("cetane_number", {}).get("min", CETANE_SPEC_MIN)
+        floor = self._cetane_floor()
+        if floor is None:
+            return 0.0
         deficit = floor - float(cetane)
         if deficit <= 0:
             return 0.0

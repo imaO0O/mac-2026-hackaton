@@ -24,7 +24,7 @@ def _system(repeat: float | None) -> Orchestrator:
     cfg = {**cfg, "limits": {**cfg["limits"], "repeat_min_risk_increase": repeat,
                              "min_hours_between_actions": 4.0,
                              "return_settle_hours": 14.0}}
-    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0), "W10": (1.0, 4.0),
+    norms = SeverityNorms(bounds={"wabt": (355.0, 375.0), "P8": (0.13, 0.23),
                                   "T55": (370.0, 395.0)})
     bounds = {"T5": (365.0, 375.0), "T11": (360.0, 370.0), "F26": (200.0, 300.0),
               "P13": (3.5, 4.2)}

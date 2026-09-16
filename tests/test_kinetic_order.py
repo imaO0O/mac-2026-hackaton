@@ -30,7 +30,7 @@ def _state() -> ProcessState:
         ts=datetime(2026, 6, 1, 12, 0),
         telemetry_avt={},
         telemetry_ht={"T5": 370.0, "T6": 365.0, "T11": 366.0,
-                      "F26": 250.0, "P13": 3.9, "P24": 1.2},
+                      "F26": 250.0, "P13": 3.9, "F25": 13600.0},
         quality={"lims_feed_sulfur_mgkg": Measurement(
             value=FEED_MGKG, unit="мг/кг", source=Source.LIMS, age_hours=5.0)},
         data_quality=DataQuality(missing_share=0.0, usable=True),

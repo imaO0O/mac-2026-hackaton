@@ -4,9 +4,11 @@
 # детерминировано, модели получаются те же, а отчёты — в формате текущего кода.
 # Две дорожки параллельно, чтобы уложиться примерно в час.
 #
-# Повторный запуск безвреден и продолжает с места остановки: отчёт, в котором уже
-# есть поле текущего формата (MARKER), пропускается. Так остановка на середине —
-# закрытое приложение, выключенная машина — теряет только идущие обучения.
+# Повторный запуск безвреден и продолжает с места остановки: отчёт, снятый на
+# текущей версии матрицы и в текущем формате (оба MARKER), пропускается. Так
+# остановка на середине — закрытое приложение, выключенная машина — теряет только
+# идущие обучения. Раньше проверялся только формат: после смены версии матрицы
+# скрипт пропустил бы все модели как «уже готовые».
 #
 #   bash scripts/retrain_quality_all.sh              # логи в /tmp
 #   LOG_DIR=путь bash scripts/retrain_quality_all.sh
@@ -15,9 +17,11 @@ cd "$(dirname "$0")/.."
 PY=.venv/Scripts/python.exe
 LOG_DIR=${LOG_DIR:-/tmp}
 MARKER='"spec_threshold"'
+VERSION=$($PY -c 'import sys; sys.path.insert(0, "src"); from nefte.models.dataset import FEATURE_VERSION; print(FEATURE_VERSION)')
+VERSION_MARKER="\"feature_version\": $VERSION,"
 run () {
   local report="reports/$1"; shift
-  if [ -f "$report" ] && grep -q "$MARKER" "$report"; then
+  if [ -f "$report" ] && grep -q "$MARKER" "$report" && grep -q "$VERSION_MARKER" "$report"; then
     echo "########## $(date +%H:%M) пропуск: $report уже в текущем формате ##########"
     return
   fi

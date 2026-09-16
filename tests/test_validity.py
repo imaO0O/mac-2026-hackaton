@@ -87,27 +87,27 @@ def test_severity_norms_use_train_period_only():
 def test_severity_grows_with_regime_stress():
     from tests.test_agents import make_state
 
-    norms = SeverityNorms(bounds={"wabt": (350.0, 370.0), "W10": (1.0, 4.0),
+    norms = SeverityNorms(bounds={"wabt": (350.0, 370.0), "P8": (0.13, 0.23),
                                   "T55": (370.0, 395.0)})
     agent = ReliabilityAgent(norms)
 
     mild = make_state()
-    mild.telemetry_ht.update({"T5": 352.0, "T6": 351.0, "T11": 350.0, "W10": 1.2})
+    mild.telemetry_ht.update({"T5": 352.0, "T6": 351.0, "T11": 350.0, "P8": 0.14})
     harsh = make_state()
-    harsh.telemetry_ht.update({"T5": 369.0, "T6": 369.0, "T11": 370.0, "W10": 3.9})
+    harsh.telemetry_ht.update({"T5": 369.0, "T6": 369.0, "T11": 370.0, "P8": 0.22})
 
     assert agent.assess(mild).severity_index < agent.assess(harsh).severity_index
     assert agent.assess(harsh).risk_class in {"medium", "high"}
 
 
 def test_high_severity_forbids_raising_temperature():
-    norms = SeverityNorms(bounds={"wabt": (350.0, 360.0), "W10": (1.0, 2.0),
+    norms = SeverityNorms(bounds={"wabt": (350.0, 360.0), "P8": (0.13, 0.18),
                                   "T55": (370.0, 380.0)})
     agent = ReliabilityAgent(norms)
 
     from tests.test_agents import make_state
     state = make_state()
-    state.telemetry_ht.update({"T5": 380.0, "T6": 380.0, "T11": 380.0, "W10": 5.0})
+    state.telemetry_ht.update({"T5": 380.0, "T6": 380.0, "T11": 380.0, "P8": 0.25})
     state.telemetry_avt.update({"T55": 400.0})
 
     out = agent.assess(state)

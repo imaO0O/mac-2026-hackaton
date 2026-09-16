@@ -117,11 +117,12 @@ def show_blending(sb: StateBuilder, cfg: dict, ts: str = "2026-02-28 00:00") -> 
 
 
 def show_cetane(sb: StateBuilder, cfg: dict) -> None:
-    """Сцена: показатель, который уже вне норматива, а мы о нём не знали.
+    """Сцена: обязательный показатель, из-за которого летнюю марку уже не получить.
 
-    Самая сильная находка последнего захода, и показывать её надо не таблицей
-    метрик, а одной строкой: обязательный показатель качества падает четыре года
-    подряд и последним анализом вышел за норматив.
+    ЦЧ ГО ДТ падает четыре года подряд. У самого ГО ДТ он не нормируется — норматив
+    у товарного топлива: летнее не ниже 51, зимнее не ниже 49 (ответ организаторов
+    15.09). Последний анализ 50.0: летнюю марку из одного ГО ДТ без присадки или
+    другого компонента не получить, для зимней остаётся одна единица.
     """
     from nefte.data.loaders import lims_series, load_lims
     from nefte.models.cetane import (
@@ -138,8 +139,15 @@ def show_cetane(sb: StateBuilder, cfg: dict) -> None:
     for year, value in by_year.items():
         print(f"    {year}  {value:.1f}")
     last, when = float(cetane.iloc[-1]), cetane.index[-1]
-    print(f"  Последний анализ {when:%d.%m.%Y}: {last:.1f} при нормативе "
-          f"{CETANE_SPEC_MIN}. Тренд {trend_per_year(cetane):+.2f} единиц в год.")
+    grades = cfg["spec"].get("grades") or {}
+    floors = {g["name"]: g.get("cetane_number_min") for g in grades.values()}
+    print(f"  Последний анализ {when:%d.%m.%Y}: {last:.1f}. Тренд "
+          f"{trend_per_year(cetane):+.2f} единиц в год.")
+    print("  Меряется у ГО ДТ, а норматив — у марки (ответ организаторов 15.09): "
+          + "; ".join(f"{name} — " + ("не нормируется" if floor is None
+                                      else f"не ниже {floor:g}"
+                                      + (" (не проходит)" if last < floor else ""))
+                      for name, floor in floors.items()))
     print(f"  Анализов всего {len(cetane)} за три с половиной года — раз в месяц. "
           "Строить по ним прогноз нечестно, и мы не строим: показатель входит "
           "ограничением по последнему анализу с поправкой на тренд.")
@@ -147,7 +155,7 @@ def show_cetane(sb: StateBuilder, cfg: dict) -> None:
           "лабораторией 0.03, хуже, чем просто среднее по истории.")
     dose = dose_for_deficit(max(0.0, CETANE_SPEC_MIN - last))
     if dose:
-        print(f"  Цена выполнения норматива: {dose:.3f} % присадки = "
+        print(f"  Цена летней марки из ГО ДТ: {dose:.3f} % присадки = "
               f"{improver_cost_share(dose) * 100:.1f} % стоимости тонны топлива.")
 
 
@@ -162,7 +170,7 @@ def main() -> int:
         for scene in SCENES:
             print(f"{scene['key']:22s} {scene['title']}")
         print(f"{'blending':22s} Смешение: предельные доли компонентов")
-        print(f"{'cetane':22s} Цетановое число: показатель уже вне норматива")
+        print(f"{'cetane':22s} Цетановое число: летнюю марку из ГО ДТ уже не получить")
         return 0
 
     cfg = load_config()
@@ -206,7 +214,7 @@ def main() -> int:
         print("=" * 80)
         show_blending(sb, cfg)
         print("\n" + "=" * 80)
-        print(f"СЦЕНА {len(scenes) + 2}. Цетановое число: показатель уже вне норматива")
+        print(f"СЦЕНА {len(scenes) + 2}. Цетановое число: летнюю марку из ГО ДТ уже не получить")
         print("=" * 80)
         show_cetane(sb, cfg)
         print("\nПрогоны записаны в reports/runs/ — логику любого решения можно "
