@@ -1,4 +1,8 @@
 {
+  "reliability_settings": {
+    "catalyst_factor": "activity",
+    "catalyst_reset": "outage_48h"
+  },
   "validity": {
     "avt": {
       "n_tags": 71,
@@ -43,21 +47,21 @@
     "train": {
       "n": 983,
       "n_over_limit": 148,
-      "roc_auc": 0.586,
-      "mean_severity_ok": 0.479,
-      "mean_severity_over": 0.524
+      "roc_auc": 0.584,
+      "mean_severity_ok": 0.467,
+      "mean_severity_over": 0.515
     },
     "test": {
       "n": 249,
       "n_over_limit": 36,
-      "roc_auc": 0.337,
-      "mean_severity_ok": 0.547,
-      "mean_severity_over": 0.458
+      "roc_auc": 0.343,
+      "mean_severity_ok": 0.512,
+      "mean_severity_over": 0.451
     },
-    "dp_growth_spearman": 0.136,
+    "dp_growth_spearman": 0.134,
     "distribution": {
-      "low_%": 53.2,
-      "medium_%": 44.2,
+      "low_%": 59.0,
+      "medium_%": 38.4,
       "high_%": 2.6
     }
   },
@@ -155,17 +159,17 @@
     "test_%": 3.59
   },
   "risk_thresholds": [
-    0.537,
-    0.777
+    0.529,
+    0.779
   ],
   "tradeoff_quality_vs_severity": {
     "train": {
-      "auc_severity": 0.586,
-      "auc_inverse": 0.414
+      "auc_severity": 0.584,
+      "auc_inverse": 0.416
     },
     "test": {
-      "auc_severity": 0.337,
-      "auc_inverse": 0.663
+      "auc_severity": 0.343,
+      "auc_inverse": 0.657
     }
   }
 }

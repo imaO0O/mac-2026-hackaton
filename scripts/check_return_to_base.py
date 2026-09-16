@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import nefte.agents.orchestrator as orchestrator_module  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
-from nefte.provenance import report_provenance  # noqa: E402
+from nefte.provenance import reliability_provenance, report_provenance  # noqa: E402
 from nefte.sim import ClosedLoopSimulator, summarize  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
@@ -99,7 +99,7 @@ def main() -> int:
     print(f"  качелей всего: {swings}")
     print(f"  ВЫВОД: возврат {'ПРИНЯТ' if accepted else 'НЕ принят'} для включения по умолчанию")
 
-    REPORT.write_text(json.dumps({**report_provenance(cfg),
+    REPORT.write_text(json.dumps({**report_provenance(cfg), **reliability_provenance(cfg),
                                   "множитель_запаса": orchestrator_module.RETURN_MARGIN_FACTOR,
                                   "пауза_ч": cfg["limits"].get("return_settle_hours"),
                                   "окна": result, "превышения_прибавились": added,

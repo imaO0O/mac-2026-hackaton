@@ -48,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.agents.schemas import Recommendation  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.provenance import reliability_provenance  # noqa: E402
 from nefte.models.dataset import FEATURE_VERSION  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
@@ -165,6 +166,10 @@ def main() -> int:
                     help="включить робастную гарантию с кинетикой этого порядка")
     ap.add_argument("--repeat-risk-increase", type=float, default=None,
                     help="повтор действия до проявления прошлого — только при росте риска")
+    ap.add_argument("--catalyst-factor", choices=("age", "activity"), default=None,
+                    help="переопределить reliability.catalyst_factor")
+    ap.add_argument("--catalyst-reset", choices=("outage_48h", "catalyst_log"), default=None,
+                    help="переопределить reliability.catalyst_reset")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -177,6 +182,10 @@ def main() -> int:
     if args.repeat_risk_increase is not None:
         cfg = {**cfg, "limits": {**cfg["limits"],
                                  "repeat_min_risk_increase": float(args.repeat_risk_increase)}}
+    for key in ("catalyst_factor", "catalyst_reset"):
+        if getattr(args, key) is not None:
+            cfg = {**cfg, "reliability": {**(cfg.get("reliability") or {}),
+                                          key: getattr(args, key)}}
     limit_mgkg = cfg["spec"]["product_sulfur_mgkg"]["max"]
     lo, hi = cfg["split"][args.split]
 
@@ -256,6 +265,10 @@ def main() -> int:
         "период": [str(lo), str(hi)],
         "выборка": args.split,
         "запрет частых воздействий, ч": float(cfg["limits"]["min_hours_between_actions"]),
+        # как агент надёжности мерил износ катализатора: severity и классы риска
+        # зависят от этого, а имя отчёта без флагов об этом молчит
+        "износ катализатора": {k: (cfg.get("reliability") or {}).get(k)
+                               for k in ("catalyst_factor", "catalyst_reset")},
         "шаг": args.every,
         "модель": args.model,
         "горизонт сети": args.seq_horizon,
@@ -332,6 +345,10 @@ def main() -> int:
         tag = "_".join(x for x in (tag, f"robust{args.robust_order:g}") if x)
     if args.repeat_risk_increase is not None:
         tag = "_".join(x for x in (tag, f"repeat{args.repeat_risk_increase:g}") if x)
+    if args.catalyst_factor is not None:
+        tag = "_".join(x for x in (tag, f"catalyst_{args.catalyst_factor}") if x)
+    if args.catalyst_reset is not None:
+        tag = "_".join(x for x in (tag, f"reset_{args.catalyst_reset}") if x)
     stem = "test_period" if args.split == "test" else "val_period"
     report_path = (REPORT.with_name(f"{stem}.json") if not tag
                    else REPORT.with_name(f"{stem}_{tag}.json"))
@@ -342,6 +359,7 @@ def main() -> int:
         # поля делает skip, а пропуск неотличим от успеха. Ровно так девять
         # отчётов сетей оказались вне контракта, который их декларировал.
         "feature_version": FEATURE_VERSION,
+        **reliability_provenance(cfg),
         "split": {k: list(v) for k, v in cfg["split"].items()
                   if isinstance(v, (list, tuple))},
         "summary": summary, "rows": rows,

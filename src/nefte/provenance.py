@@ -39,3 +39,19 @@ def report_provenance(cfg: dict | None = None) -> dict:
         "split": {k: list(v) for k, v in cfg["split"].items()
                   if isinstance(v, (list, tuple))},
     }
+
+
+def reliability_provenance(cfg: dict | None = None) -> dict:
+    """Как агент надёжности мерил износ катализатора — для отчётов, где решал оркестратор.
+
+    Отдельно от ``report_provenance``, потому что зависит от этого не всякий отчёт,
+    а только тот, где работала тяжесть режима: прогоны системы, имитация, злые
+    кейсы, бэктест надёжности. Обучению моделей качества поле не нужно, и если бы
+    оно было в каждом отчёте, переключение выключателя «устаревало» бы и их.
+    """
+    cfg = cfg or load_config()
+    settings = cfg.get("reliability") or {}
+    return {"reliability_settings": {
+        "catalyst_factor": settings.get("catalyst_factor", "age"),
+        "catalyst_reset": settings.get("catalyst_reset", "outage_48h"),
+    }}

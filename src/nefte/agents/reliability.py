@@ -31,7 +31,12 @@ import pandas as pd
 from nefte.agents.schemas import ProcessState, ReliabilityAssessment
 from nefte.config import load_config
 from nefte.models.anomaly import RegimeAnomalyDetector
+from nefte.models.catalyst import activity_level_series, hours_since_marks
 from nefte.models.regime import FEED, RECYCLE_GAS, hours_since_outage, implied_t6
+
+# Как агент судит об износе катализатора (configs/config.yaml → reliability).
+CATALYST_FACTORS = ("age", "activity")
+CATALYST_RESETS = ("outage_48h", "catalyst_log")
 
 
 def regime_anomaly_frame(avt: pd.DataFrame, ht: pd.DataFrame) -> pd.DataFrame:
@@ -139,7 +144,8 @@ class ReliabilityAgent:
                  feed_median: float | None = None,
                  down_series: pd.Series | None = None,
                  anomaly_series: pd.Series | None = None,
-                 anomaly_parts: pd.DataFrame | None = None):
+                 anomaly_parts: pd.DataFrame | None = None,
+                 catalyst_series: pd.Series | None = None):
         self.norms = norms or SeverityNorms(bounds={})
         # нормированная скорость изменения режима, посчитанная по истории
         self.ramp_series = ramp_series
@@ -160,6 +166,9 @@ class ReliabilityAgent:
         # ramp_series и run_hours. Если ряда нет, работает Махаланобис.
         self.anomaly_series = anomaly_series
         self.anomaly_parts = anomaly_parts
+        # Износ катализатора готовым рядом (вариант «activity»). Если его нет,
+        # фактор считается от наработки, как раньше.
+        self.catalyst_series = catalyst_series
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -211,16 +220,39 @@ class ReliabilityAgent:
             # берём худший из каналов: быстрым режим делает любой из них
             ramp = pd.concat(normalized, axis=1).max(axis=1)
 
-        # наработка от последнего останова: разметки нет, восстанавливаем по
-        # длительным провалам расхода сырья (см. models/regime.py)
+        # Износ катализатора. Два выключателя, по умолчанию — прежнее поведение
+        # (docs/PLAN.md, правило приёмки записано до счёта):
+        # * catalyst_reset: с какого момента считать наработку — с любого останова
+        #   дольше 48 ч или с замены катализатора по журналу. Из трёх длительных
+        #   остановов истории заменами были два; третий, ремонт 20–30.06.2026,
+        #   обнулял возраст там, где катализатор продолжал стареть;
+        # * catalyst_factor: мерить износ возрастом или уровнем WABT, приведённой
+        #   к нагрузке (models/catalyst.activity_level_series).
+        rel_cfg = cfg.get("reliability") or {}
+        factor_mode = rel_cfg.get("catalyst_factor", "age")
+        reset_mode = rel_cfg.get("catalyst_reset", "outage_48h")
+        if factor_mode not in CATALYST_FACTORS:
+            raise ValueError(f"reliability.catalyst_factor: {factor_mode!r}, "
+                             f"ожидалось одно из {CATALYST_FACTORS}")
+        if reset_mode not in CATALYST_RESETS:
+            raise ValueError(f"reliability.catalyst_reset: {reset_mode!r}, "
+                             f"ожидалось одно из {CATALYST_RESETS}")
+
         run_hours, run_scale, feed_median = None, None, None
+        catalyst_series = None
         source = raw_ht if raw_ht is not None else ht
         if FEED in source.columns:
             feed_median = float(source[FEED].median())
-            run_hours = hours_since_outage(source[FEED],
-                                           min_outage_hours=cls.CATALYST_RESET_HOURS,
-                                           steps_per_hour=per_hour)
+            if reset_mode == "catalyst_log":
+                run_hours = hours_since_marks(source.index,
+                                              rel_cfg.get("catalyst_changes") or [])
+            else:
+                run_hours = hours_since_outage(source[FEED],
+                                               min_outage_hours=cls.CATALYST_RESET_HOURS,
+                                               steps_per_hour=per_hour)
             run_scale = float(run_hours.loc[train[0]:train[1]].quantile(0.95)) or None
+            if factor_mode == "activity":
+                catalyst_series = activity_level_series(ht, source[FEED], train)
 
         down_series = None
         if feed_median and temps and all(t in source.columns for t in temps):
@@ -235,7 +267,8 @@ class ReliabilityAgent:
 
         agent = cls(norms=norms, ramp_series=ramp, run_hours=run_hours,
                     run_hours_scale=run_scale, detector=detector,
-                    feed_median=feed_median, down_series=down_series)
+                    feed_median=feed_median, down_series=down_series,
+                    catalyst_series=catalyst_series)
         agent.thresholds = agent._calibrate_thresholds(frame, anomaly_frame, train)
         return agent
 
@@ -278,7 +311,9 @@ class ReliabilityAgent:
                     factors[key] = norm
         if self.ramp_series is not None:
             factors["ramp"] = self.ramp_series.reindex(frame.index).clip(0.0, 1.0)
-        if self.run_hours is not None and self.run_hours_scale:
+        if self.catalyst_series is not None:
+            factors["catalyst"] = self.catalyst_series.reindex(frame.index).clip(0.0, 1.5)
+        elif self.run_hours is not None and self.run_hours_scale:
             factors["catalyst"] = (self.run_hours.reindex(frame.index)
                                    / self.run_hours_scale).clip(0.0, 1.5)
         if self.anomaly_series is not None:
@@ -321,9 +356,13 @@ class ReliabilityAgent:
         if ramp is not None:
             factors["ramp"] = float(np.clip(ramp, 0.0, 1.0))
 
-        run = self._run_hours_at(state.ts)
-        if run is not None and self.run_hours_scale:
-            factors["catalyst"] = float(np.clip(run / self.run_hours_scale, 0.0, 1.5))
+        wear = self._catalyst_at(state.ts)
+        if wear is not None:
+            factors["catalyst"] = float(np.clip(wear, 0.0, 1.5))
+        else:
+            run = self._run_hours_at(state.ts)
+            if run is not None and self.run_hours_scale:
+                factors["catalyst"] = float(np.clip(run / self.run_hours_scale, 0.0, 1.5))
 
         # Готовый ряд (например, от LSTM-автоэнкодера) имеет приоритет: детектор
         # на окне по одному срезу оценку дать не может.
@@ -350,6 +389,13 @@ class ReliabilityAgent:
                 return {k: round(float(v), 3) for k, v in row.items()}
             return {}
         return self.detector.contributions(self._anomaly_inputs(state))
+
+    def _catalyst_at(self, ts) -> float | None:
+        """Износ из готового ряда, если агент собран с вариантом «activity»."""
+        if self.catalyst_series is None:
+            return None
+        sub = self.catalyst_series.loc[:ts].dropna()
+        return None if sub.empty else float(sub.iloc[-1])
 
     def _run_hours_at(self, ts) -> float | None:
         if self.run_hours is None:
@@ -508,7 +554,9 @@ class ReliabilityAgent:
                          "Каждый параметр по отдельности в норме — нетипично их сочетание.")
 
         if factors.get("catalyst", 0) > 0.9:
-            notes.append("Катализатор в конце цикла по наработке: та же глубина очистки "
+            basis = ("по приведённой к нагрузке температуре" if self.catalyst_series is not None
+                     else "по наработке")
+            notes.append(f"Катализатор в конце цикла {basis}: та же глубина очистки "
                          "требует более жёсткого режима.")
 
         if risk_class == "high":

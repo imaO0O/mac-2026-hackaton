@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.config import ROOT, load_config  # noqa: E402
-from nefte.provenance import report_provenance  # noqa: E402
+from nefte.provenance import reliability_provenance, report_provenance  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
@@ -170,7 +170,7 @@ def main() -> int:
                   "Берите их с --stamps побольше, если нужно утверждение.")
 
     REPORT.parent.mkdir(parents=True, exist_ok=True)
-    summary = {**report_provenance(), **summary}
+    summary = {**report_provenance(), **reliability_provenance(), **summary}
     REPORT.write_text(json.dumps(summary, ensure_ascii=False, indent=2),
                       encoding="utf-8")
     print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")

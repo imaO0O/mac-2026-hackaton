@@ -48,7 +48,7 @@ from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.models.kinetics import make_kinetic_surrogate  # noqa: E402
 from nefte.models.quality_model import make_model_surrogate  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
-from nefte.provenance import report_provenance  # noqa: E402
+from nefte.provenance import reliability_provenance, report_provenance  # noqa: E402
 from nefte.sim import ClosedLoopSimulator, summarize  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
@@ -158,6 +158,7 @@ def main() -> int:
 
     REPORT.write_text(json.dumps({
         **report_provenance(cfg),
+        **reliability_provenance(cfg),
         "окно": args.window, "шаг": args.every,
         "отклик_на_градус": table,
         "замкнутый_контур": loops,

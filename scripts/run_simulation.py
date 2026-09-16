@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.provenance import reliability_provenance  # noqa: E402
 from nefte.models.dataset import FEATURE_VERSION  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
 from nefte.sim import RESPONSE_TAU_HOURS, ClosedLoopSimulator, summarize  # noqa: E402
@@ -138,6 +139,7 @@ def main() -> int:
         # поля делает skip, а пропуск неотличим от успеха. Ровно так девять
         # отчётов сетей оказались вне контракта, который их декларировал.
         "feature_version": FEATURE_VERSION,
+        **reliability_provenance(cfg),
         "split": {k: list(v) for k, v in cfg["split"].items()
                   if isinstance(v, (list, tuple))},
         "итог": report,

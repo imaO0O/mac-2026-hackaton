@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.agents.reliability import ReliabilityAgent, regime_anomaly_frame
 from nefte.config import ROOT, load_config  # noqa: E402
+from nefte.provenance import reliability_provenance  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
 from nefte.data.loaders import (  # noqa: E402
     lims_series,
@@ -287,7 +288,8 @@ def main() -> int:
 
     out = ROOT / "reports" / "reliability_metrics.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    out.write_text(json.dumps({**reliability_provenance(cfg), **report},
+                              ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nотчёт: {out}")
     return 0
 

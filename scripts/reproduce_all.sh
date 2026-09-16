@@ -57,6 +57,9 @@ run $PY scripts/check_pipeline_point.py
 run $PY scripts/find_delays.py
 run $PY scripts/check_cetane.py
 run $PY scripts/check_catalyst_life.py
+run $PY scripts/check_f65_units.py
+run $PY scripts/find_regime_episodes.py
+run $PY scripts/check_avt_to_ht_lag.py
 run $PY scripts/check_t95_sigma.py
 
 # 5. разбор моделей качества
@@ -74,6 +77,13 @@ for h in 0 1 2; do slow $PY scripts/check_feature_stability.py --horizon "$h" --
 # 6. прогоны системы
 run $PY scripts/run_test_period.py
 run $PY scripts/run_test_period.py --every 1h --tag step1h
+# износ катализатора в severity: было / (б) журнал замен / (в) активность (п. 1 участника 2);
+# настройки — явно, чтобы «было» не зависело от того, что сейчас включено в конфиге
+for split in test val; do
+  for variant in "--catalyst-factor age --catalyst-reset outage_48h"                  "--catalyst-factor age --catalyst-reset catalyst_log"                  "--catalyst-factor activity --catalyst-reset outage_48h"; do
+    run $PY scripts/run_test_period.py --split "$split" --every 4h --tag step4h $variant
+  done
+done
 for seed in 100 200; do
   run $PY scripts/run_test_period.py --quality-path "models/sulfur_h0_s$seed"
 done
@@ -97,6 +107,7 @@ slow $PY scripts/check_severity_robustness.py --spread 0.2
 
 # 7. сравнения, читающие отчёты прогонов
 run $PY scripts/check_event_response.py
+run $PY scripts/check_catalyst_factor.py
 run $PY scripts/check_offspec_followup.py
 run $PY scripts/compare_decision_curves.py
 run $PY scripts/check_headline_intervals.py

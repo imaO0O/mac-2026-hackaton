@@ -39,6 +39,15 @@ MUST_CARRY_VERSION = ("quality_metrics_", "sequence_metrics_", "alarm_budget_",
                       "adversarial", "architectures", "severity_robustness",
                       "vak_vs_lims")
 
+# Отчёты, где решения принимал оркестратор: тяжесть режима в них зависит от того,
+# как агент надёжности мерил износ катализатора (configs → reliability). Без поля
+# переключение выключателя оставило бы их «свежими» по всем проверкам выше, хотя
+# числа в них посчитаны другой тяжестью режима.
+MUST_CARRY_RELIABILITY = ("test_period.json", "test_period_step1h.json", "test_period_boost_",
+                          "test_period_seq_", "simulation", "adversarial", "architectures",
+                          "severity_robustness", "objective_weights", "return_to_base",
+                          "kinetic_order", "reliability_metrics")
+
 
 def _load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -110,3 +119,55 @@ def test_there_are_reports_to_check():
     assert REPORTS, "в reports/ нет ни одного отчёта"
     covered = [p for p in REPORTS if p.name.startswith(MUST_CARRY_VERSION)]
     assert covered, "ни один отчёт не попал под обязательную проверку версии"
+
+
+def _reliability_settings(cfg: dict) -> dict:
+    settings = cfg.get("reliability") or {}
+    return {"catalyst_factor": settings.get("catalyst_factor", "age"),
+            "catalyst_reset": settings.get("catalyst_reset", "outage_48h")}
+
+
+@pytest.mark.parametrize("path", REPORTS, ids=lambda p: p.name)
+def test_report_matches_the_current_reliability_settings(path: Path):
+    """Износ катализатора в severity мерится так, как сейчас записано в конфиге.
+
+    Сравнения вариантов называют настройки в имени отчёта («catalyst_…») и
+    намеренно с конфигом не совпадают.
+    """
+    settings = _load(path).get("reliability_settings")
+    if settings is None:
+        pytest.skip("отчёт не зависит от тяжести режима или снят до поля")
+    if "catalyst_" in path.name:
+        pytest.skip("сравнение вариантов с явными настройками")
+    assert settings == _reliability_settings(load_config()), (
+        f"{path.name} посчитан с износом катализатора {settings}, а конфиг даёт "
+        f"{_reliability_settings(load_config())}: пересоберите отчёт")
+
+
+# Не пересобраны после включения catalyst_factor: activity, потому что на машине
+# пересборки нет моделей: сети в репозиторий не входят (models/ в .gitignore) и
+# обучаются на GPU (docs/GPU_SETUP.md). Список явный и строгий: пересоберут отчёт —
+# тест начнёт проходить, strict-xfail упадёт, и строку отсюда надо убрать.
+KNOWN_STALE_RELIABILITY = {
+    name: "прогон сети: модели нет на машине пересборки, пересобрать после train_sequence.py"
+    for name in ("test_period_seq_h0.json", "test_period_seq_h2.json",
+                 "test_period_seq_s100_h2.json", "test_period_seq_s200_h2.json")
+}
+
+
+def _orchestrator_reports() -> list:
+    params = []
+    for path in REPORTS:
+        if not path.name.startswith(MUST_CARRY_RELIABILITY):
+            continue
+        reason = KNOWN_STALE_RELIABILITY.get(path.name)
+        marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
+        params.append(pytest.param(path, marks=marks, id=path.name))
+    return params
+
+
+@pytest.mark.parametrize("path", _orchestrator_reports())
+def test_report_built_by_the_orchestrator_says_how_wear_was_measured(path: Path):
+    """Иначе проверка выше его пропускает, а пропуск читается как успех."""
+    assert _load(path).get("reliability_settings") is not None, (
+        f"{path.name} не записывает настройки износа катализатора")
