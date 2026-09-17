@@ -284,6 +284,11 @@ class SulfurModel:
     # от медианы обучающей выборки и возвращаем сдвиг при прогнозе; физика в
     # ограничениях от этого не меняется, а начальная точка перестаёт быть нулём.
     y_offset: float = 0.0
+    # Частота превышений на ОБУЧЕНИИ, под которую пересчитываются шансы
+    # классификатора. Он учится с балансировкой классов (auto_class_weights),
+    # то есть видит превышения так, будто их половина, и его «вероятность» по
+    # построению завышена. None — пересчёта нет (модели, обученные до него).
+    clf_train_rate: float | None = None
     metrics: dict = field(default_factory=dict)
     # матрица признаков на регулярной сетке; нужна, чтобы отдать прогноз по ProcessState
     feature_matrix: pd.DataFrame | None = None
@@ -396,6 +401,7 @@ class SulfurModel:
         )
         clf.fit(X, target, eval_set=eval_set, use_best_model=eval_set is not None)
         self.clf = clf
+        self.clf_train_rate = float(target.mean())
 
     # ------------------------------------------------------------------ #
     def predict_frame(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -409,8 +415,32 @@ class SulfurModel:
     def _raw_risk(self, X: pd.DataFrame) -> pd.Series:
         """Вероятность до поправки — от того источника, который выбран."""
         if self.clf is not None and self.risk_source == "classifier":
-            return pd.Series(self.clf.predict_proba(X[self.features])[:, 1], index=X.index)
+            proba = self.clf.predict_proba(X[self.features])[:, 1]
+            return pd.Series(self._undo_class_balance(proba), index=X.index)
         return interval_risk(self.predict_frame(X), self.limit)
+
+    def _undo_class_balance(self, proba: np.ndarray) -> np.ndarray:
+        """Шансы классификатора — обратно к частоте превышений на обучении.
+
+        С весами Balanced классификатор учится так, будто превышений половина, и
+        его шансы завышены в (1 − π) / π раз, где π — частота на обучении. Пересчёт
+        точный и не подгоняется ни под какое окно: π берётся из обучения, где
+        классификатор и учился. Поправка Платта этого не заменяет — она
+        применяется не всегда (см. calibrate_risk).
+
+        Ошибка была латентной: пока источником риска выбирался интервал,
+        классификатор в решениях не участвовал. На матрице версии 8 по PR-AUC на
+        валидации выиграл классификатор, поправка Платта не применилась из-за
+        нетипичной частоты на валидации, и средний риск на тесте стал 0.44 при
+        частоте превышений 0.145. С пересчётом — 0.13, ECE на валидации 0.27 → 0.05;
+        ранжирование (ROC-AUC, PR-AUC) пересчёт не меняет.
+        """
+        rate = self.clf_train_rate
+        if rate is None or not 0.0 < rate < 1.0:
+            return proba
+        clipped = np.clip(proba, 1e-9, 1 - 1e-9)
+        odds = clipped / (1 - clipped) * rate / (1 - rate)
+        return odds / (1 + odds)
 
     def predict_risk(self, X: pd.DataFrame, raw: bool = False) -> pd.Series:
         """P(показатель > предела). Классификатор, если выбран, иначе — из интервала.
@@ -659,6 +689,7 @@ class SulfurModel:
                 "alarm_threshold": self.alarm_threshold, "limit": self.limit,
                 "monotone": self.monotone, "target": self.target,
                 "y_offset": self.y_offset,
+                "clf_train_rate": self.clf_train_rate,
                 "risk_calibration": list(self.risk_calibration) if self.risk_calibration else None,
                 "risk_calibration_note": self.risk_calibration_note,
                 "risk_source": self.risk_source, "alarm_reliable": self.alarm_reliable}
@@ -685,7 +716,8 @@ class SulfurModel:
                   alarm_threshold_fbeta=meta.get("alarm_threshold_fbeta"),
                   monotone=meta.get("monotone", True),
                   target=meta.get("target", "sulfur"),
-                  y_offset=meta.get("y_offset", 0.0))
+                  y_offset=meta.get("y_offset", 0.0),
+                  clf_train_rate=meta.get("clf_train_rate"))
         for name in ("q50", "q10", "q90"):
             model = CatBoostRegressor()
             model.load_model(str(path / f"{name}.cbm"))

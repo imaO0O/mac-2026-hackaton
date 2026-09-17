@@ -151,6 +151,9 @@ def main() -> int:
               "split": {k: list(v) for k, v in cfg["split"].items()
                         if isinstance(v, (list, tuple))},
               "sigma_scale": model.sigma_scale, "alarm_threshold": model.alarm_threshold,
+              # частота превышений на обучении, к которой пересчитаны шансы
+              # классификатора (модели до пересчёта этого поля не имеют)
+              "risk_prior_correction": model.clf_train_rate,
               "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
               "alarm_budget": cfg["quality"].get("alarm_budget"),
               "splits": {}}

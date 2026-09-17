@@ -16,7 +16,7 @@ set -u
 cd "$(dirname "$0")/.."
 PY=.venv/Scripts/python.exe
 LOG_DIR=${LOG_DIR:-/tmp}
-MARKER='"spec_threshold"'
+MARKER='"risk_prior_correction"'
 VERSION=$($PY -c 'import sys; sys.path.insert(0, "src"); from nefte.models.dataset import FEATURE_VERSION; print(FEATURE_VERSION)')
 VERSION_MARKER="\"feature_version\": $VERSION,"
 run () {

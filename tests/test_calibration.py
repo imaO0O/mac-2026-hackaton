@@ -74,6 +74,47 @@ def test_calibration_decision_survives_save_and_load(tmp_path):
     assert "не применена" in restored.risk_calibration_note
 
 
+def test_balanced_classifier_is_brought_back_to_the_training_rate():
+    """Классификатор учится с весами Balanced — будто превышений половина.
+
+    Без пересчёта его «вероятность» завышена по построению. На матрице версии 8 он
+    выиграл выбор источника на валидации, поправка Платта не применилась, и средний
+    риск на тесте стал 0.44 при частоте превышений 0.145. После пересчёта средняя
+    вероятность на обучении обязана быть близка к частоте превышений там же.
+    """
+    X, y = _frame(n=800)
+    model = SulfurModel(iterations=150, monotone=False).fit(X, y)
+    rate = float((y > model.limit).mean())
+    assert model.clf_train_rate == pytest.approx(rate)
+    model.risk_source = "classifier"
+    corrected = model.predict_risk(X, raw=True)
+    balanced = pd.Series(model.clf.predict_proba(X[model.features])[:, 1], index=X.index)
+    assert balanced.mean() > rate + 0.1
+    assert abs(corrected.mean() - rate) < abs(balanced.mean() - rate) / 3
+
+
+def test_prior_correction_keeps_the_ranking_and_the_extremes():
+    model = SulfurModel()
+    model.clf_train_rate = 0.15
+    proba = np.array([0.01, 0.3, 0.5, 0.7, 0.99])
+    corrected = model._undo_class_balance(proba)
+    assert np.all(np.diff(corrected) > 0)
+    # при p = 0.5 классификатор «не знает» — это и есть частота на обучении
+    assert corrected[2] == pytest.approx(0.15)
+    model.clf_train_rate = None
+    assert np.array_equal(model._undo_class_balance(proba), proba)
+
+
+def test_prior_correction_survives_save_and_load(tmp_path):
+    X, y = _frame()
+    model = SulfurModel(iterations=80, monotone=False).fit(X, y)
+    model.save(tmp_path / "m")
+    restored = SulfurModel.load(tmp_path / "m")
+    assert restored.clf_train_rate == pytest.approx(model.clf_train_rate)
+    model.risk_source = restored.risk_source = "classifier"
+    assert np.allclose(model.predict_risk(X), restored.predict_risk(X))
+
+
 # --------------------------------------------------------------------------- #
 # сами метрики калибровки
 # --------------------------------------------------------------------------- #
