@@ -81,6 +81,12 @@ SERVE_COMPUTED = ("feature_age_h",)
 PROBE_SEED_STRIDE = 1000
 
 # 90 % интервал: σ = (q90 - q10) / (2 * 1.2816)
+# Насколько классификатор обязан выигрывать у интервала на валидации, чтобы стать
+# источником вероятности. Не вкусовое число: PR-AUC классификатора скачет между
+# сидами на 0.13 (0.41 / 0.28 / 0.29 при сидах 42 / 100 / 200), у интервала — 0.04.
+# Выигрыш меньше запаса неотличим от сида, а источник риска определяет все решения.
+MIN_SOURCE_MARGIN = 0.05
+
 Z90 = 1.2815515655446004
 
 
@@ -466,12 +472,22 @@ class SulfurModel:
         return pd.Series(1 / (1 + np.exp(-(a * logit + b))), index=X.index)
 
     def select_risk_source(self, X_val: pd.DataFrame, y_val: pd.Series,
-                           min_spread: float = 0.05) -> str:
+                           min_spread: float = 0.05,
+                           min_margin: float = MIN_SOURCE_MARGIN) -> str:
         """Чем считать вероятность нарушения: классификатором или интервалом.
 
         Выбор делается на валидации по PR-AUC, но только среди источников, у которых
         вероятность вообще меняется: после калибровки неинформативный классификатор
         схлопывается в константу около базовой частоты, и решать по ней нельзя.
+
+        По умолчанию источник — ИНТЕРВАЛ, и классификатор забирает его, только если
+        выигрывает с запасом ``min_margin``. Причина измерена на валидации: PR-AUC
+        классификатора скачет от сида к сиду (0.41 при рабочем сиде 42, 0.28 и 0.29
+        при 100 и 200), у интервала держится 0.40–0.44. На матрице версии 8
+        классификатор выиграл 0.0088 — на порядок меньше собственного разброса, то
+        есть по шуму, и решения всей системы поехали бы за этим шумом. Запас 0.05
+        выбран по разбросу между сидами (0.13) с запасом вниз; тест в правиле не
+        участвует (``docs/QUALITY_AGENT.md``).
         """
         from sklearn.metrics import average_precision_score
 
@@ -490,10 +506,18 @@ class SulfurModel:
             spreads[source] = float(risk.quantile(0.95) - risk.quantile(0.05))
 
         usable = [k for k in scores if spreads[k] >= min_spread]
-        self.risk_source = (max(usable, key=scores.get) if usable
-                            else max(scores, key=scores.get))
+        if "interval" in usable:
+            self.risk_source = ("classifier"
+                                if "classifier" in usable
+                                and scores["classifier"] >= scores["interval"] + min_margin
+                                else "interval")
+        elif usable:
+            self.risk_source = usable[0]
+        else:
+            self.risk_source = max(scores, key=scores.get)
         self.risk_source_scores = scores
         self.risk_source_spreads = spreads
+        self.risk_source_margin = min_margin
         if not usable:
             self.alarm_reliable = False
         return self.risk_source

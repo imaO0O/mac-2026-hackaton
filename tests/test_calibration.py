@@ -93,6 +93,46 @@ def test_balanced_classifier_is_brought_back_to_the_training_rate():
     assert abs(corrected.mean() - rate) < abs(balanced.mean() - rate) / 3
 
 
+def test_classifier_takes_the_source_only_with_a_margin():
+    """Источник риска не должен переключаться по шуму сида.
+
+    PR-AUC классификатора на валидации скачет между сидами на 0.13, у интервала —
+    на 0.04. На матрице версии 8 классификатор выиграл 0.0088 и забрал источник,
+    а с ним и все решения системы. Правило: забирает, только если выигрывает с
+    запасом MIN_SOURCE_MARGIN.
+    """
+    X, y = _frame(n=600)
+    model = SulfurModel(iterations=120, monotone=False).fit(X, y)
+
+    class Stub:
+        """Классификатор с управляемым скором: проверяем правило, а не обучение."""
+
+        def __init__(self, score):
+            self.score = np.asarray(score)
+
+        def predict_proba(self, X):
+            return np.column_stack([1 - self.score, self.score])
+
+    over = (y > model.limit).to_numpy()
+    rng = np.random.default_rng(0)
+    model.clf_train_rate = None          # скор стоящий, пересчёт тут не при чём
+    interval = model.predict_risk(X, raw=True).to_numpy()
+
+    # чуть лучше интервала — источником остаётся интервал
+    model.clf = Stub(np.clip(interval + 0.02 * over, 1e-6, 1 - 1e-6))
+    assert model.select_risk_source(X, y) == "interval"
+    scores = model.risk_source_scores
+    assert scores["classifier"] > scores["interval"], "проверять нечего: скор не лучше"
+    assert scores["classifier"] - scores["interval"] < 0.05
+
+    # заметно лучше — забирает
+    strong = np.where(over, rng.uniform(0.7, 0.95, len(over)), rng.uniform(0.01, 0.2, len(over)))
+    model.clf = Stub(strong)
+    assert model.select_risk_source(X, y) == "classifier"
+    assert (model.risk_source_scores["classifier"]
+            >= model.risk_source_scores["interval"] + 0.05)
+
+
 def test_prior_correction_keeps_the_ranking_and_the_extremes():
     model = SulfurModel()
     model.clf_train_rate = 0.15
