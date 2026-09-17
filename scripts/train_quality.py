@@ -154,6 +154,9 @@ def main() -> int:
               # частота превышений на обучении, к которой пересчитаны шансы
               # классификатора (модели до пересчёта этого поля не имеют)
               "risk_prior_correction": model.clf_train_rate,
+              # запас, с которым классификатор забирает источник вероятности:
+              # часть постановки, и по нему же скрипт переобучения видит формат
+              "risk_source_margin": getattr(model, "risk_source_margin", None),
               "alarm_threshold_fbeta": model.alarm_threshold_fbeta,
               "alarm_budget": cfg["quality"].get("alarm_budget"),
               "splits": {}}
