@@ -93,6 +93,7 @@ run $PY scripts/check_t95_calibration.py
 run $PY scripts/check_upper_edge_risk.py
 # модель серы против Q21 — второго анализатора серы в телеметрии (ответы 15.09)
 run $PY scripts/check_q21_baseline.py
+run $PY scripts/check_q21_source.py
 run $PY scripts/check_alarm_budget.py --horizon 0
 if $PY -c "import torch" 2>/dev/null; then
   run $PY scripts/check_alarm_budget.py --horizon 2 --model seq --arch tcn --window 48 --pretrain
@@ -162,6 +163,10 @@ run $PY scripts/check_event_response.py reports/val_period_step1h_lock4.json \
   --out reports/repeat_val_event_response.json
 run $PY scripts/check_robust_recommendation.py
 run $PY scripts/check_catalyst_factor.py
+# перепад Р-202 вариантом «прирост» — правило приёмки на валидации, шаг 1 ч
+run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --dp-factor off
+run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --dp-factor growth
+run $PY scripts/check_dp_growth.py
 run $PY scripts/check_offspec_followup.py
 run $PY scripts/compare_decision_curves.py
 run $PY scripts/check_headline_intervals.py
