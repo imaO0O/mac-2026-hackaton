@@ -80,6 +80,7 @@ run $PY scripts/check_cetane.py
 run $PY scripts/check_catalyst_life.py
 run $PY scripts/check_f65_units.py
 run $PY scripts/find_regime_episodes.py
+run $PY scripts/check_sulfur_response.py
 run $PY scripts/check_avt_to_ht_lag.py
 run $PY scripts/check_ht_balance.py
 run $PY scripts/check_dp_proxy.py
