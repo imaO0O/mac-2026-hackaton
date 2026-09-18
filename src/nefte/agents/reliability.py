@@ -31,14 +31,14 @@ import pandas as pd
 from nefte.agents.schemas import ProcessState, ReliabilityAssessment
 from nefte.config import load_config
 from nefte.models.anomaly import RegimeAnomalyDetector
-from nefte.models.catalyst import activity_level_series, hours_since_marks
+from nefte.models.catalyst import activity_level_series, dp_growth_series, hours_since_marks
 from nefte.models.regime import FEED, RECYCLE_GAS, hours_since_outage, implied_t6
 
 # Как агент судит об износе катализатора (configs/config.yaml → reliability).
 CATALYST_FACTORS = ("age", "activity")
 # Чем фактор «перепад давления Р-202» входит в тяжесть режима. "off" — не входит
 # вовсе, "level" — нормированный уровень P8, как было. Разбор — docs/DP_PROXY.md.
-DP_FACTORS = ("off", "level")
+DP_FACTORS = ("off", "level", "growth")
 CATALYST_RESETS = ("outage_48h", "catalyst_log")
 
 
@@ -159,7 +159,8 @@ class ReliabilityAgent:
                  anomaly_series: pd.Series | None = None,
                  anomaly_parts: pd.DataFrame | None = None,
                  catalyst_series: pd.Series | None = None,
-                 dp_factor: str = "off"):
+                 dp_factor: str = "off",
+                 dp_series: pd.Series | None = None):
         self.norms = norms or SeverityNorms(bounds={})
         # нормированная скорость изменения режима, посчитанная по истории
         self.ramp_series = ramp_series
@@ -187,6 +188,9 @@ class ReliabilityAgent:
         # reliability.dp_factor). По умолчанию НЕ входит: измеренный отказ,
         # docs/DP_PROXY.md и docs/PLAN.md.
         self.dp_factor = dp_factor
+        # Прирост перепада от начала цикла готовым рядом (dp_factor: growth,
+        # models/catalyst.dp_growth_series). При off и level не используется.
+        self.dp_series = dp_series
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -261,7 +265,7 @@ class ReliabilityAgent:
                              f"ожидалось одно из {CATALYST_RESETS}")
 
         run_hours, run_scale, feed_median = None, None, None
-        catalyst_series = None
+        catalyst_series, dp_series = None, None
         source = raw_ht if raw_ht is not None else ht
         if FEED in source.columns:
             feed_median = float(source[FEED].median())
@@ -275,6 +279,9 @@ class ReliabilityAgent:
             run_scale = float(run_hours.loc[train[0]:train[1]].quantile(0.95)) or None
             if factor_mode == "activity":
                 catalyst_series = activity_level_series(ht, source[FEED], train)
+            if dp_mode == "growth":
+                dp_series = dp_growth_series(ht, source[FEED], train,
+                                             rel_cfg.get("catalyst_changes") or [])
 
         down_series = None
         if feed_median and temps and all(t in source.columns for t in temps):
@@ -290,7 +297,8 @@ class ReliabilityAgent:
         agent = cls(norms=norms, ramp_series=ramp, run_hours=run_hours,
                     run_hours_scale=run_scale, detector=detector,
                     feed_median=feed_median, down_series=down_series,
-                    catalyst_series=catalyst_series, dp_factor=dp_mode)
+                    catalyst_series=catalyst_series, dp_factor=dp_mode,
+                    dp_series=dp_series)
         agent.thresholds = agent._calibrate_thresholds(frame, anomaly_frame, train)
         return agent
 
@@ -333,6 +341,8 @@ class ReliabilityAgent:
                 norm = self.norms.normalize_series(column, frame[column])
                 if norm is not None:
                     factors[key] = norm
+        if self.dp_factor == "growth" and self.dp_series is not None:
+            factors["dp_r202"] = self.dp_series.reindex(frame.index).clip(0.0, 1.5)
         if self.ramp_series is not None:
             factors["ramp"] = self.ramp_series.reindex(frame.index).clip(0.0, 1.0)
         if self.catalyst_series is not None:
@@ -379,6 +389,11 @@ class ReliabilityAgent:
             if n is not None:
                 factors[key] = n
 
+        if self.dp_factor == "growth":
+            growth = self._dp_growth_at(state.ts)
+            if growth is not None:
+                factors["dp_r202"] = float(np.clip(growth, 0.0, 1.5))
+
         ramp = self._ramp_at(state.ts)
         if ramp is not None:
             factors["ramp"] = float(np.clip(ramp, 0.0, 1.0))
@@ -422,6 +437,13 @@ class ReliabilityAgent:
         if self.catalyst_series is None:
             return None
         sub = self.catalyst_series.loc[:ts].dropna()
+        return None if sub.empty else float(sub.iloc[-1])
+
+    def _dp_growth_at(self, ts) -> float | None:
+        """Прирост перепада из готового ряда, если агент собран с dp_factor: growth."""
+        if self.dp_series is None:
+            return None
+        sub = self.dp_series.loc[:ts].dropna()
         return None if sub.empty else float(sub.iloc[-1])
 
     def _run_hours_at(self, ts) -> float | None:

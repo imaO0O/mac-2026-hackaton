@@ -5,11 +5,12 @@
 проверяется тестами (`tests/test_reliability_panel.py`), а не глазами.
 
 ```python
-from nefte.reliability_panel import catalyst_basis, load_catalyst_report, reliability_panel
+from nefte.reliability_panel import catalyst_basis, dp_mode, load_catalyst_report, reliability_panel
 
 catalyst_report = load_catalyst_report(ROOT)          # один раз при старте
 r = system.reliability.assess(state)                  # уже есть в app/dashboard.py
-panel = reliability_panel(r, catalyst_report, ts, basis=catalyst_basis(system.reliability))
+panel = reliability_panel(r, catalyst_report, ts, basis=catalyst_basis(system.reliability),
+                          dp=dp_mode(system.reliability))
 ```
 
 Отчёт катализатора — `reports/catalyst_life.json` (`scripts/check_catalyst_life.py`).
@@ -25,6 +26,7 @@ panel = reliability_panel(r, catalyst_report, ts, basis=catalyst_basis(system.re
 | `факторы` | шесть строк по убыванию вклада: `название`, `значение`, `вес`, `вклад`; `что это` — в подсказку |
 | `главный фактор` | выделить |
 | `нет данных` | факторы, по которым в момент не было измерений: вклады остальных пересчитаны на их веса |
+| `выключены` | факторы, которые не считаются намеренно, с причиной — сейчас перепад Р-202 (`reliability.dp_factor: off`, `docs/DP_PROXY.md`). Показывать отдельно от «нет данных»: его не потеряли |
 | `сужение границ` | тег → [нижняя, верхняя] для оптимизатора |
 | `заметки` | как есть |
 

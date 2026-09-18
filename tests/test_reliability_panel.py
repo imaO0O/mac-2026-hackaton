@@ -53,7 +53,7 @@ def _assessment(factors: dict, risk_class: str = "medium") -> ReliabilityAssessm
 
 
 def test_contributions_add_up_to_the_index_and_are_ranked():
-    section = severity_section(_assessment(FACTORS))
+    section = severity_section(_assessment(FACTORS), dp="level")
     contributions = [row["вклад"] for row in section["факторы"]]
     assert sum(contributions) == pytest.approx(0.475, abs=0.003)
     assert contributions == sorted(contributions, reverse=True)
@@ -63,7 +63,7 @@ def test_contributions_add_up_to_the_index_and_are_ranked():
 
 def test_missing_factor_is_named_and_weights_renormalize():
     factors = {k: v for k, v in FACTORS.items() if k != "anomaly"}
-    section = severity_section(_assessment(factors))
+    section = severity_section(_assessment(factors), dp="level")
     assert section["нет данных"] == ["нетипичность режима"]
     assert sum(row["вклад"] for row in section["факторы"]) == pytest.approx(
         (0.475 - 0.15 * 0.2) / 0.85, abs=0.003)
@@ -132,3 +132,22 @@ def test_panel_without_catalyst_report_still_renders_severity():
     panel = reliability_panel(_assessment(FACTORS), None)
     assert panel["катализатор"]["доступно"] is False
     assert panel["тяжесть"]["класс"] == "medium"
+
+
+def test_disabled_pressure_drop_is_named_as_disabled_not_missing():
+    """Выключенный перепад — не «нет данных»: его не считают намеренно."""
+    factors = {k: v for k, v in FACTORS.items() if k != "dp_r202"}
+    section = severity_section(_assessment(factors), dp="off")
+    assert "перепад давления на Р-202" not in section["нет данных"]
+    assert [x["фактор"] for x in section["выключены"]] == ["перепад давления на Р-202"]
+    assert sum(row["вклад"] for row in section["факторы"]) == pytest.approx(
+        (0.475 - 0.20 * 0.5) / 0.80, abs=0.003)
+
+
+def test_pressure_drop_label_follows_the_mode():
+    level = severity_section(_assessment(FACTORS), dp="level")
+    growth = severity_section(_assessment(FACTORS), dp="growth")
+    meaning = {m: {r["фактор"]: r["что это"] for r in s["факторы"]}["dp_r202"]
+               for m, s in (("level", level), ("growth", growth))}
+    assert "гидравлику" in meaning["level"]
+    assert "от начала цикла" in meaning["growth"]

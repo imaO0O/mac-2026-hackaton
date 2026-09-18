@@ -171,7 +171,7 @@ def main() -> int:
                     help="повтор действия до проявления прошлого — только при росте риска")
     ap.add_argument("--catalyst-factor", choices=("age", "activity"), default=None,
                     help="переопределить reliability.catalyst_factor")
-    ap.add_argument("--dp-factor", choices=("off", "level"), default=None,
+    ap.add_argument("--dp-factor", choices=("off", "level", "growth"), default=None,
                     help="переопределить reliability.dp_factor (перепад Р-202 в тяжести)")
     ap.add_argument("--catalyst-reset", choices=("outage_48h", "catalyst_log"), default=None,
                     help="переопределить reliability.catalyst_reset")

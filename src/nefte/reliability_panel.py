@@ -54,6 +54,18 @@ CATALYST_BASIS = {
     "activity": "уровень WABT, приведённой к нагрузке, за 30 суток в долях p05…p95 "
                 "обучающего периода",
 }
+# Перепад Р-202 по режиму агента (reliability.dp_factor): подпись фактора и почему
+# он может быть выключен. Выключенный — не «нет данных»: его не потеряли, его не
+# считают намеренно, и оператор должен это видеть.
+DP_MEANING = {
+    "level": "уровень P8 в долях диапазона обучающего периода: меряет гидравлику и "
+             "плотность загрузки, а не износ (docs/DP_PROXY.md)",
+    "growth": "прирост P8 от начала цикла при той же нагрузке, в долях p95 обучающего "
+              "периода",
+}
+DISABLED_WHY = {"dp_r202": "выключен: на выданных данных перепад не растёт с наработкой, "
+                           "а уровнем переводит свежую загрузку в тяжёлый режим "
+                           "(docs/DP_PROXY.md)"}
 CLASS_TEXT = {
     "low": "мягкий режим: дополнительных ограничений нет",
     "medium": "средний режим: шаг вверх по реакторным температурам не больше 1 °C",
@@ -75,6 +87,11 @@ def catalyst_basis(agent: ReliabilityAgent) -> str:
     return "activity" if getattr(agent, "catalyst_series", None) is not None else "age"
 
 
+def dp_mode(agent: ReliabilityAgent) -> str:
+    """Как агент учитывает перепад Р-202: off, level или growth."""
+    return getattr(agent, "dp_factor", "level")
+
+
 def _finite(value) -> bool:
     return value is not None and not (isinstance(value, float) and math.isnan(value))
 
@@ -84,16 +101,19 @@ def _finite(value) -> bool:
 # --------------------------------------------------------------------------- #
 
 def severity_section(assessment: ReliabilityAssessment, basis: str = "age",
-                     weights: dict[str, float] | None = None) -> dict:
+                     weights: dict[str, float] | None = None, dp: str = "off") -> dict:
     weights = weights or ReliabilityAgent.WEIGHTS
+    disabled = ["dp_r202"] if dp == "off" else []
     present = {k: float(v) for k, v in assessment.factors.items()
-               if k in weights and _finite(v)}
+               if k in weights and k not in disabled and _finite(v)}
     total = sum(weights[k] for k in present)
     rows = []
     for key, value in present.items():
         label, meaning = FACTOR_LABELS.get(key, (key, ""))
         if key == "catalyst":
             meaning = CATALYST_BASIS.get(basis, "")
+        if key == "dp_r202":
+            meaning = DP_MEANING.get(dp, meaning)
         rows.append({"фактор": key, "название": label, "что это": meaning,
                      "значение": round(value, 3), "вес": weights[key],
                      "вклад": round(weights[key] * value / total, 3) if total else None})
@@ -104,7 +124,10 @@ def severity_section(assessment: ReliabilityAssessment, basis: str = "age",
         "что значит класс": CLASS_TEXT[assessment.risk_class],
         "главный фактор": rows[0]["название"] if rows else None,
         "факторы": rows,
-        "нет данных": [FACTOR_LABELS.get(k, (k, ""))[0] for k in weights if k not in present],
+        "нет данных": [FACTOR_LABELS.get(k, (k, ""))[0] for k in weights
+                       if k not in present and k not in disabled],
+        "выключены": [{"фактор": FACTOR_LABELS.get(k, (k, ""))[0], "почему": DISABLED_WHY[k]}
+                      for k in disabled],
         "сужение границ": {tag: [round(lo, 2), round(hi, 2)]
                            for tag, (lo, hi) in assessment.constraints.items()},
         "заметки": list(assessment.notes),
@@ -235,8 +258,9 @@ def catalyst_section(report: dict | None, ts) -> dict:
 
 
 def reliability_panel(assessment: ReliabilityAssessment, catalyst_report: dict | None,
-                      ts: datetime | pd.Timestamp | None = None, basis: str = "age") -> dict:
+                      ts: datetime | pd.Timestamp | None = None, basis: str = "age",
+                      dp: str = "off") -> dict:
     """Всё содержание блока надёжности для выбранного момента."""
     moment = ts if ts is not None else assessment.ts
-    return {"тяжесть": severity_section(assessment, basis),
+    return {"тяжесть": severity_section(assessment, basis, dp=dp),
             "катализатор": catalyst_section(catalyst_report, moment)}

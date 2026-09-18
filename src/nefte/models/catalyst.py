@@ -695,3 +695,68 @@ def activity_level_series(ht: pd.DataFrame, raw_feed: pd.Series,
         return None
     factor = ((smooth - low) / (high - low)).clip(0.0, 1.5)
     return factor.reindex(ht.index, method="ffill")
+
+
+DP_TAG = "P8"                # перепад давления Р-202 по новой таблице тегов (15.09)
+DP_BASELINE_DAYS = 30        # опорный уровень цикла — первые 30 суток после загрузки
+
+
+def dp_growth_series(ht: pd.DataFrame, raw_feed: pd.Series, train: tuple[str, str],
+                     changes, baseline_days: int = DP_BASELINE_DAYS) -> pd.Series | None:
+    """Прирост перепада на Р-202 от начала цикла при той же нагрузке (участник 2).
+
+    Определение — из правила приёмки, записанного до счёта (docs/PLAN.md): остаток
+    P8 после гидравлики a + b·F26², подогнанной на обучающем периоде, минус медиана
+    этого остатка за первые ``baseline_days`` суток после последней загрузки
+    катализатора (``reliability.catalyst_changes``); нормировка — на p95 той же
+    величины на обучающем периоде.
+
+    Зачем прирост, а не уровень. Уровень P8 меряет гидравлику и плотность загрузки:
+    после каждой загрузки свежего катализатора он прыгает вверх, и нормировка по
+    собственной истории делала тяжёлым режимом любую свежую загрузку
+    (docs/DP_PROXY.md). Закоксовывание — это рост сопротивления слоя ОТ НАЧАЛА цикла
+    при той же нагрузке, его и меряем.
+
+    Причинность и то, чего правило не говорит, — решено до счёта:
+
+    * остаток сглажен скользящей медианой за 24 ч по прошлому: мгновенный P8 шумит
+      на величину, сравнимую с самим приростом;
+    * в первые ``baseline_days`` суток цикла опора — медиана остатка от загрузки до
+      текущего момента: будущего опора не видит;
+    * до первой загрузки в данных опора — первые ``baseline_days`` суток данных:
+      катализатор там уже какого-то возраста, как у наработки;
+    * отрицательный прирост — ноль: тяжесть от него не падает ниже «как в начале».
+    """
+    if DP_TAG not in ht.columns or FEED not in ht.columns:
+        return None
+    feed = ht[FEED]
+    reference = float(feed.loc[train[0]:train[1]].median())
+    if not reference > 0:
+        return None
+    down = outage_mask(raw_feed.reindex(ht.index), min_outage_hours=6.0, train_bounds=train)
+    working = ~down & (feed > 0.5 * reference)
+    dp, load = ht[DP_TAG].where(working), feed.where(working)
+    fit = pd.concat([dp.rename("dp"), load.rename("f")], axis=1).loc[train[0]:train[1]].dropna()
+    if len(fit) < 1000:
+        return None
+    slope, intercept = np.polyfit(fit["f"] ** 2, fit["dp"], 1)
+    resid = dp - (intercept + slope * load ** 2)
+    hourly = resid.resample("1h", label="right", closed="right").median()
+    smooth = hourly.rolling("24h", min_periods=6).median()
+
+    starts = [smooth.index[0]] + sorted(pd.Timestamp(c) for c in changes
+                                        if pd.Timestamp(c) > smooth.index[0])
+    base = pd.Series(np.nan, index=smooth.index)
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else None
+        in_cycle = (smooth.index >= start) & ((smooth.index < end) if end is not None else True)
+        cycle = smooth[in_cycle]
+        early = cycle[cycle.index < start + pd.Timedelta(days=baseline_days)]
+        level = pd.Series(early.median(), index=cycle.index)
+        level.loc[early.index] = early.expanding(min_periods=1).median()
+        base.loc[cycle.index] = level
+    growth = smooth - base
+    scale = float(growth.loc[train[0]:train[1]].quantile(0.95))
+    if not scale > 0:
+        return None
+    return (growth / scale).clip(0.0, 1.5).reindex(ht.index, method="ffill")

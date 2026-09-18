@@ -48,7 +48,7 @@ def _history(n: int = 400):
     return avt, ht
 
 
-@pytest.mark.parametrize("mode", ["off", "level"])
+@pytest.mark.parametrize("mode", ["off", "level", "growth"])
 def test_switch_reaches_the_agent_from_config(mode):
     cfg = load_config()
     local = {**cfg, "reliability": {**cfg["reliability"], "dp_factor": mode},
@@ -85,3 +85,78 @@ def test_weights_are_renormalized_not_diluted():
     """
     same = _severity("level", 0.18)   # перепад ровно посередине шкалы
     assert _severity("off", 0.18) == pytest.approx(same, abs=0.02)
+
+
+# --------------------------------------------------------------------------- #
+# вариант «прирост» (dp_factor: growth) — участник 2
+# --------------------------------------------------------------------------- #
+
+import numpy as np  # noqa: E402
+
+from nefte.models.catalyst import dp_growth_series  # noqa: E402
+
+GROWTH_TRAIN = ("2024-01-01", "2024-04-30")
+LOADING = "2024-05-30"          # 150-е сутки синтетической истории
+
+
+def _dp_history(days: int = 330, rate: float = 0.0002, step: float = 0.03,
+                seed: int = 0) -> pd.DataFrame:
+    """P8 = гидравлика + рост внутри цикла; на 150-е сутки загрузка со скачком вверх.
+
+    Так ведёт себя P8 на выданных данных (docs/DP_PROXY.md): после загрузки свежего
+    катализатора уровень прыгает вверх, а закоксовывание — это рост ОТ этого уровня.
+    """
+    idx = pd.date_range("2024-01-01", periods=days * 144, freq="10min", name="date")
+    rng = np.random.default_rng(seed)
+    day = np.arange(len(idx)) / 144
+    feed = 250.0 + 20.0 * np.sin(np.arange(len(idx)) / 500.0) + rng.normal(0, 3.0, len(idx))
+    cycle_day = np.where(day >= 150, day - 150, day)
+    p8 = (0.09 + 1.2e-6 * feed ** 2 + rate * cycle_day + np.where(day >= 150, step, 0.0)
+          + rng.normal(0, 0.002, len(idx)))
+    return pd.DataFrame({"P8": p8, "F26": feed}, index=idx)
+
+
+def _growth(ht: pd.DataFrame) -> pd.Series:
+    series = dp_growth_series(ht, ht["F26"], GROWTH_TRAIN, [LOADING])
+    assert series is not None
+    return series
+
+
+def test_growth_ignores_the_jump_after_a_fresh_loading():
+    """Скачок уровня после загрузки — не износ: опора цикла пересчитывается."""
+    series = _growth(_dp_history())
+    after_loading = series.loc["2024-06-04":"2024-06-24"].median()
+    assert after_loading < 0.3, "скачок загрузки прошёл бы в фактор как тяжесть"
+
+
+def test_growth_follows_coking_within_a_cycle():
+    series = _growth(_dp_history())
+    assert series.loc["2024-11-01":"2024-11-20"].median() > (
+        series.loc["2024-07-10":"2024-07-20"].median() + 0.3)
+
+
+def test_growth_uses_only_the_past():
+    """Значение на момент после обучающего периода не зависит от будущего."""
+    ht = _dp_history()
+    cut = pd.Timestamp("2024-09-15 12:00")
+    full = _growth(ht)
+    past = dp_growth_series(ht.loc[:cut], ht["F26"].loc[:cut], GROWTH_TRAIN, [LOADING])
+    assert past is not None
+    assert full.loc[cut] == pytest.approx(past.loc[cut])
+
+
+def test_growth_mode_puts_the_series_into_severity():
+    cfg = load_config()
+    ht = _dp_history()
+    ht = ht.assign(T5=370.0, T6=365.0, T11=366.0, F2=90000.0, P13=3.9)
+    avt = pd.DataFrame({"T55": 380.0}, index=ht.index)
+    local = {**cfg, "reliability": {**cfg["reliability"], "dp_factor": "growth",
+                                    "catalyst_changes": [LOADING]},
+             "split": {**cfg["split"], "train": list(GROWTH_TRAIN)}}
+    agent = ReliabilityAgent.from_history(avt, ht, local)
+    assert agent.dp_series is not None
+    frame = pd.DataFrame({"wabt": ht[["T5", "T6", "T11"]].mean(axis=1), "P8": ht["P8"],
+                          "T55": avt["T55"]})
+    _, factors = agent.severity_series(frame, with_factors=True)
+    assert "dp_r202" in factors.columns
+    assert factors["dp_r202"].notna().sum() > 1000
