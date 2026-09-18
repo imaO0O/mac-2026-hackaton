@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from nefte.agents.optimizer import PARETO_EPS, OptimizerAgent, linear_surrogate
-from nefte.agents.orchestrator import Orchestrator
+from nefte.agents.orchestrator import MEASURED_RESPONSE_SHARE, Orchestrator
 from nefte.agents.quality import (
     SOURCE_CONFIDENCE,
     QualityAgent,
@@ -548,7 +548,11 @@ def test_kinetic_effect_is_declared_as_physics_not_measurement():
                           log_runs=False)
     rec = system.run(make_state(lims=(9.5, 1.0), pak=(9.6, 0.1)))
     if not rec.abstained:
-        assert "кинетике" in rec.explanation and "допущение" in rec.explanation
+        # приращение объявлено расчётным, и рядом названо измеренное отношение:
+        # без второго обещание эффекта читается как факт (docs/SULFUR_RESPONSE.md)
+        assert "кинетике" in rec.explanation
+        assert "наблюдаемый" in rec.explanation.lower()
+        assert f"{MEASURED_RESPONSE_SHARE:.0%}" in rec.explanation
 
 
 # --------------------------------------------------------------------------- #

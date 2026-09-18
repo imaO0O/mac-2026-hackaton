@@ -25,8 +25,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from nefte.agents.schemas import effect_text  # noqa: E402
 from nefte.config import load_config  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
+from nefte.config import ROOT  # noqa: E402
 from nefte.data.loaders import lims_series  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
+from nefte.reliability_panel import (  # noqa: E402
+    catalyst_basis,
+    dp_mode,
+    load_catalyst_report,
+    reliability_panel,
+)
 
 st.set_page_config(page_title="МАС «Нефтекод»", layout="wide")
 
@@ -142,6 +149,62 @@ def ask_block(cfg: dict, rec) -> None:
         (st.success if answer.from_llm else st.warning)(answer.text)
         if answer.note:
             st.caption(answer.note)
+
+
+def severity_block(section: dict) -> None:
+    """Тяжесть режима: не одно число, а из чего оно сложилось.
+
+    Раньше здесь была голая столбиковая диаграмма факторов. Она не отвечала на два
+    вопроса, которые оператор задаёт первыми: что именно класс запрещает и почему
+    фактора нет в списке — его не измерили или он намеренно выключен. Содержание
+    собирает `nefte.reliability_panel`, проверенный тестами; здесь только вёрстка.
+    """
+    st.subheader("Тяжесть режима: из чего сложилась")
+    left, right = st.columns([2, 3])
+    with left:
+        st.metric("Индекс", f"{section['индекс']:.2f}", section["класс"], delta_color="off")
+        st.caption(section["что значит класс"])
+        if section["выключены"]:
+            for item in section["выключены"]:
+                st.caption(f"⏻ {item['фактор']} — {item['почему']}")
+        if section["нет данных"]:
+            st.caption("нет измерений: " + ", ".join(section["нет данных"])
+                       + " (вклады остальных пересчитаны на их веса)")
+    with right:
+        rows = section["факторы"]
+        if rows:
+            frame = pd.DataFrame(rows).set_index("название")
+            st.bar_chart(frame["вклад"])
+            st.dataframe(frame[["значение", "вес", "вклад"]], use_container_width=True)
+    if section["сужение границ"]:
+        limits = ", ".join(f"{tag} ∈ [{lo:g}, {hi:g}]"
+                           for tag, (lo, hi) in section["сужение границ"].items())
+        st.caption(f"Агент надёжности сузил границы оптимизатору: {limits}")
+    for note in section["заметки"]:
+        st.caption(note)
+
+
+def catalyst_block(section: dict) -> None:
+    """Ресурс катализатора — с оговорками видимым текстом, а не в подсказке."""
+    if not section.get("доступно"):
+        st.caption(f"Ресурс катализатора не посчитан: {section.get('почему', '')}")
+        return
+    st.subheader("Катализатор: где цикл и сколько осталось")
+    cols = st.columns(4)
+    cols[0].metric("Пуск цикла", section.get("пуск цикла") or "—")
+    cols[1].metric("Сутки цикла", section.get("сутки цикла") if section.get("сутки цикла")
+                   is not None else "—")
+    resource = section.get("ресурс") or {}
+    span = resource.get("диапазон, мес")
+    cols[2].metric("Ресурс, мес", f"{span[0]:g}–{span[1]:g}" if span else "—",
+                   None if resource.get("вероятнее, мес") is None
+                   else f"вероятнее {resource['вероятнее, мес']:g}", delta_color="off")
+    margin = section.get("запас до уровня вывода, °C")
+    cols[3].metric("Запас до вывода, °C", "—" if margin is None else f"{margin:.1f}")
+    for method in (resource.get("способы") or []):
+        st.caption("· " + "; ".join(f"{k}: {v}" for k, v in method.items()))
+    for caveat in section.get("оговорки", []):
+        st.warning(caveat)
 
 
 def main() -> None:
@@ -271,9 +334,12 @@ def main() -> None:
                 st.markdown(f"- {note}")
         else:
             st.markdown("Замечаний к данным нет.")
-        if r.factors:
-            st.markdown("**Факторы тяжести режима**")
-            st.bar_chart(pd.Series(r.factors, name="вклад"))
+    # ---------- надёжность: из чего сложилась тяжесть режима ------------ #
+    panel = reliability_panel(r, load_catalyst_report(ROOT), ts,
+                              basis=catalyst_basis(system.reliability),
+                              dp=dp_mode(system.reliability))
+    severity_block(panel["тяжесть"])
+    catalyst_block(panel["катализатор"])
 
     # ---------- смешение ----------------------------------------------- #
     if rec.blend is not None:

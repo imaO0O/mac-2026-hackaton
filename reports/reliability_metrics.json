@@ -1,7 +1,8 @@
 {
   "reliability_settings": {
     "catalyst_factor": "activity",
-    "catalyst_reset": "outage_48h"
+    "catalyst_reset": "outage_48h",
+    "dp_factor": "off"
   },
   "validity": {
     "avt": {
@@ -33,36 +34,36 @@
       "worst": {
         "Q20": 11.65,
         "T18": 6.56,
+        "W10": 5.31,
         "F1": 5.27,
         "F17": 5.03,
+        "F19": 4.97,
         "F22": 4.52,
-        "F9": 4.09,
-        "F26": 4.08,
-        "F2": 3.66
+        "F9": 4.09
       },
-      "mean_bad_share_pct": 2.613
+      "mean_bad_share_pct": 2.893
     }
   },
   "severity": {
     "train": {
       "n": 983,
       "n_over_limit": 148,
-      "roc_auc": 0.584,
-      "mean_severity_ok": 0.467,
-      "mean_severity_over": 0.515
+      "roc_auc": 0.593,
+      "mean_severity_ok": 0.472,
+      "mean_severity_over": 0.519
     },
     "test": {
       "n": 249,
       "n_over_limit": 36,
-      "roc_auc": 0.343,
-      "mean_severity_ok": 0.512,
-      "mean_severity_over": 0.451
+      "roc_auc": 0.368,
+      "mean_severity_ok": 0.502,
+      "mean_severity_over": 0.445
     },
-    "dp_growth_spearman": 0.134,
+    "dp_growth_spearman": 0.019,
     "distribution": {
-      "low_%": 59.0,
-      "medium_%": 38.4,
-      "high_%": 2.6
+      "low_%": 61.0,
+      "medium_%": 37.9,
+      "high_%": 1.1
     }
   },
   "analyzer_failures": {
@@ -146,30 +147,30 @@
     "scale_hours_p95": 10041.0
   },
   "anomaly_detector": {
-    "threshold": 6.12,
+    "threshold": 6.17,
     "columns": [
       "wabt",
-      "W10",
+      "P8",
       "T55",
       "feed",
       "h2_oil",
       "pressure"
     ],
     "train_%": 1.0,
-    "test_%": 3.59
+    "test_%": 3.67
   },
   "risk_thresholds": [
-    0.529,
-    0.779
+    0.54,
+    0.733
   ],
   "tradeoff_quality_vs_severity": {
     "train": {
-      "auc_severity": 0.584,
-      "auc_inverse": 0.416
+      "auc_severity": 0.593,
+      "auc_inverse": 0.407
     },
     "test": {
-      "auc_severity": 0.343,
-      "auc_inverse": 0.657
+      "auc_severity": 0.368,
+      "auc_inverse": 0.632
     }
   }
 }

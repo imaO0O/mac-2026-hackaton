@@ -147,6 +147,8 @@ run $PY scripts/compare_architectures.py
 run $PY scripts/run_simulation.py
 run $PY scripts/check_return_to_base.py
 run $PY scripts/check_kinetic_order.py
+# какую кинетику брать рабочей: измеренный отклик против принятой (правило в PLAN)
+run $PY scripts/check_kinetic_strength.py
 run $PY scripts/run_blend_scenarios.py
 slow $PY scripts/check_objective_weights.py
 slow $PY scripts/check_severity_robustness.py

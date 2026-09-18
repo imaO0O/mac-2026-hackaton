@@ -1,5 +1,5 @@
 {
-  "feature_version": 7,
+  "feature_version": 8,
   "split": {
     "train": [
       "2023-01-01",

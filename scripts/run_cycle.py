@@ -197,7 +197,11 @@ def build_system(sb: StateBuilder, cfg: dict, model_kind: str = "boost",
         # уровень серы даёт модель, отклик на изменение уставок — кинетика:
         # в истории связи «температура → сера» почти нет, и чисто статистический
         # суррогат оставил бы оптимизатор без градиента (docs/QUALITY_AGENT.md)
-        surrogate = make_kinetic_surrogate(model, base_surrogate=make_model_surrogate(model))
+        opt_cfg = cfg.get("optimization") or {}
+        surrogate = make_kinetic_surrogate(
+            model, base_surrogate=make_model_surrogate(model),
+            order=float(opt_cfg.get("kinetic_order", 1.0)),
+            strength=float(opt_cfg.get("kinetic_strength", 1.0)))
     else:
         print("[модель] обученной модели нет — персистенция и линейная заглушка "
               "(запустите scripts/train_quality.py)")
