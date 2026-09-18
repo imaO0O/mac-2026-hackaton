@@ -1,41 +1,31 @@
-"""Что на самом деле измеряют теги установки 24-2000.
+"""Новая таблица тегов 24-2000 против данных: все 26 тегов (участник 2).
 
     python scripts/check_tag_meaning.py
 
-Организаторы подтвердили, что короткие имена колонок в `242000_tags.csv`
-соответствуют тегам на листе «КИП», и назвали управляющие переменные так:
-температура ГСС на входе Р-202 — `P8`, расход сырья массовый — `T11`, давление на
-входе Р-202 — `F19`.
+История. Лист «КИП» из выданного пакета на 24-2000 оказался перемешан со строками:
+по смыслу на своём коде стоят 6 описаний из 26. Прежняя версия этого скрипта
+разбирала 14 тегов «под вопросом» и нашла, что буквы кодов верны, а описания нет
+(`T11` — температура, `P8` — не температура ГСС, `F19` — масса потока ДТ). 15.09
+организаторы прислали новую таблицу (`configs/tags_2026-09-15.csv`, читается по
+умолчанию), и вопрос сменился: **сходится ли с данными уже она**.
 
-**Два кода из трёх на выданных данных не сходятся**, и молчать об этом нельзя:
-если строить управление на неверном опознании величин, физика рекомендаций теряет
-смысл. Скрипт собирает доказательства по трём независимым признакам:
+На каждый тег — три проверки, все на работающей установке:
 
-1. **порядок величины** — температура реактора гидроочистки живёт в районе
-   300–400 °C, давление 3–5 МПа, расход сотни единиц. Значение 0.17 не может быть
-   температурой ни в каких единицах;
-2. **корреляция с лабораторией** — тег, описанный как поточный анализатор серы,
-   обязан коррелировать с лабораторным анализом серы. Если корреляции нет, это не
-   анализатор;
-3. **отклик на останов** — реакторная температура на остановленной установке
-   падает до десятков градусов, расход уходит в ноль. Величины ведут себя
-   по-разному, и по этому их тоже можно различить.
+1. **диапазон под заявленную величину**: температура, давление, перепад, расход
+   жидкости или газа, сера. Не меньше 95 % значений — в физическом диапазоне;
+2. **заглушки**: доля самого частого значения. На этих данных уже встречались
+   307, 313, 240 и 252 — значения, которые прибор держит, когда не мерит;
+3. **двойники**: все пары тегов, где одна величина записана под двумя кодами
+   (corr ≥ 0.97 и устойчивое отношение). У двойника описания обязаны говорить об
+   одном потоке, а отношение массы к объёму — быть плотностью.
 
-**Поправка к первой версии этого скрипта, и она существенная.** Сначала мы
-заключили по признаку 2, что теги опознаны неверно вообще: ни один не коррелирует
-с лабораторной серой сильнее 0.14. Вывод был слишком сильным. Лаборатория меряет
-раз в сутки, и на такой сетке отклик режима не виден в принципе — отсутствие
-корреляции с ЛИМС не улика. Проверка по ПОТОЧНОМУ анализатору
-(`scripts/find_delays.py`, шаг 10 минут) дала обратное: у всех семи управляющих
-тегов знак реакции совпадает с физикой, |corr| до 0.49 на первых разностях. То
-есть реакторные температуры и расходы опознаны ВЕРНО, а несходящимися остались
-конкретные коды `P8` и `F19` из ответа организаторов.
+И четыре проверки выполнимости, которые описания должны проходить вместе:
+масса сырья не меньше массы продукта, объём сырья порядка объёма продукта,
+плотность газа поддува не меньше, чем у водорода, и уровень поточных анализаторов
+серы — как у лаборатории на своём потоке.
 
-Признак 2 в таблице остаётся — он по-прежнему показывает, что теги, описанные как
-поточные анализаторы серы, ими не являются. Но общий вывод про опознание величин
-теперь опирается на отклик, а не на лабораторную корреляцию.
-
-Результат: reports/tag_meaning.json и таблица с вердиктом по каждому тегу.
+Результат: reports/tag_meaning.json — вердикт по каждому тегу и вопросы
+организаторам по тому, что не сошлось.
 """
 from __future__ import annotations
 
@@ -50,182 +40,198 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.cleaning import clean_lims_sulfur  # noqa: E402
-from nefte.data.loaders import (  # noqa: E402
-    lims_series,
-    load_pak,
-    load_tag_dictionary,
-    load_telemetry,
-)
+from nefte.data.loaders import lims_series, load_tag_dictionary, load_telemetry  # noqa: E402
 from nefte.models.regime import FEED, outage_mask  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 
-# Теги, которые организаторы назвали управляющими, плюс те, что мы используем
-# сейчас, плюс те, чьи описания говорят «анализатор серы».
-UNDER_QUESTION = ["P8", "T11", "F19", "T5", "T6", "P13", "W7", "W10", "F26",
-                  "F15", "P24", "F2", "T12", "T23"]
+TABLE = "configs/tags_2026-09-15.csv"
 
-# Физические диапазоны, по которым величину можно узнать по порядку.
-PLAUSIBLE = {
-    "температура реактора, °C": (250.0, 420.0),
-    "давление реактора, МПа": (2.0, 6.0),
-    "перепад давления, кгс/см2": (0.3, 6.0),
-    "сера в ДТ, мг/кг": (1.0, 40.0),
-    "расход, сотни ед.": (50.0, 700.0),
+# Физический диапазон под заявленную величину (на работающей установке 24-2000).
+# Объёмный расход жидкости ограничен сверху мощностью установки: сырья около
+# 260 м³/ч, так что тысяча — уже не жидкость.
+RANGES = {
+    "температура, °C": (-40.0, 500.0), "°C": (-40.0, 500.0),
+    "давление, МПа": (0.0, 10.0), "перепад, МПа": (0.0, 1.0),
+    "расход, м³/ч": (0.0, 1000.0), "расход, т/ч": (0.0, 1000.0),
+    "масс.расход, т/ч": (0.0, 1000.0), "масс.расход газа, т/ч": (0.0, 100.0),
+    "расход газа, нм³/ч": (0.0, 500000.0), "расход ВСГ, нм³/ч": (0.0, 500000.0),
+    "сера, ppm": (0.0, 30000.0),
 }
+IN_RANGE_MIN = 0.95
+STUB_SHARE = 0.20            # самое частое значение чаще — прибор не мерит
+TWIN_CORR = 0.97
+TWIN_WIDTH = 0.10            # ширина p05–p95 отношения в долях медианы
+LIQUID_DENSITY = (0.60, 0.95)
+H2_DENSITY_KG_NM3 = 0.0899   # легче водорода газа не бывает
+
+# Поток по описанию — для сверки двойников: у одной величины он один.
+STREAMS = (("сырь", "сырьё"), ("гидроочищ", "ГО ДТ"), ("бензин", "бензин"),
+           ("газ поддува", "газ поддува"), ("всг", "ВСГ"), ("квенч", "квенч"))
+REPORT = ROOT / "reports" / "tag_meaning.json"
 
 
-def guess_by_magnitude(median: float) -> str:
-    """Что это может быть по порядку величины."""
-    hits = [name for name, (lo, hi) in PLAUSIBLE.items() if lo <= median <= hi]
-    return ", ".join(hits) if hits else "ни одна физическая величина не подходит"
+def stream(description: str) -> str | None:
+    text = description.lower()
+    return next((name for key, name in STREAMS if key in text), None)
+
+
+def per_tag(series: pd.Series, quantity: str) -> dict:
+    lo, hi = RANGES.get(quantity, (-np.inf, np.inf))
+    s = series.dropna()
+    top_share = float(s.round(3).value_counts(normalize=True).iloc[0]) if len(s) else 0.0
+    return {"p01": round(float(s.quantile(.01)), 3), "медиана": round(float(s.median()), 3),
+            "p99": round(float(s.quantile(.99)), 3),
+            "в диапазоне": round(float(s.between(lo, hi).mean()), 3),
+            "доля самого частого значения": round(top_share, 3)}
+
+
+def find_twins(hourly: pd.DataFrame, tags: pd.DataFrame) -> list[dict]:
+    described = dict(zip(tags["code"], tags["description"]))
+    codes = [c for c in tags["code"] if c in hourly.columns]
+    twins = []
+    for i, a in enumerate(codes):
+        for b in codes[i + 1:]:
+            pair = hourly[[a, b]].dropna()
+            pair = pair[(pair[a] > 0) & (pair[b] > 0)]
+            if len(pair) < 1000:
+                continue
+            corr = float(pair[a].corr(pair[b]))
+            if corr < TWIN_CORR:
+                continue
+            ratio = pair[a] / pair[b]
+            width = float((ratio.quantile(.95) - ratio.quantile(.05)) / ratio.median())
+            if width > TWIN_WIDTH:
+                continue
+            twins.append({"пара": f"{a}~{b}", "отношение": round(float(ratio.median()), 4),
+                          "ширина": round(width, 4), "corr": round(corr, 3),
+                          "описания": [str(described[a]), str(described[b])]})
+    return twins
+
+
+def twin_problems(twin: dict, quantity: dict) -> list[tuple[str, list[str]]]:
+    a, b = twin["пара"].split("~")
+    da, db = twin["описания"]
+    sa, sb = stream(da), stream(db)
+    problems = []
+    if sa and sb and sa != sb:
+        problems.append((f"двойник {twin['пара']} (отношение {twin['отношение']}), а "
+                         f"описания называют разные потоки: «{sa}» и «{sb}»", [a, b]))
+    mass = {t for t in (a, b) if "масс" in quantity[t] or "т/ч" in quantity[t]}
+    volume = {t for t in (a, b) if "м³/ч" in quantity[t] or "м3/ч" in quantity[t]}
+    if len(mass) == 1 and len(volume) == 1 and sa == sb:
+        m, v = mass.pop(), volume.pop()
+        density = twin["отношение"] if m == a else 1.0 / twin["отношение"]
+        if not LIQUID_DENSITY[0] <= density <= LIQUID_DENSITY[1]:
+            problems.append((f"{m} (масса) и {v} (объём) одного потока, а отношение "
+                             f"{density:.3f} — не плотность жидкости", [m, v]))
+    if abs(twin["отношение"] - round(twin["отношение"], 2)) < 1e-4 and twin["ширина"] < 0.01:
+        problems.append((f"{twin['пара']}: отношение {twin['отношение']:.4f} постоянно до "
+                         "четвёртого знака — один тег вычислен из другого, это не два прибора",
+                         [a, b]))
+    return problems
+
+
+def feasibility(work: pd.DataFrame, cfg: dict) -> list[dict]:
+    med = work.median()
+    checks = [
+        {"проверка": "масса сырья F9 не меньше массы ГО ДТ F17",
+         "значения": {"F9": round(float(med["F9"]), 1), "F17": round(float(med["F17"]), 1)},
+         "сходится": bool(med["F9"] >= 0.98 * med["F17"]), "теги": ["F9", "F17"]},
+        {"проверка": "объём сырья F15 порядка объёма ГО ДТ F26",
+         "значения": {"F15": round(float(med["F15"]), 1), "F26": round(float(med["F26"]), 1)},
+         "сходится": bool(0.8 <= med["F15"] / med["F26"] <= 1.3), "теги": ["F15"]},
+    ]
+    gas = 1000.0 * work["W7"] / work["F22"]
+    checks.append({"проверка": "плотность газа поддува W7/F22 не меньше, чем у водорода",
+                   "значения": {"кг/нм³": round(float(gas.median()), 4),
+                                "водород": H2_DENSITY_KG_NM3},
+                   "сходится": bool(gas.median() >= H2_DENSITY_KG_NM3),
+                   "теги": ["W7", "F22"]})
+    product = clean_lims_sulfur(lims_series(cfg["quality"]["target"]["lims_source"]))
+    checks.append({"проверка": "Q21 (сера в г/о ДТ) на уровне лабораторной серы продукта",
+                   "значения": {"Q21": round(float(med["Q21"]), 2),
+                                "ЛИМС": round(float(product.median()), 2)},
+                   "сходится": bool(0.5 <= med["Q21"] / product.median() <= 2.0),
+                   "теги": ["Q21"]})
+    feed = lims_series("Гидроочистка|1|Mass.Sulfur").dropna()
+    feed = feed[feed > 0]
+    if len(feed):
+        # в ЛИМС сера сырья в % масс., у анализатора ppm: 1 % = 10 000 ppm
+        checks.append({"проверка": "Q20 на уровне лабораторной серы сырья",
+                       "значения": {"Q20, ppm": round(float(med["Q20"]), 0),
+                                    "ЛИМС сырьё, ppm": round(float(feed.median() * 1e4), 0)},
+                       "сходится": bool(0.5 <= med["Q20"] / (feed.median() * 1e4) <= 2.0),
+                       "теги": ["Q20"]})
+    return checks
 
 
 def main() -> int:
     use_utf8_console()
     cfg = load_config()
+    tags = load_tag_dictionary()
+    tags = tags[tags["unit"] == "ht"].reset_index(drop=True)
+    quantity = dict(zip(tags["code"], tags["quantity"]))
 
     ht = load_telemetry("ht")
-    tags = load_tag_dictionary()
-    described = dict(zip(tags[tags["unit"] == "ht"]["code"],
-                         tags[tags["unit"] == "ht"]["description"]))
+    down = outage_mask(ht[FEED], retrospective=True)
+    work = ht[~down & (ht[FEED] > 0.5 * ht[FEED].median())]
+    hourly = work.resample("1h").mean()
 
-    lab = clean_lims_sulfur(lims_series(cfg["quality"]["target"]["lims_source"]))
-    pak = load_pak()["sulfur_ppm"].reindex(ht.index)
-    # ретроспективный разбор: нужен весь эпизод останова, а не то, что было
-    # известно в моменте
-    down = (outage_mask(ht[FEED], retrospective=True) if FEED in ht.columns
-            else pd.Series(False, index=ht.index))
-
-    # лабораторный анализ сопоставляем с последним предшествующим отсчётом
-    positions = ht.index.searchsorted(lab.index, side="right") - 1
-    valid = positions >= 0
-    lab_values = lab.to_numpy()[valid]
-
-    rows = []
-    for code in UNDER_QUESTION:
+    rows = {}
+    for _, row in tags.iterrows():
+        code = row["code"]
         if code not in ht.columns:
+            rows[code] = {"описание": row["description"], "величина": row["quantity"],
+                          "проблемы": ["тега нет в телеметрии"]}
             continue
-        series = ht[code]
-        median = float(series.median())
+        stats = per_tag(work[code], row["quantity"])
+        problems = []
+        if stats["в диапазоне"] < IN_RANGE_MIN:
+            lo, hi = RANGES.get(row["quantity"], (None, None))
+            problems.append(f"в диапазоне «{row['quantity']}» ({lo}…{hi}) только "
+                            f"{stats['в диапазоне']:.0%} значений, медиана {stats['медиана']}")
+        if stats["доля самого частого значения"] > STUB_SHARE:
+            problems.append(f"одно значение в {stats['доля самого частого значения']:.0%} "
+                            "отсчётов — прибор не мерит")
+        rows[code] = {"описание": row["description"], "величина": row["quantity"], **stats,
+                      "проблемы": problems}
 
-        matched = series.to_numpy()[positions[valid]]
-        mask = ~np.isnan(matched)
-        corr_lab = (float(np.corrcoef(matched[mask], lab_values[mask])[0, 1])
-                    if mask.sum() > 50 else float("nan"))
+    twins = find_twins(hourly, tags)
+    for twin in twins:
+        for problem, codes in twin_problems(twin, quantity):
+            for code in codes:
+                rows[code]["проблемы"].append(problem)
+    checks = feasibility(work, cfg)
+    for check in checks:
+        if not check["сходится"]:
+            for code in check["теги"]:
+                rows[code]["проблемы"].append(f"не проходит: {check['проверка']} "
+                                              f"({check['значения']})")
 
-        both = series.notna() & pak.notna()
-        corr_pak = (float(np.corrcoef(series[both], pak[both])[0, 1])
-                    if both.sum() > 1000 else float("nan"))
+    bad = {code: r["проблемы"] for code, r in rows.items() if r["проблемы"]}
+    print(f"Новая таблица тегов 24-2000 ({TABLE}) против данных: {len(rows)} тегов\n")
+    for code, r in rows.items():
+        mark = "НЕ СХОДИТСЯ" if r["проблемы"] else "сходится"
+        print(f"  {code:4s} {mark:12s} {r.get('медиана', ''):>10}  {r['величина']:22s} "
+              f"{str(r['описание'])[:55]}")
+    print("\nДвойники (corr ≥ 0.97, устойчивое отношение):")
+    for twin in twins:
+        print(f"  {twin['пара']:9s} отношение {twin['отношение']:.4f}, ширина "
+              f"{twin['ширина']:.3f}, corr {twin['corr']}")
+    print("\nПроверки выполнимости:")
+    for check in checks:
+        print(f"  {'да ' if check['сходится'] else 'НЕТ'} {check['проверка']}: {check['значения']}")
+    print(f"\nСходится {len(rows) - len(bad)} из {len(rows)}. Не сходится:")
+    for code, problems in bad.items():
+        for problem in dict.fromkeys(problems):
+            print(f"  {code}: {problem}")
 
-        working, stopped = series[~down], series[down]
-        drop = (float(stopped.median() / working.median())
-                if len(stopped) and working.median() else float("nan"))
-
-        description = str(described.get(code, ""))
-        says_analyzer = "анализатор" in description.lower()
-        verdict = guess_by_magnitude(median)
-        if says_analyzer and abs(corr_lab) < 0.3:
-            verdict += "; описан как анализатор серы, но с лабораторией не связан"
-
-        rows.append({
-            "тег": code,
-            "медиана": round(median, 2),
-            "corr с ЛИМС": round(corr_lab, 3),
-            "corr с ПАК": round(corr_pak, 3),
-            "доля на останове": None if drop != drop else round(drop, 2),
-            "описание КИП": description[:46],
-            "что это по данным": verdict,
-        })
-
-    frame = pd.DataFrame(rows)
-    print("\nЧто измеряют теги 24-2000 — по данным, а не по описанию\n")
-    print(frame[["тег", "медиана", "corr с ЛИМС", "доля на останове",
-                 "описание КИП"]].to_string(index=False))
-
-    print("\nВердикт по каждому:")
-    for row in rows:
-        print(f"  {row['тег']:4s} {row['что это по данным']}")
-
-    # Двойники: тот же физический поток или та же зона, записанные разными тегами.
-    # Отношение массового расхода к объёмному обязано быть плотностью сырья, и это
-    # опознаёт величину надёжнее порядка значений. Проверено после сессии вопросов
-    # 11.09, где другая команда показала F19/объёмный расход = 0.832.
-    stubs = {307.0, 313.0, 240.0}
-    work = ht[~down]
-    twins = {}
-    for a, b, kind in (("F19", "F26", "отношение"), ("T11", "T6", "разность"),
-                       ("T11", "T5", "разность"), ("P8", "P13", "отношение")):
-        if a not in work.columns or b not in work.columns:
-            continue
-        pair = work[[a, b]].dropna()
-        pair = pair[~pair[a].isin(stubs) & ~pair[b].isin(stubs)]
-        if kind == "отношение":
-            pair = pair[(pair[a] > 0) & (pair[b] > 0)]
-            stat = pair[a] / pair[b]
-        else:
-            stat = pair[a] - pair[b]
-        twins[f"{a}~{b}"] = {
-            kind: round(float(stat.median()), 4),
-            "p05": round(float(stat.quantile(0.05)), 4),
-            "p95": round(float(stat.quantile(0.95)), 4),
-            "corr": round(float(pair[a].corr(pair[b])), 3),
-            "отсчётов": int(len(pair)),
-        }
-    print("\nДвойники на работающей установке:")
-    for name, row in twins.items():
-        print(f"  {name}: {row}")
-    if "F19~F26" in twins:
-        ratio = twins["F19~F26"]["отношение"]
-        print(f"  F19 / F26 = {ratio:.3f} — плотность дизельного сырья в т/м3: F19 — "
-              "МАССОВЫЙ расход сырья, F26 — объёмный. Описание «расход сырья "
-              "массовый», данное организаторами коду T11, по данным принадлежит F19, "
-              "а T11 — температура реакторного блока (corr с T6 выше 0.98). Наш рычаг "
-              "F26 — тот же физический расход.")
-
-    named = {"P8": "температура ГСС на входе Р-202", "T11": "расход сырья массовый",
-             "F19": "давление на входе Р-202"}
-    # По порядку величины 363 подходит и температуре, и расходу, и прежняя проверка
-    # объявляла T11 «сходится». Двойник решает однозначно: тег, идущий с
-    # температурой Р-202 при корреляции 0.99 и разнице меньше градуса, — температура.
-    by_twin = {}
-    if twins.get("T11~T6", {}).get("corr", 0) > 0.95:
-        by_twin["T11"] = "температура реактора (двойник T6)"
-    if 0.78 < twins.get("F19~F26", {}).get("отношение", 0) < 0.88:
-        by_twin["F19"] = "массовый расход сырья (F19/F26 — плотность)"
-    print("\nУправляющие переменные, названные организаторами:")
-    for code, meaning in named.items():
-        row = next((r for r in rows if r["тег"] == code), None)
-        if row is None:
-            continue
-        fits = meaning.split()[0][:4].lower()
-        found = by_twin.get(code, row["что это по данным"])
-        print(f"  {code}: заявлено «{meaning}», медиана {row['медиана']}, по данным — "
-              f"{found}: {'сходится' if fits in found.lower() else 'НЕ СХОДИТСЯ'}")
-
-    print("\nВывод, и читать его надо вместе с scripts/find_delays.py.")
-    print("  1. Слабая связь с ЛАБОРАТОРИЕЙ сама по себе ничего не доказывает. "
-          "Лаборатория меряет серу примерно раз в сутки, а отклик на изменение "
-          "режима держится часами — на такой сетке его не видно в принципе. "
-          "Корреляция ниже 0.14 с ЛИМС — не улика против тегов.")
-    print("  2. На ПОТОЧНОМ анализаторе (шаг 10 минут) связь есть, и она "
-          "физически правильная: у всех семи управляющих тегов знак реакции "
-          "совпал с ожидаемым — рост температуры снижает серу, рост расхода "
-          "сырья повышает, |corr| до 0.49 на первых разностях. Значит, "
-          "реакторные температуры и расходы опознаны ВЕРНО.")
-    print("  3. Несходящимися остались конкретные коды. Медиана P8 равна 0.17: "
-          "температурой ГСС такое значение не является ни в каких единицах. "
-          "Три тега описаны на листе КИП как поточные анализаторы серы и с "
-          "лабораторией не связаны.")
-    print("  Отсюда вопрос организаторам: управляющими считать ФИЗИЧЕСКИЕ "
-          "величины (температура реактора, расход сырья, давление) или именно "
-          "коды P8/T11/F19? Мы работаем по величинам, опознанным по значениям и "
-          "по знаку отклика, и это стоит подтвердить.")
-
-    out = ROOT / "reports" / "tag_meaning.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"tags": rows, "named_by_organizers": named, "twins": twins},
-                              ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\nОтчёт: {out.relative_to(ROOT)}")
+    REPORT.write_text(json.dumps({
+        "таблица": TABLE, "тегов": len(rows), "сходится": len(rows) - len(bad),
+        "не_сходится": {code: list(dict.fromkeys(p)) for code, p in bad.items()},
+        "теги": rows, "двойники": twins, "выполнимость": checks,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")
     return 0
 
 
