@@ -42,7 +42,7 @@ def report_provenance(cfg: dict | None = None) -> dict:
 
 
 def reliability_provenance(cfg: dict | None = None) -> dict:
-    """Как агент надёжности мерил износ катализатора — для отчётов, где решал оркестратор.
+    """Чем агент надёжности мерил тяжесть режима — для отчётов, где решал оркестратор.
 
     Отдельно от ``report_provenance``, потому что зависит от этого не всякий отчёт,
     а только тот, где работала тяжесть режима: прогоны системы, имитация, злые
@@ -54,4 +54,7 @@ def reliability_provenance(cfg: dict | None = None) -> dict:
     return {"reliability_settings": {
         "catalyst_factor": settings.get("catalyst_factor", "age"),
         "catalyst_reset": settings.get("catalyst_reset", "outage_48h"),
+        # входит ли перепад Р-202 в тяжесть режима: от этого зависят классы и,
+        # через них, право оптимизатора поднимать температуру (docs/DP_PROXY.md)
+        "dp_factor": settings.get("dp_factor", "off"),
     }}

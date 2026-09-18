@@ -124,7 +124,8 @@ def test_there_are_reports_to_check():
 def _reliability_settings(cfg: dict) -> dict:
     settings = cfg.get("reliability") or {}
     return {"catalyst_factor": settings.get("catalyst_factor", "age"),
-            "catalyst_reset": settings.get("catalyst_reset", "outage_48h")}
+            "catalyst_reset": settings.get("catalyst_reset", "outage_48h"),
+            "dp_factor": settings.get("dp_factor", "off")}
 
 
 @pytest.mark.parametrize("path", REPORTS, ids=lambda p: p.name)
@@ -137,7 +138,7 @@ def test_report_matches_the_current_reliability_settings(path: Path):
     settings = _load(path).get("reliability_settings")
     if settings is None:
         pytest.skip("отчёт не зависит от тяжести режима или снят до поля")
-    if "catalyst_" in path.name:
+    if "catalyst_" in path.name or "_dp" in path.name:
         pytest.skip("сравнение вариантов с явными настройками")
     assert settings == _reliability_settings(load_config()), (
         f"{path.name} посчитан с износом катализатора {settings}, а конфиг даёт "

@@ -171,6 +171,8 @@ def main() -> int:
                     help="повтор действия до проявления прошлого — только при росте риска")
     ap.add_argument("--catalyst-factor", choices=("age", "activity"), default=None,
                     help="переопределить reliability.catalyst_factor")
+    ap.add_argument("--dp-factor", choices=("off", "level"), default=None,
+                    help="переопределить reliability.dp_factor (перепад Р-202 в тяжести)")
     ap.add_argument("--catalyst-reset", choices=("outage_48h", "catalyst_log"), default=None,
                     help="переопределить reliability.catalyst_reset")
     args = ap.parse_args()
@@ -189,7 +191,7 @@ def main() -> int:
     if args.repeat_risk_increase is not None:
         cfg = {**cfg, "limits": {**cfg["limits"],
                                  "repeat_min_risk_increase": float(args.repeat_risk_increase)}}
-    for key in ("catalyst_factor", "catalyst_reset"):
+    for key in ("catalyst_factor", "catalyst_reset", "dp_factor"):
         if getattr(args, key) is not None:
             cfg = {**cfg, "reliability": {**(cfg.get("reliability") or {}),
                                           key: getattr(args, key)}}
@@ -276,6 +278,7 @@ def main() -> int:
         # зависят от этого, а имя отчёта без флагов об этом молчит
         "износ катализатора": {k: (cfg.get("reliability") or {}).get(k)
                                for k in ("catalyst_factor", "catalyst_reset")},
+        "перепад Р-202 в тяжести": (cfg.get("reliability") or {}).get("dp_factor"),
         "шаг": args.every,
         "модель": args.model,
         "горизонт сети": args.seq_horizon,
@@ -358,6 +361,8 @@ def main() -> int:
         tag = "_".join(x for x in (tag, f"catalyst_{args.catalyst_factor}") if x)
     if args.catalyst_reset is not None:
         tag = "_".join(x for x in (tag, f"reset_{args.catalyst_reset}") if x)
+    if args.dp_factor is not None:
+        tag = "_".join(x for x in (tag, f"dp_{args.dp_factor}") if x)
     stem = "test_period" if args.split == "test" else "val_period"
     report_path = (REPORT.with_name(f"{stem}.json") if not tag
                    else REPORT.with_name(f"{stem}_{tag}.json"))

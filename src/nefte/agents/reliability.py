@@ -36,6 +36,9 @@ from nefte.models.regime import FEED, RECYCLE_GAS, hours_since_outage, implied_t
 
 # Как агент судит об износе катализатора (configs/config.yaml → reliability).
 CATALYST_FACTORS = ("age", "activity")
+# Чем фактор «перепад давления Р-202» входит в тяжесть режима. "off" — не входит
+# вовсе, "level" — нормированный уровень P8, как было. Разбор — docs/DP_PROXY.md.
+DP_FACTORS = ("off", "level")
 CATALYST_RESETS = ("outage_48h", "catalyst_log")
 
 
@@ -112,6 +115,12 @@ class ReliabilityAgent:
     # веса не на чем. WABT — главный фактор жёсткости, перепад давления — прямой
     # признак состояния слоя, аномальность и скорость изменения — про безопасность
     # манёвра, наработка и печь — медленные фоновые факторы.
+    #
+    # Вес перепада (0.20) используется, только когда фактор включён
+    # (reliability.dp_factor: level). По умолчанию он выключен: на выданных данных
+    # P8 меряет не износ, а гидравлику и уровень после загрузки катализатора
+    # (docs/DP_PROXY.md). Свёртка нормируется по присутствующим факторам, поэтому
+    # выключение перераспределяет вес, а не занижает тяжесть.
     WEIGHTS = {"wabt": 0.30, "dp_r202": 0.20, "anomaly": 0.15, "ramp": 0.15,
                "catalyst": 0.10, "furnace": 0.10}
     REACTOR_TEMPS = ["T5", "T6", "T11"]
@@ -149,7 +158,8 @@ class ReliabilityAgent:
                  down_series: pd.Series | None = None,
                  anomaly_series: pd.Series | None = None,
                  anomaly_parts: pd.DataFrame | None = None,
-                 catalyst_series: pd.Series | None = None):
+                 catalyst_series: pd.Series | None = None,
+                 dp_factor: str = "off"):
         self.norms = norms or SeverityNorms(bounds={})
         # нормированная скорость изменения режима, посчитанная по истории
         self.ramp_series = ramp_series
@@ -173,6 +183,10 @@ class ReliabilityAgent:
         # Износ катализатора готовым рядом (вариант «activity»). Если его нет,
         # фактор считается от наработки, как раньше.
         self.catalyst_series = catalyst_series
+        # Входит ли перепад Р-202 в тяжесть режима (configs/config.yaml →
+        # reliability.dp_factor). По умолчанию НЕ входит: измеренный отказ,
+        # docs/DP_PROXY.md и docs/PLAN.md.
+        self.dp_factor = dp_factor
 
     # ------------------------------------------------------------------ #
     @classmethod
@@ -234,6 +248,10 @@ class ReliabilityAgent:
         #   к нагрузке (models/catalyst.activity_level_series).
         rel_cfg = cfg.get("reliability") or {}
         factor_mode = rel_cfg.get("catalyst_factor", "age")
+        dp_mode = rel_cfg.get("dp_factor", "off")
+        if dp_mode not in DP_FACTORS:
+            raise ValueError(f"reliability.dp_factor: {dp_mode!r}, "
+                             f"ожидалось одно из {DP_FACTORS}")
         reset_mode = rel_cfg.get("catalyst_reset", "outage_48h")
         if factor_mode not in CATALYST_FACTORS:
             raise ValueError(f"reliability.catalyst_factor: {factor_mode!r}, "
@@ -272,7 +290,7 @@ class ReliabilityAgent:
         agent = cls(norms=norms, ramp_series=ramp, run_hours=run_hours,
                     run_hours_scale=run_scale, detector=detector,
                     feed_median=feed_median, down_series=down_series,
-                    catalyst_series=catalyst_series)
+                    catalyst_series=catalyst_series, dp_factor=dp_mode)
         agent.thresholds = agent._calibrate_thresholds(frame, anomaly_frame, train)
         return agent
 
@@ -307,8 +325,10 @@ class ReliabilityAgent:
         описывали индекс, которым система не пользуется.
         """
         factors = pd.DataFrame(index=frame.index)
-        for key, column in (("wabt", "wabt"), ("dp_r202", self.DP_TAG),
-                            ("furnace", self.FURNACE_TAG)):
+        channels = [("wabt", "wabt"), ("furnace", self.FURNACE_TAG)]
+        if self.dp_factor == "level":
+            channels.insert(1, ("dp_r202", self.DP_TAG))
+        for key, column in channels:
             if column in frame.columns:
                 norm = self.norms.normalize_series(column, frame[column])
                 if norm is not None:
@@ -351,7 +371,10 @@ class ReliabilityAgent:
             if n is not None:
                 factors["wabt"] = n
 
-        for key, tag, store in (("dp_r202", self.DP_TAG, ht), ("furnace", self.FURNACE_TAG, avt)):
+        channels = [("furnace", self.FURNACE_TAG, avt)]
+        if self.dp_factor == "level":
+            channels.insert(0, ("dp_r202", self.DP_TAG, ht))
+        for key, tag, store in channels:
             n = self.norms.normalize(tag, store.get(tag))
             if n is not None:
                 factors[key] = n
