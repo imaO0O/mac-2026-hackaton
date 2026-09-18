@@ -1,5 +1,5 @@
 {
-  "feature_version": 7,
+  "feature_version": 8,
   "split": {
     "train": [
       "2023-01-01",
@@ -13,10 +13,6 @@
       "2026-01-01",
       "2026-08-07"
     ]
-  },
-  "reliability_settings": {
-    "catalyst_factor": "activity",
-    "catalyst_reset": "outage_48h"
   },
   "теги": {
     "W10": {
@@ -112,27 +108,49 @@
   },
   "severity": {
     "W10": {
+      "настройки": {
+        "catalyst_factor": "activity",
+        "dp_factor": "level",
+        "catalyst_reset": "outage_48h",
+        "catalyst_changes": [
+          "2024-04-17 15:00",
+          "2026-04-23 11:20"
+        ],
+        "catalyst_changes_assumption": true,
+        "тег": "W10"
+      },
       "пороги": [
-        0.529,
-        0.779
+        0.547,
+        0.802
       ],
-      "spearman_severity_с_ростом_перепада": 0.134,
+      "spearman_severity_с_ростом_перепада": 0.1,
       "val": {
-        "low": 0.625,
-        "medium": 0.374,
+        "low": 0.67,
+        "medium": 0.329,
         "high": 0.0,
-        "фактор_перепада_медиана": 0.74,
-        "перепад_главный_фактор": 0.606
+        "фактор_перепада_медиана": 0.734,
+        "перепад_главный_фактор": 0.589
       },
       "test": {
-        "low": 0.565,
-        "medium": 0.434,
-        "high": 0.001,
-        "фактор_перепада_медиана": 0.584,
-        "перепад_главный_фактор": 0.15
+        "low": 0.573,
+        "medium": 0.425,
+        "high": 0.002,
+        "фактор_перепада_медиана": 0.6,
+        "перепад_главный_фактор": 0.14
       }
     },
     "P8": {
+      "настройки": {
+        "catalyst_factor": "activity",
+        "dp_factor": "level",
+        "catalyst_reset": "outage_48h",
+        "catalyst_changes": [
+          "2024-04-17 15:00",
+          "2026-04-23 11:20"
+        ],
+        "catalyst_changes_assumption": true,
+        "тег": "P8"
+      },
       "пороги": [
         0.542,
         0.67
@@ -154,6 +172,17 @@
       }
     },
     "P8 за вычетом нагрузки": {
+      "настройки": {
+        "catalyst_factor": "activity",
+        "dp_factor": "level",
+        "catalyst_reset": "outage_48h",
+        "catalyst_changes": [
+          "2024-04-17 15:00",
+          "2026-04-23 11:20"
+        ],
+        "catalyst_changes_assumption": true,
+        "тег": "P8_без_нагрузки"
+      },
       "пороги": [
         0.512,
         0.618

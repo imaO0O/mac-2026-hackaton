@@ -35,7 +35,7 @@ from nefte.agents.reliability import ReliabilityAgent  # noqa: E402
 from nefte.config import ROOT, load_config  # noqa: E402
 from nefte.data.loaders import load_telemetry  # noqa: E402
 from nefte.pipeline import StateBuilder  # noqa: E402
-from nefte.provenance import reliability_provenance, report_provenance  # noqa: E402
+from nefte.provenance import report_provenance  # noqa: E402
 from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.backtest_reliability import severity_series  # noqa: E402
 
@@ -86,14 +86,19 @@ def cycle_trend(daily: pd.DataFrame) -> dict:
 
 
 def severity_variant(sb, cfg, raw, tag: str, ht: pd.DataFrame) -> dict:
+    # Сравниваются варианты УРОВНЯ перепада, поэтому фактор включается здесь явно:
+    # в конфиге он выключен (reliability.dp_factor: off), и без этого все три варианта
+    # совпали бы — перепада в тяжести не было бы ни в одном.
     ReliabilityAgent.DP_TAG = tag
-    agent = ReliabilityAgent.from_history(sb.avt, ht, cfg, raw_ht=raw)
+    local = {**cfg, "reliability": {**(cfg.get("reliability") or {}), "dp_factor": "level"}}
+    agent = ReliabilityAgent.from_history(sb.avt, ht, local, raw_ht=raw)
     factors = severity_series(agent, sb.avt, ht)
     sev = factors["severity"].dropna()
     weekly = pd.concat([sev.resample("7D").mean().rename("sev"),
                         ht[tag].resample("7D").mean().diff().rename("dp")], axis=1).dropna()
     medium, high = agent.thresholds
-    out = {"пороги": [round(medium, 3), round(high, 3)],
+    out = {"настройки": {**(local.get("reliability") or {}), "тег": tag},
+           "пороги": [round(medium, 3), round(high, 3)],
            "spearman_severity_с_ростом_перепада": round(float(
                weekly["sev"].corr(weekly["dp"], method="spearman")), 3)}
     for split in ("val", "test"):
@@ -148,7 +153,9 @@ def main() -> int:
               f"тест low/medium/high {test['low']:.1%}/{test['medium']:.1%}/{test['high']:.1%}, "
               f"перепад главный в {test['перепад_главный_фактор']:.0%}")
 
-    payload = {**report_provenance(cfg), **reliability_provenance(cfg), **report}
+    # reliability_settings в отчёт не пишется: это сравнение вариантов, у каждого свои
+    # настройки (поле «настройки» внутри), и сверять его с конфигом нечего
+    payload = {**report_provenance(cfg), **report}
     REPORT.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
                       encoding="utf-8")
     print(f"\nОтчёт: {REPORT.relative_to(ROOT)}")
