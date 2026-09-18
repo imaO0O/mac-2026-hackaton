@@ -60,6 +60,8 @@ run $PY scripts/check_catalyst_life.py
 run $PY scripts/check_f65_units.py
 run $PY scripts/find_regime_episodes.py
 run $PY scripts/check_avt_to_ht_lag.py
+run $PY scripts/check_ht_balance.py
+run $PY scripts/check_dp_proxy.py
 run $PY scripts/check_t95_sigma.py
 
 # 5. разбор моделей качества
