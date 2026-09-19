@@ -1,7 +1,7 @@
 {
   "reliability_settings": {
-    "catalyst_factor": "activity",
-    "catalyst_reset": "outage_48h",
+    "catalyst_factor": "age",
+    "catalyst_reset": "catalyst_log",
     "dp_factor": "off"
   },
   "validity": {
@@ -48,22 +48,22 @@
     "train": {
       "n": 983,
       "n_over_limit": 148,
-      "roc_auc": 0.593,
-      "mean_severity_ok": 0.472,
-      "mean_severity_over": 0.519
+      "roc_auc": 0.597,
+      "mean_severity_ok": 0.484,
+      "mean_severity_over": 0.528
     },
     "test": {
       "n": 249,
       "n_over_limit": 36,
-      "roc_auc": 0.368,
-      "mean_severity_ok": 0.502,
-      "mean_severity_over": 0.445
+      "roc_auc": 0.365,
+      "mean_severity_ok": 0.548,
+      "mean_severity_over": 0.458
     },
-    "dp_growth_spearman": 0.019,
+    "dp_growth_spearman": -0.007,
     "distribution": {
-      "low_%": 61.0,
-      "medium_%": 37.9,
-      "high_%": 1.1
+      "low_%": 52.2,
+      "medium_%": 46.4,
+      "high_%": 1.4
     }
   },
   "analyzer_failures": {
@@ -141,10 +141,10 @@
     ]
   },
   "campaigns": {
-    "n_campaigns": 4,
-    "median_days": 254.4,
-    "max_days": 759.7,
-    "scale_hours_p95": 10041.0
+    "n_campaigns": 3,
+    "median_days": 472.6,
+    "max_days": 735.8,
+    "scale_hours_p95": 10396.7
   },
   "anomaly_detector": {
     "threshold": 6.17,
@@ -160,17 +160,17 @@
     "test_%": 3.67
   },
   "risk_thresholds": [
-    0.54,
-    0.733
+    0.535,
+    0.724
   ],
   "tradeoff_quality_vs_severity": {
     "train": {
-      "auc_severity": 0.593,
-      "auc_inverse": 0.407
+      "auc_severity": 0.597,
+      "auc_inverse": 0.403
     },
     "test": {
-      "auc_severity": 0.368,
-      "auc_inverse": 0.632
+      "auc_severity": 0.365,
+      "auc_inverse": 0.635
     }
   }
 }
