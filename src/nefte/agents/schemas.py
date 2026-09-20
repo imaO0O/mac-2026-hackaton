@@ -226,6 +226,10 @@ class Recommendation(BaseModel):
     alternatives: list[Candidate] = []
     blend: BlendRecipe | None = Field(
         default=None, description="рецептура смешения при рекомендуемом режиме")
+    # Гашение превышения в резервуаре: доля партии, которую примет товарный
+    # резервуар с запасом. Заполняется только когда продукт за пределом —
+    # по факту или по прогнозу (docs/BLENDING.md, практика установки).
+    tank_rescue: dict[str, float | str | bool] | None = None
     abstained: bool = False
     abstain_reason: str = ""
     trace: list[TraceStep] = Field(default_factory=list,

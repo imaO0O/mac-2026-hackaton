@@ -19,7 +19,7 @@ from typing import Callable
 
 import pandas as pd
 
-from nefte.agents.blending import BlendingAgent
+from nefte.agents.blending import BlendingAgent, tank_rescue
 from nefte.agents.optimizer import OptimizerAgent
 from nefte.agents.quality import QualityAgent, fuse_sulfur
 from nefte.agents.reliability import ReliabilityAgent
@@ -788,11 +788,57 @@ class Orchestrator:
                                summary=f"{rule or 'правило не названо'} → {rec.outcome()}"))
         return steps
 
+    def _attach_tank_rescue(self, rec: Recommendation, state: ProcessState,
+                            q: QualityAssessment) -> None:
+        """Что делать с партией, которая уже за пределом: гашение в резервуаре.
+
+        Раньше система на превышение отвечала только «смешением не компенсируется»
+        — и это правда для прямогонки: под Евро-5 её предельная доля сотые доли
+        процента. Но на установке так и не делают. Технолог назвал другую практику
+        (`docs/transcripts/qa_2026-09-11.txt`, 30:26): партию сливают в резервуар и
+        гасят топливом, у которого есть запас по сере. Цена ошибки здесь известна —
+        некондиционная партия идёт на повторную переработку и стоит в 50–100 раз
+        дороже запаса по качеству (15.09, 07:26), поэтому «какую долю принять» —
+        это самый дорогой вопрос карточки.
+
+        Считаем только тогда, когда продукт за пределом по факту или по прогнозу:
+        в остальных случаях гасить нечего, и лишняя строка карточку засоряет.
+        """
+        cfg = (self.cfg.get("blending") or {})
+        tank = cfg.get("tank_reserve_sulfur_mgkg")
+        if tank is None:
+            return
+        limit = float(self.cfg["spec"]["product_sulfur_mgkg"]["max"])
+        measured = fuse_sulfur(state, self.cfg)
+        forecast = self._blend_basis(rec, q)
+        values = [v for v in (measured.value, forecast)
+                  if v is not None and v == v]
+        if not values or max(values) <= limit:
+            return
+        rescue = tank_rescue(max(values), limit, float(tank),
+                             float(cfg.get("tank_rescue_margin_mgkg", 1.0)))
+        rescue["сера резервуара — допущение"] = bool(cfg.get("tank_reserve_assumption", True))
+        rec.tank_rescue = rescue
+        if rescue["возможно"]:
+            share = rescue["доля партии"]
+            rec.explanation = (rec.explanation + " Партию с превышением на установке "
+                               f"гасят в резервуаре: при сере резервуара "
+                               f"{rescue['сера резервуара, мг/кг']:g} мг/кг (ДОПУЩЕНИЕ, "
+                               f"данных по паркам нет) доля партии не выше "
+                               f"{share:.0%} — на тонну партии "
+                               f"{rescue['на тонну партии нужно тонн резервуара']:g} т "
+                               f"товарного ДТ. Это операция парка, а не замена правке "
+                               f"режима.").strip()
+        else:
+            rec.explanation = (rec.explanation + " Гасить превышение в резервуаре нечем: "
+                               + str(rescue.get("почему", "")) + ".").strip()
+
     def _finish(self, rec: Recommendation, state, q, r,
                 blend: bool = True, rule: str = "", optimized: bool = False
                 ) -> Recommendation:
         if blend:
             self._attach_blend(rec, state, q)
+            self._attach_tank_rescue(rec, state, q)
         rec.trace = self._trace(rec, state, q, r, rule, optimized)
         if self.log_runs:
             RUNS_DIR.mkdir(parents=True, exist_ok=True)
