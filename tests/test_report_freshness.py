@@ -145,26 +145,13 @@ def test_report_matches_the_current_reliability_settings(path: Path):
         f"{_reliability_settings(load_config())}: пересоберите отчёт")
 
 
-# Не пересобраны после включения catalyst_factor: activity, потому что на машине
-# пересборки нет моделей: сети в репозиторий не входят (models/ в .gitignore) и
-# обучаются на GPU (docs/GPU_SETUP.md). Список явный и строгий: пересоберут отчёт —
-# тест начнёт проходить, strict-xfail упадёт, и строку отсюда надо убрать.
-KNOWN_STALE_RELIABILITY = {
-    name: "прогон сети: модели нет на машине пересборки, пересобрать после train_sequence.py"
-    for name in ("test_period_seq_h0.json", "test_period_seq_h2.json",
-                 "test_period_seq_s100_h2.json", "test_period_seq_s200_h2.json")
-}
-
-
 def _orchestrator_reports() -> list:
-    params = []
-    for path in REPORTS:
-        if not path.name.startswith(MUST_CARRY_RELIABILITY):
-            continue
-        reason = KNOWN_STALE_RELIABILITY.get(path.name)
-        marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
-        params.append(pytest.param(path, marks=marks, id=path.name))
-    return params
+    # Исключений больше нет: сети пересобираются на той же машине, что и всё
+    # остальное (torch с CUDA), поэтому их прогоны несут настройки износа наравне
+    # с прочими. Список «ожидаемо устаревших» держался strict-xfail и сам потребовал
+    # себя удалить, как только отчёты пересобрали.
+    return [pytest.param(path, id=path.name) for path in REPORTS
+            if path.name.startswith(MUST_CARRY_RELIABILITY)]
 
 
 @pytest.mark.parametrize("path", _orchestrator_reports())

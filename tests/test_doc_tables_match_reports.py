@@ -137,12 +137,33 @@ def stability(h: int) -> list[list[float]]:
             [max(auc) - min(auc)]]
 
 
-def sweep(threshold: float) -> list[list[float]]:
+def working_threshold() -> float:
+    """Рабочий порог берём из отчёта, а не из подписи строки.
+
+    Он подбирается на валидации и меняется при каждой пересборке; зашитое число
+    делало подпись «0.177 (рабочий)» самостоятельным источником правды, который
+    незаметно устаревал вместе с моделью.
+    """
     rows = report("test_period.json")["summary"]["порог вмешательства"]["перебор"]
-    r = next(x for x in rows if abs(x["порог"] - threshold) < 1e-3)
+    return float(next(x for x in rows if x["рабочий"])["порог"])
+
+
+def sweep(threshold: float | None) -> list[list[float]]:
+    rows = report("test_period.json")["summary"]["порог вмешательства"]["перебор"]
+    if threshold is None:
+        r = next(x for x in rows if x["рабочий"])
+    else:
+        r = next(x for x in rows if abs(x["порог"] - threshold) < 1e-3)
     return [[r["поймано"]], [r["пропущено"], 100 * r["доля пропусков"]],
             [100 * r["доля пропусков с отказами"]],
             [r["ложных тревог"]], [100 * r["доля ложных тревог"]]]
+
+
+# Подпись строки рабочего порога в таблице цены порога: число в ней — часть
+# подписи, и оно обязано совпадать с порогом из отчёта. Собираем подпись из
+# отчёта, иначе таблица и модель расходятся молча.
+def _working_label() -> str:
+    return f"{working_threshold():.3f} (рабочий)"
 
 
 def refusals_now() -> list[list[float]]:
@@ -273,7 +294,7 @@ ROWS = [
     *[Row(QA, "| | ядро признаков | разброс MAE |", f"горизонт {h}, три пробы",
           (lambda h=h: stability(h))) for h in (0, 1, 2)],
     *[Row(HC, "| Порог | Поймано | Пропущено |", label, (lambda t=t: sweep(t)))
-      for label, t in (("0.10", 0.10), ("0.15", 0.15), ("0.177 (рабочий)", 0.177),
+      for label, t in (("0.10", 0.10), ("0.15", 0.15), (_working_label(), None),
                        ("0.20", 0.20), ("0.30", 0.30), ("0.40", 0.40), ("0.50", 0.50))],
     Row(HC, "| | отказов всего |", "после", refusals_now),
     Row(HC, "| шаг | пропуски на рабочей точке |", "12 ч", lambda: step_row("test_period.json")),
@@ -452,9 +473,11 @@ def cfpp_reading(index: int) -> list[list[float]]:
     return [[percent(r["в диапазоне"])], [r["смещение"]], [r["MAE"]]]
 
 
-def i350_constant(index: int) -> list[list[float]]:
+def i350_record(index: int) -> list[list[float]]:
+    """Три записи формулы I350: выданная, наше прочтение и официальная."""
     r = broken("AVT6:350:I350")["проверка"][index]
-    return [[r["смещение"]], [r["MAE"]]]
+    # в отчёте доля, в таблице проценты
+    return [[100 * float(r["в 0…100 %"])], [r["смещение"]], [r["MAE"]], [r["corr"]]]
 
 
 def tag_verdict(code: str) -> list[list[float] | None]:
@@ -554,9 +577,12 @@ ROWS += [
         lambda: cfpp_reading(0)),
     Row(AT, "| Прочтение | В диапазоне", "по аналогии с D15: `F65/(F32+F30)`",
         lambda: cfpp_reading(1)),
-    Row(AT, "| Константа | Смещение | MAE |", "39.562 (как выдано)",
-        lambda: i350_constant(0)),
-    Row(AT, "| Константа | Смещение | MAE |", "399.562", lambda: i350_constant(1)),
+    *[Row(AT, "| Запись | В 0…100 % | Смещение | MAE | corr |", label,
+          (lambda i=index: i350_record(i)))
+      for index, label in enumerate((
+          "выданная: 39.562 − 0.76664·T6",
+          "наше прочтение: 399.562 − 0.76664·T6",
+          "официальная: 39.562 + 0.76664·T6"))],
     *[Row(AT, "| Тег | Описание КИП | Медиана |", code, (lambda c=code: tag_verdict(c)))
       for code in DISPUTED_TAGS],
     *[Row(RA, "| Установка | Тегов | Мёртвых |", label, (lambda u=unit: validity(u)))

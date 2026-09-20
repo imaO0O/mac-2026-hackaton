@@ -15,8 +15,8 @@
     ]
   },
   "reliability_settings": {
-    "catalyst_factor": "activity",
-    "catalyst_reset": "outage_48h",
+    "catalyst_factor": "age",
+    "catalyst_reset": "catalyst_log",
     "dp_factor": "off"
   },
   "ts": "2026-06-15 12:00:00",
@@ -69,8 +69,8 @@
       "источник качества": "lims",
       "выполнено": true,
       "severity спокойно/скачок": [
-        0.481,
-        0.543
+        0.488,
+        0.549
       ]
     },
     {
