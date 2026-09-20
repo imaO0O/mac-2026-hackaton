@@ -96,6 +96,17 @@ class StateBuilder:
         # оператору важно видеть, что прибор врёт (случай 2026-04-15…27).
         self.pak_frozen = frozen_mask(
             self.pak_sulfur, int(self.cfg["telemetry"]["frozen_min_samples"]))
+        # Второй поточный анализатор серы — тег Q21 телеметрии 24-2000. В листе
+        # «КИП» пакета его описание стояло на другом коде, поэтому прибор считался
+        # отсутствующим («дубликата анализатора нет»). Таблица организаторов 15.09
+        # вернула ему смысл: с лабораторией он сходится лучше файла ПАК.
+        # Заглушка 307 снимается общим детектором достоверности, «полка» — тем же
+        # правилом, что у ПАК.
+        self.q21_sulfur = (self.ht["Q21"].dropna() if "Q21" in self.ht.columns
+                           else pd.Series(dtype=float))
+        self.q21_frozen = (frozen_mask(self.q21_sulfur,
+                                       int(self.cfg["telemetry"]["frozen_min_samples"]))
+                           if len(self.q21_sulfur) else pd.Series(dtype=bool))
 
         lims = load_lims()
         # Факт: когда проба отобрана. С ним сверяются прогоны и бэктесты.
@@ -199,6 +210,15 @@ class StateBuilder:
                     value=t95_val, unit="°C", source=Source.LIMS, age_hours=t95_age,
                     is_stale=t95_age > stale["lims"],
                     comment="Т95 продукта гидроочистки")
+        if len(self.q21_sulfur):
+            q21_val, q21_age = self._last(self.q21_sulfur, ts)
+            q21_is_frozen = bool(self.q21_frozen.loc[:ts].iloc[-1]) if len(
+                self.q21_frozen.loc[:ts]) else False
+            if q21_val is not None:
+                quality["q21_sulfur_ppm"] = Measurement(
+                    value=q21_val, unit="мг/кг", source=Source.PAK, age_hours=q21_age,
+                    is_stale=q21_age > stale["pak"], is_frozen=q21_is_frozen,
+                    comment="поточный анализатор Q21 (телеметрия 24-2000)")
         if pak_val is not None:
             quality["pak_sulfur_ppm"] = Measurement(
                 value=pak_val, unit="мг/кг", source=Source.PAK, age_hours=pak_age,

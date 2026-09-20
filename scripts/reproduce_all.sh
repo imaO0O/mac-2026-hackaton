@@ -75,6 +75,8 @@ run $PY scripts/check_avt_formulas.py
 run $PY scripts/check_avt_schemes.py
 run $PY scripts/check_vak_against_lims.py
 run $PY scripts/check_pipeline_point.py
+# какой поточный анализатор серы оперативнее: файл ПАК или тег Q21 телеметрии
+run $PY scripts/check_analyzer_source.py
 run $PY scripts/find_delays.py
 run $PY scripts/check_cetane.py
 run $PY scripts/check_catalyst_life.py

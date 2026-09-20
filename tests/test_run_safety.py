@@ -102,11 +102,22 @@ def test_git_output_in_russian_does_not_break_the_check(module):
     cp1251, git отдаёт UTF-8, поток чтения падает в фоновом треде и stdout
     молча становится None. У нас все коммиты и докстринги по-русски.
     """
-    names = module.changed_definitions(
-        ROOT / "src" / "nefte" / "agents" / "quality.py", "HEAD~14")
+    import ast
+
+    path = ROOT / "src" / "nefte" / "agents" / "quality.py"
+    names = module.changed_definitions(path, "HEAD~14")
     assert isinstance(names, set)
-    assert "QualityAgent" in names or not names, (
-        "разбор диффа вернул мусор — проверьте кодировку вызова git")
+    # Здесь стояло «QualityAgent в списке или список пуст», и проверка зависела от
+    # того, что именно менялось за последние четырнадцать коммитов, — то есть
+    # падала от самой истории, а не от поломки разбора. Ловить надо другое: имена
+    # должны быть настоящими определениями этого файла, а не мусором из битой
+    # кодировки.
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    defined = {node.name for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    assert names <= defined, (
+        f"разбор диффа вернул то, чего в файле нет: {sorted(names - defined)} — "
+        "проверьте кодировку вызова git")
 
 
 def test_a_pure_deletion_is_resolved_by_name(module):

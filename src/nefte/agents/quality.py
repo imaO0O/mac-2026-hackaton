@@ -89,7 +89,17 @@ def confidence_parts(sigma: float, source: Source, age_hours: float | None,
         overdue = max(age_hours - stale_after_hours, 0.0)
         parts["свежесть"] = 1.0 / (1.0 + overdue / stale_after_hours)
     if not usable:
-        parts["достоверность данных"] = 0.5
+        # Непригодный срез — это не «чуть хуже», а «числу верить нельзя»: часть
+        # тегов забракована детекторами, и прогноз считается на том, что осталось.
+        #
+        # Здесь стояло 0.5, и разрыв между пригодными и непригодными срезами был
+        # пятикратным — но держался он не на этом множителе. Пока оперативным
+        # источником был ряд из файла анализаторов, он в тех же окнах оказывался
+        # заморожен, и уверенность резалась ещё и за источник. Стоило перевести
+        # оперативный источник на Q21, который в этих окнах жив, как разрыв упал
+        # до двукратного (tests/test_confidence_is_alive.py поймал это сразу).
+        # Множитель должен работать сам по себе, а не за компанию с другим.
+        parts["достоверность данных"] = 0.2
     # Возраст САМОЙ МОДЕЛИ. Дрейф измерен: смещение прогноза уезжает на
     # 0.083 мг/кг в месяц, потому что уровень серы падает быстрее, чем модель это
     # отслеживает (scripts/check_drift.py). Пока этот множитель не появился,
@@ -115,7 +125,14 @@ def fuse_sulfur(state: ProcessState, cfg: dict | None = None) -> Measurement:
     stale = cfg["quality"]["staleness_hours"]
 
     lims = state.quality.get("lims_sulfur_mgkg")
-    pak = state.quality.get("pak_sulfur_ppm")
+    # Оперативный анализатор: ряд из файла ПАК или тег Q21 телеметрии. Это разные
+    # приборы (corr между ними 0.41), и какой из них ближе к лаборатории —
+    # измерено, а не выбрано: scripts/check_analyzer_source.py, правило в PLAN.
+    source = str(cfg["quality"].get("analyzer_source", "pak"))
+    pak = state.quality.get(
+        "q21_sulfur_ppm" if source == "q21" else "pak_sulfur_ppm")
+    if pak is None and source == "q21":
+        pak = state.quality.get("pak_sulfur_ppm")
 
     def fresh(m, hours) -> bool:
         return m is not None and m.value is not None and (m.age_hours or 0) <= hours
