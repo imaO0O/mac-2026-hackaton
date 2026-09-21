@@ -13,6 +13,7 @@ from nefte.config import load_config
 from nefte.data.cleaning import (
     clean_lims_distillation,
     clean_lims_sulfur,
+    flat_mask,
     frozen_mask,
 )
 from nefte.data.features import known_from
@@ -104,9 +105,18 @@ class StateBuilder:
         # правилом, что у ПАК.
         self.q21_sulfur = (self.ht["Q21"].dropna() if "Q21" in self.ht.columns
                            else pd.Series(dtype=float))
-        self.q21_frozen = (frozen_mask(self.q21_sulfur,
-                                       int(self.cfg["telemetry"]["frozen_min_samples"]))
-                           if len(self.q21_sulfur) else pd.Series(dtype=bool))
+        # Полка Q21 — не одно число, а 24.88 ± 0.04: точное равенство прежнего
+        # детектора её не видело вовсе (0 % точек), и система две недели подряд
+        # считала неисправный прибор живым оперативным значением. Детектор с
+        # допуском, порог — правилом до счёта (scripts/check_q21_shelf.py).
+        tolerance = (self.cfg.get("quality") or {}).get("q21_frozen_tolerance_mgkg")
+        min_samples = int(self.cfg["telemetry"]["frozen_min_samples"])
+        if not len(self.q21_sulfur):
+            self.q21_frozen = pd.Series(dtype=bool)
+        elif tolerance is None:
+            self.q21_frozen = frozen_mask(self.q21_sulfur, min_samples)
+        else:
+            self.q21_frozen = flat_mask(self.q21_sulfur, min_samples, float(tolerance))
 
         lims = load_lims()
         # Факт: когда проба отобрана. С ним сверяются прогоны и бэктесты.
@@ -182,12 +192,8 @@ class StateBuilder:
         # порог означал для них одно и то же.
         lims_val, lims_age = self._last_lims(self.lims_sulfur_known, ts)
         pak_val, pak_age = self._last(self.pak_sulfur, ts)
-        # ВНИМАНИЕ: в правило пригодности ниже идёт зависание РЯДА ИЗ ФАЙЛА ПАК, хотя
-        # оперативным анализатором выбран Q21. Расхождение найдено 21.09: на тесте
-        # файловый ряд висит 15 % часов, Q21 — ни разу, и пригодность поменялась бы
-        # в 9.7 % часов. Менять не спешим: в окне плохих данных Q21 показывает около
-        # 25 мг/кг при лабораторных 3–14, и нынешнее правило его там страхует.
-        # Правка меняет решения, правило приёмки записано в docs/PLAN.md до счёта.
+        # зависание файлового ряда — теперь для примечания; в правило пригодности идёт
+        # зависание ОПЕРАТИВНОГО прибора (см. ниже, operational_frozen)
         pak_is_frozen = bool(self.pak_frozen.loc[:ts].iloc[-1]) if len(
             self.pak_frozen.loc[:ts]) else False
 
@@ -240,9 +246,26 @@ class StateBuilder:
         frozen_tags = flagged_tags(avt_flags, ht_flags, "полка")
         sentinel_tags = flagged_tags(avt_flags, ht_flags, "заглушка")
 
+        # Оперативный прибор — тот, по которому решает система (analyzer_source).
+        # До 21.09 и примечание, и правило пригодности смотрели только на ряд из
+        # файла ПАК: после перехода на Q21 неисправный Q21 не упоминался вовсе, а
+        # зависший файловый ряд объявлял непригодным срез, который решался по Q21.
+        # С детектором полки (flat_mask) расхождение двух правил сжалось с 9.7 %
+        # часов теста до 0.4 %, и пригодность переведена на оперативный прибор;
+        # правило приёмки на пересобранных прогонах — docs/PLAN.md, до счёта.
+        operational_q21 = str(self.cfg["quality"].get("analyzer_source", "pak")) == "q21"
+        q21_measure = quality.get("q21_sulfur_ppm")
+        q21_frozen_now = bool(q21_measure is not None and q21_measure.is_frozen)
+        operational_frozen = q21_frozen_now if (operational_q21 and q21_measure) else pak_is_frozen
+        backup_frozen = pak_is_frozen if (operational_q21 and q21_measure) else False
+
         notes = []
-        if pak_is_frozen:
-            notes.append("Поточный анализатор серы заморожен — значение не является фактом.")
+        if operational_frozen:
+            name = "Q21" if (operational_q21 and q21_measure) else "ПАК"
+            notes.append(f"Поточный анализатор серы заморожен ({name}, оперативный) — "
+                         f"значение не является фактом.")
+        if backup_frozen:
+            notes.append("Второй поточный анализатор (ряд ПАК из файла) заморожен.")
         if lims_age is not None and lims_age > stale["lims"]:
             notes.append(f"Последний анализ ЛИМС старше {stale['lims']} ч ({lims_age:.0f} ч).")
         if sentinel_tags:
@@ -252,10 +275,11 @@ class StateBuilder:
 
         dq = DataQuality(
             missing_share=missing_share,
-            frozen_tags=(["pak_sulfur"] if pak_is_frozen else []) + sorted(frozen_tags),
+            frozen_tags=((["pak_sulfur"] if pak_is_frozen else [])
+                         + (["q21_sulfur"] if q21_frozen_now else []) + sorted(frozen_tags)),
             sentinel_tags=sorted(sentinel_tags),
             stale_sources=[k for k, m in quality.items() if m.is_stale],
-            usable=is_state_usable(missing_share, pak_is_frozen, lims_age, self.cfg),
+            usable=is_state_usable(missing_share, operational_frozen, lims_age, self.cfg),
             notes=notes,
         )
 

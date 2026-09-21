@@ -14,7 +14,7 @@
 Методы:
 
 * ``GET /health`` — жив ли сервис и какая модель качества подключена;
-* ``GET /decide?ts=2026-02-18T00:00`` — решение на момент истории (срез собирается
+* ``GET /decide?ts=2026-03-05T00:00`` — решение на момент истории (срез собирается
   из выданных файлов, как в демо);
 * ``POST /decide`` — решение по присланному срезу ``ProcessState`` в JSON;
 * ``POST /ask`` — вопрос оператора по решению: ``{"question": …, "ts": …}`` или
@@ -130,7 +130,7 @@ def make_handler(service: DecisionService):
                 ts = (parse_qs(url.query).get("ts") or [None])[0]
                 if not ts:
                     return self._send(HTTPStatus.BAD_REQUEST,
-                                      {"error": "нужен параметр ts, например ?ts=2026-02-18T00:00"})
+                                      {"error": "нужен параметр ts, например ?ts=2026-03-05T00:00"})
                 try:
                     return self._send(HTTPStatus.OK, _payload(service.decide_at(ts)))
                 except (LookupError, ValueError) as err:

@@ -60,7 +60,20 @@ def quality_chart(sb: StateBuilder, lab: pd.Series, ts: pd.Timestamp,
     frozen = sb.pak_frozen.loc[lo:hi]
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=pak.index, y=pak.values, name="ПАК",
+    # Оба поточных анализатора: оперативный — Q21, и именно их расхождение
+    # карточка называет недостоверностью (строка «Достоверность»). Раньше на
+    # графике был только файловый ряд — прибор, по которому система не решает.
+    q21 = sb.q21_sulfur.loc[lo:hi] if len(sb.q21_sulfur) else pd.Series(dtype=float)
+    if len(q21):
+        fig.add_trace(go.Scatter(x=q21.index, y=q21.values, name="Q21 (оперативный)",
+                                 line=dict(color="#F58518", width=1)))
+        # полка неисправности Q21 (24.88 ± 0.04) — детектор с допуском
+        q21_frozen = sb.q21_frozen.loc[lo:hi] if len(sb.q21_frozen) else pd.Series(dtype=bool)
+        if q21_frozen.any():
+            shelf = q21[q21_frozen.reindex(q21.index, fill_value=False)]
+            fig.add_trace(go.Scatter(x=shelf.index, y=shelf.values, name="Q21 завис",
+                                     mode="markers", marker=dict(color="#B279A2", size=3)))
+    fig.add_trace(go.Scatter(x=pak.index, y=pak.values, name="ПАК (файл)",
                              line=dict(color="#4C78A8", width=1)))
     if frozen.any():
         stuck = pak[frozen.reindex(pak.index, fill_value=False)]
@@ -224,7 +237,7 @@ def main() -> None:
                                  format_func=lambda i: scenes[i][0])
             _, ts, point = scenes[index]
         else:
-            day = st.date_input("Дата", value=pd.Timestamp("2026-02-18").date(),
+            day = st.date_input("Дата", value=pd.Timestamp("2026-03-05").date(),
                                 min_value=sb.ht.index[0].date(),
                                 max_value=sb.ht.index[-1].date())
             hour = st.slider("Час", 0, 23, 0)
@@ -246,9 +259,17 @@ def main() -> None:
 
     # ---------- строка состояния -------------------------------------- #
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    pak = state.quality.get("pak_sulfur_ppm")
+    # Показываем ОПЕРАТИВНЫЙ анализатор — тот, по которому решает система
+    # (`quality.analyzer_source`). До 21.09 здесь стоял ряд из файла ПАК и после
+    # перехода на Q21 дашборд показывал оператору «18.45, завис», когда система
+    # работала по живому Q21 с 24.9: подпись и число были от другого прибора.
+    source = str(cfg["quality"].get("analyzer_source", "pak"))
+    key, label = (("q21_sulfur_ppm", "Q21") if source == "q21"
+                  else ("pak_sulfur_ppm", "ПАК"))
+    pak = state.quality.get(key) or state.quality.get("pak_sulfur_ppm")
     lims = state.quality.get("lims_sulfur_mgkg")
-    c1.metric("ПАК, мг/кг", f"{pak.value:.2f}" if pak and pak.value else "—",
+    c1.metric(f"Поточный анализатор ({label}), мг/кг",
+              f"{pak.value:.2f}" if pak and pak.value else "—",
               "завис" if pak and pak.is_frozen else None, delta_color="inverse")
     c2.metric("ЛИМС, мг/кг", f"{lims.value:.2f}" if lims and lims.value else "—",
               f"возраст {lims.age_hours:.0f} ч" if lims and lims.age_hours else None,

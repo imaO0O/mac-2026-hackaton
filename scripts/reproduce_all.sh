@@ -189,6 +189,7 @@ run $PY scripts/check_shock_sensitivity.py
 run $PY scripts/check_t95_source.py
 run $PY scripts/check_t95_combo.py
 run $PY scripts/check_out_of_bounds.py
+run $PY scripts/check_q21_shelf.py
 # читают прогоны по валидации и тесту — поэтому здесь, в самом конце
 run $PY scripts/check_disagreement_decisions.py
 run $PY scripts/check_action_plan.py

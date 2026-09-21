@@ -86,6 +86,25 @@ def frozen_mask(series: pd.Series, min_samples: int = 18) -> pd.Series:
     return (position >= min_samples) & series.notna()
 
 
+def flat_mask(series: pd.Series, min_samples: int = 18,
+              tolerance: float = 0.05) -> pd.Series:
+    """True там, где размах последних ``min_samples`` отсчётов меньше ``tolerance``.
+
+    Тот же признак «уже не меняется», что у :func:`frozen_mask`, но с допуском на
+    шум. Нужен для анализатора, который уходит в неисправность не на одно число, а
+    на полку с дрожанием: Q21 стоит на 24.88 ± 0.04 мг/кг сотни часов подряд
+    (замены катализатора 2024 и 2026, июнь–июль 2026), и точное равенство его не
+    видит — 0 % точек полки. Допуск выбран правилом, записанным до счёта
+    (``scripts/check_q21_shelf.py``): наименьший из сетки, при котором на обучении
+    ловится не меньше 90 % эталонной полки при не больше 1 % ложных на работающей
+    установке; 0.05 мг/кг — 93.5 % и 0.13 %, на тесте 98.9 % полки.
+
+    Считается только по прошлому: окно заканчивается на текущем отсчёте.
+    """
+    rolling = series.rolling(min_samples, min_periods=min_samples)
+    return ((rolling.max() - rolling.min()) < tolerance).fillna(False) & series.notna()
+
+
 def frozen_intervals(series: pd.Series, min_samples: int = 18) -> pd.DataFrame:
     """Список интервалов «замороженного» сигнала: ``start, end, value, n, hours``."""
     grp = (series != series.shift()).cumsum()

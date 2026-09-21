@@ -733,6 +733,7 @@ class Orchestrator:
         steps: list[TraceStep] = []
         dq = state.data_quality
         lims, pak = state.quality.get("lims_sulfur_mgkg"), state.quality.get("pak_sulfur_ppm")
+        q21 = state.quality.get("q21_sulfur_ppm")
 
         def measurement(m, name: str) -> str:
             if m is None or m.value is None:
@@ -741,9 +742,17 @@ class Orchestrator:
             flag = ", завис" if getattr(m, "is_frozen", False) else ""
             return f"{name} {m.value:.2f}{age}{flag}"
 
+        # Оба поточных прибора, оперативный — первым. До 21.09 в трассе был только
+        # файловый ПАК, и после перехода на Q21 она называла не тот прибор, по
+        # которому система решала: «ПАК 18.45, завис» при живом Q21 24.9.
+        operational_q21 = str((self.cfg.get("quality") or {}).get(
+            "analyzer_source", "pak")) == "q21"
+        analyzers = (f"{measurement(q21, 'Q21 (оперативный)')}; {measurement(pak, 'ПАК')}"
+                     if operational_q21 and q21 is not None
+                     else measurement(pak, "ПАК"))
         steps.append(TraceStep(
             agent="срез состояния",
-            summary=(f"{measurement(lims, 'ЛИМС')}; {measurement(pak, 'ПАК')}; пропусков "
+            summary=(f"{measurement(lims, 'ЛИМС')}; {analyzers}; пропусков "
                      f"{dq.missing_share:.1%}; заглушек в {len(dq.sentinel_tags)} тегах, "
                      f"«полок» в {len(dq.frozen_tags)}"
                      + ("" if dq.usable else "; срез непригоден")),
@@ -918,9 +927,21 @@ class Orchestrator:
 
     def _attach_outlook(self, rec: Recommendation, state: ProcessState,
                         q: QualityAssessment) -> None:
-        """Когда анализ, что он покажет, сколько тонн и не едет ли режим сам."""
+        """Когда анализ, что он покажет, сколько тонн и не едет ли режим сам.
+
+        На непригодном срезе остаётся только время анализа — это и есть ответ на
+        «когда станет понятнее». Диапазон строится по прогнозу, которому система
+        только что отказалась верить, а тонны и движение режима — по телеметрии с
+        заглушками; обещание «восемь раз из десяти» мерилось на пригодных данных.
+        """
         block: dict = {}
         lab = next_lab(state, q)
+        if lab and not state.data_quality.usable:
+            lab = {key: value for key, value in lab.items() if key != "диапазон, мг/кг"}
+            block["следующий анализ"] = lab
+            block["строка"] = outlook_sentence(block)
+            rec.outlook = block
+            return
         if lab:
             block["следующий анализ"] = lab
         throughput = (rec.blend.throughput_tph if rec.blend is not None else None)
@@ -934,6 +955,7 @@ class Orchestrator:
             block["режим уже едет"] = moving
         if not block:
             return
+        block["есть действие"] = rec.outcome() == "меняем уставки"
         block["строка"] = outlook_sentence(block)
         rec.outlook = block
 
@@ -947,8 +969,17 @@ class Orchestrator:
         # достоверность и «что дальше» нужны и при отказе: именно там оператор
         # спрашивает, почему система молчит и когда станет понятнее
         self._attach_analyzer_gap(rec, state)
-        self._attach_bounds_note(rec, state)
-        self._attach_outlook(rec, state, q)
+        # Но не на остановленной установке. Первая версия советовала там «T5 на
+        # 340 °C ниже диапазона, возврат за 171 цикл» и обещала «эффект правки за
+        # 4.6 ч»: холодный реактор неподвижен, признак перехода его не ловит, а
+        # причину — останов — отказ уже назвал. Вывод на режим ведёт технолог.
+        if not self.reliability.is_unit_down(state):
+            # Возврат в норму считается по телеметрии, и на непригодном срезе он
+            # советовал бы по заглушкам: «T11 на 148 °C ниже, 75 циклов» при 55 %
+            # пропусков — увидено на дашборде в сцене «недостоверные данные».
+            if state.data_quality.usable:
+                self._attach_bounds_note(rec, state)
+            self._attach_outlook(rec, state, q)
         rec.trace = self._trace(rec, state, q, r, rule, optimized)
         if self.log_runs:
             RUNS_DIR.mkdir(parents=True, exist_ok=True)

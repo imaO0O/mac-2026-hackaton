@@ -152,6 +152,7 @@ def test_sentence_mentions_every_part_it_was_given():
                              "доля попаданий на истории": 0.8},
         "тонн под риском": 1500.0,
         "режим уже едет": {"ход, °C": 2.5, "окно, ч": TAU_H, "куда": "вверх"},
+        "есть действие": True,
     }
     text = sentence(block)
     assert "6 ч" in text and "7.4–11.2" in text
@@ -232,3 +233,67 @@ def test_aging_drift_is_capped_by_the_cycle_span_and_only_goes_up():
     assert capped["°C"] == pytest.approx(3.0)
     # катализатор моложе опорного — дрейфа нет вовсе, а не отрицательный
     assert aging_drift("2026-06-01", "2025-06-30", 0.848, CHANGES, cap_c=25.0) is None
+
+
+# ---------------------------------------------------------------- остановленная установка
+def test_stopped_unit_gets_no_return_advice_and_no_outlook():
+    """На холодном реакторе нечего возвращать и некуда «ждать эффекта правки».
+
+    Первая версия на остановленной установке советовала «T5 на 340 °C ниже
+    диапазона, возврат за 171 цикл» — увидено на дашборде 21.09. Признак перехода
+    этого не ловит: холодный реактор неподвижен. Причину называет отказ.
+    """
+    from tests.test_agents import build_system
+
+    system = build_system()
+    system.reliability.feed_median = 250.0      # без медианы останов не распознаётся
+    state = make_state()
+    state.telemetry_ht.update({"F26": 5.0, "T5": 40.0, "T6": 40.0, "T11": 40.0})
+    rec = system.run(state)
+    assert rec.abstained
+    assert rec.out_of_band is None and rec.outlook is None
+    assert "Возврат в норму" not in rec.to_operator_text()
+
+
+def test_running_unit_still_gets_the_return_line():
+    """Обратная сторона: на работающей установке строка на месте."""
+    from tests.test_agents import build_system
+
+    system = build_system()
+    system.reliability.feed_median = 250.0
+    state = make_state()
+    state.telemetry_ht["P13"] = 3.0              # на 0.5 МПа ниже при шаге 0.05
+    rec = system.run(state)
+    assert rec.out_of_band is not None
+    assert "P13" in rec.out_of_band["строка"]
+
+
+def test_unusable_data_keep_only_the_time_of_the_next_analysis():
+    """На непригодном срезе нет ни совета вернуть тег, ни обещанного диапазона.
+
+    Увидено на дашборде в сцене «недостоверные данные»: при 55 % пропусков и
+    заглушках строка возврата считала шаги по этим самым заглушкам, а диапазон
+    строился по прогнозу с уверенностью 0.14. Время анализа остаётся: это ответ
+    на «когда станет понятнее».
+    """
+    from tests.test_agents import build_system
+
+    system = build_system()
+    state = make_state(lims=(6.0, 4.0), usable=False)
+    state.telemetry_ht["P13"] = 3.0              # выход за диапазон больше шага
+    rec = system.run(state)
+    assert rec.abstained
+    assert rec.out_of_band is None
+    lab = rec.outlook["следующий анализ"]
+    assert "диапазон, мг/кг" not in lab
+    assert "не обещаем" in rec.outlook["строка"]
+    assert "эффект правки" not in rec.outlook["строка"]
+
+
+def test_effect_timing_is_promised_only_when_there_is_an_action():
+    from nefte.agents.outlook import sentence
+
+    base = {"следующий анализ": {"через, ч": 6.0, "задерживается": False,
+                                 "диапазон, мг/кг": [7.0, 11.0]}}
+    assert "эффект правки" not in sentence(base)
+    assert "эффект правки" in sentence({**base, "есть действие": True})
