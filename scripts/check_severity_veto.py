@@ -53,7 +53,7 @@ WINDOWS = {"stable": None,                                   # из demo_windows
            "конец цикла катализатора": ("2026-03-01", "2026-03-31")}
 MAX_MISS_GROWTH = 0.02
 MAX_T95_RISE = 0.5
-SAMPLE = 60
+SAMPLE = 120
 
 
 def with_mode(cfg: dict, mode: str) -> dict:
@@ -102,7 +102,10 @@ def simulate(sb, cfg: dict, mode: str, window: tuple[str, str]) -> dict:
 def temperature_rises(sb, cfg: dict, rows: pd.DataFrame) -> dict:
     """Условие 4: ни одно действие при высокой тяжести не поднимает температуру."""
     chosen = rows[rows["исход"].eq("меняем уставки") & rows["risk_class"].eq("high")]
-    chosen = chosen.head(SAMPLE)
+    # Сдвигов уставок в строках прогона нет — решение пересчитывается в тех же
+    # моментах. Равномерно по периоду, а не первые: конец цикла — в конце.
+    if len(chosen) > SAMPLE:
+        chosen = chosen.iloc[::-(-len(chosen) // SAMPLE)]
     system = build_system(sb, with_mode(cfg, "raise_only"))
     system.log_runs = False
     rises = []
