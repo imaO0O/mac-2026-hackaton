@@ -80,9 +80,16 @@ def test_reliability_constraints_shrink_search_space():
 
 
 def test_inadmissible_regime_rejects_everything():
-    """Запрет агента надёжности нельзя перевесить хорошим прогнозом качества."""
+    """Запрет агента надёжности нельзя перевесить хорошим прогнозом качества.
+
+    Так ведёт себя режим ``severity_veto: all``. С 21.09 по умолчанию стоит
+    ``raise_only``: вычёркивается то, что греет или утяжеляет режим, а шаг к
+    безопасности остаётся (test_raise_only_never_proposes_heating_on_inadmissible_regime).
+    """
     state, quality, reliability = _assessments(admissible=False)
-    agent = _agent()
+    agent = OptimizerAgent(
+        bounds=BOUNDS, cfg=_cfg("reliability", "severity_veto", "all"),
+        surrogate=linear_surrogate({"T5": -0.5, "T11": -0.5, "F26": 0.01}))
     assert agent.propose(state, quality, reliability) == []
     assert "недопустим" in agent.rejection_summary()
 
