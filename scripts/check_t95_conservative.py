@@ -21,8 +21,10 @@
 2. выпуск падает не более чем на 1 % — по среднему сдвигу расхода сырья в имитации;
 3. число вмешательств растёт не более чем на четверть — по прогону по валидации.
 
-Прогоны по валидации: нынешний — `val_period_step1h_lock4.json`, с кандидатом —
-`val_period_step1h_t95_last_plus_sigma.json`. Имитация — окно `stable` валидации.
+Прогоны по валидации — по файлу на режим: `val_period_step1h_t95_<режим>.json`
+(`run_test_period.py --split val --every 1h --tag step1h --t95-estimate <режим>`);
+режим из конфига берётся из базового `val_period_step1h_lock4.json`, чтобы после
+включения кандидат не сравнивался сам с собой. Имитация — окно `stable` валидации.
 """
 from __future__ import annotations
 
@@ -43,8 +45,8 @@ from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
 
 REPORT = ROOT / "reports" / "t95_conservative.json"
-RUNS = {"last": "val_period_step1h_lock4.json",
-        "last_plus_sigma": "val_period_step1h_t95_last_plus_sigma.json"}
+MODES = ("last", "last_plus_sigma")
+BASE = "val_period_step1h_lock4.json"
 MAX_THROUGHPUT_DROP = 0.01
 MAX_ACTION_GROWTH = 0.25
 FEED = "F26"
@@ -73,9 +75,17 @@ def simulate(sb, cfg: dict, mode: str) -> dict:
             "сера выше предела с нами, шагов": paired.get("выше предела с нами, шагов")}
 
 
-def actions(name: str) -> int | None:
-    path = ROOT / "reports" / name
-    if not path.exists():
+def run_name(mode: str, default: str) -> str | None:
+    """Прогон режима: свой файл, а для режима из конфига — базовый прогон."""
+    explicit = f"val_period_step1h_t95_{mode}.json"
+    if (ROOT / "reports" / explicit).exists():
+        return explicit
+    return BASE if mode == default else None
+
+
+def actions(name: str | None) -> int | None:
+    path = ROOT / "reports" / name if name else None
+    if path is None or not path.exists():
         return None
     summary = json.loads(path.read_text(encoding="utf-8"))["summary"]
     return int(summary["исходы"].get("меняем уставки", 0))
@@ -84,12 +94,14 @@ def actions(name: str) -> int | None:
 def main() -> int:
     use_utf8_console()
     cfg = load_config()
-    acts = {mode: actions(name) for mode, name in RUNS.items()}
+    default = str(cfg["quality"].get("t95_estimate", "last"))
+    runs = {mode: run_name(mode, default) for mode in MODES}
+    acts = {mode: actions(name) for mode, name in runs.items()}
     if any(v is None for v in acts.values()):
         print("нет прогонов по валидации — см. докстринг")
         return 1
     sb = StateBuilder(cfg)
-    sims = {mode: simulate(sb, cfg, mode) for mode in RUNS}
+    sims = {mode: simulate(sb, cfg, mode) for mode in MODES}
     print(f"валидация, вмешательств: {acts}")
     for mode, stats in sims.items():
         print(f"  имитация {mode:16s} {stats}")
@@ -112,7 +124,7 @@ def main() -> int:
 
     REPORT.write_text(json.dumps({
         **report_provenance(cfg), "окно имитации": cfg["demo_windows"]["stable"],
-        "вмешательств на валидации": acts, "имитация": sims,
+        "прогоны": runs, "вмешательств на валидации": acts, "имитация": sims,
         "правило": {k: bool(v) for k, v in rule.items()}, "принят": bool(accepted),
         "выбор": "last_plus_sigma" if accepted else "last",
     }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")

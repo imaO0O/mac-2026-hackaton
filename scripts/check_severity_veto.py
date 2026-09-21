@@ -20,9 +20,11 @@
 3. отказов «нет допустимых вариантов» на валидации становится меньше хотя бы вдвое;
 4. ни одно рекомендованное действие при высокой тяжести не поднимает температуру.
 
-Прогоны по валидации: нынешний — `val_period_step1h_lock4.json` (запрет 4 ч — это и
-есть настройка по умолчанию), с кандидатом — `val_period_step1h_veto_raise_only.json`
-(`run_test_period.py --split val --every 1h --tag step1h --severity-veto raise_only`).
+Прогоны по валидации — по файлу на режим: `val_period_step1h_veto_<режим>.json`
+(`run_test_period.py --split val --every 1h --tag step1h --severity-veto <режим>`).
+Режим, который стоит в конфиге, отдельного прогона не требует: это и есть
+`val_period_step1h_lock4.json` (запрет 4 ч — настройка по умолчанию). Так проверка не
+сравнит кандидата с самим собой, когда его включат и он станет умолчанием.
 Имитация — на валидационном окне `stable` и, для отчёта, на окне конца цикла
 катализатора в тесте, где кандидат вообще может что-то изменить.
 """
@@ -45,10 +47,9 @@ from nefte.utils import use_utf8_console  # noqa: E402
 from scripts.run_cycle import build_system  # noqa: E402
 
 REPORT = ROOT / "reports" / "severity_veto.json"
-RUNS = {"all": "val_period_step1h_lock4.json",
-        "raise_only": "val_period_step1h_veto_raise_only.json"}
-TEST_RUNS = {"all": "test_period_step1h.json",
-             "raise_only": "test_period_step1h_veto_raise_only.json"}
+MODES = ("all", "raise_only")
+BASE = {"val": "val_period_step1h_lock4.json", "test": "test_period_step1h.json"}
+EXPLICIT = {"val": "val_period_step1h_veto_{}.json", "test": "test_period_step1h_veto_{}.json"}
 WINDOWS = {"stable": None,                                   # из demo_windows, валидация
            "конец цикла катализатора": ("2026-03-01", "2026-03-31")}
 MAX_MISS_GROWTH = 0.02
@@ -60,9 +61,17 @@ def with_mode(cfg: dict, mode: str) -> dict:
     return {**cfg, "reliability": {**cfg["reliability"], "severity_veto": mode}}
 
 
-def load_rows(name: str) -> pd.DataFrame | None:
-    path = ROOT / "reports" / name
-    if not path.exists():
+def run_name(split: str, mode: str, default: str) -> str | None:
+    """Прогон режима: свой файл, а для режима из конфига — базовый прогон."""
+    explicit = EXPLICIT[split].format(mode)
+    if (ROOT / "reports" / explicit).exists():
+        return explicit
+    return BASE[split] if mode == default else None
+
+
+def load_rows(name: str | None) -> pd.DataFrame | None:
+    path = ROOT / "reports" / name if name else None
+    if path is None or not path.exists():
         return None
     rows = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["rows"])
     rows["ts"] = pd.to_datetime(rows["ts"])
@@ -125,7 +134,10 @@ def temperature_rises(sb, cfg: dict, rows: pd.DataFrame) -> dict:
 def main() -> int:
     use_utf8_console()
     cfg = load_config()
-    base, cand = load_rows(RUNS["all"]), load_rows(RUNS["raise_only"])
+    default = str(cfg["reliability"].get("severity_veto", "all"))
+    runs = {split: {mode: run_name(split, mode, default) for mode in MODES}
+            for split in ("val", "test")}
+    base, cand = load_rows(runs["val"]["all"]), load_rows(runs["val"]["raise_only"])
     if base is None or cand is None:
         print("нет прогонов по валидации — см. докстринг")
         return 1
@@ -172,7 +184,8 @@ def main() -> int:
     print(f"  ВЫВОД: severity_veto = {'raise_only' if accepted else 'all (кандидат отклонён)'}")
 
     test = {}
-    base_t, cand_t = load_rows(TEST_RUNS["all"]), load_rows(TEST_RUNS["raise_only"])
+    base_t = load_rows(runs["test"]["all"])
+    cand_t = load_rows(runs["test"]["raise_only"])
     if base_t is not None and cand_t is not None:
         test = {"all": run_stats(base_t), "raise_only": run_stats(cand_t)}
         print("\nтест (для отчёта):")
@@ -183,7 +196,8 @@ def main() -> int:
         **report_provenance(cfg),
         "условие: рост пропусков не больше": MAX_MISS_GROWTH,
         "условие: рост вклада в Т95 не больше, °C": MAX_T95_RISE,
-        "валидация": val, "имитация": sims, "условие 4": rises, "тест": test,
+        "прогоны": runs, "валидация": val, "имитация": sims, "условие 4": rises,
+        "тест": test,
         "правило": {k: bool(v) for k, v in rule.items()}, "принят": bool(accepted),
         "выбор": "raise_only" if accepted else "all",
     }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
