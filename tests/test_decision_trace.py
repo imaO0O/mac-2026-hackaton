@@ -49,3 +49,22 @@ def test_trace_survives_serialization_to_the_run_log():
     rec = build_system().run(make_state(lims=(5.0, 1.0), pak=(5.2, 0.1)))
     dumped = rec.model_dump(mode="json")
     assert [s["agent"] for s in dumped["trace"]] == _agents(rec)
+
+
+def test_quality_step_names_the_instrument_not_the_enum():
+    """«источник pak» читался как файловый ряд ПАК, хотя с 20.09 решает Q21.
+    Трасса называет прибор, по которому взят факт; нет Q21 в срезе — честно ПАК."""
+    from nefte.agents.schemas import Measurement, Source
+
+    stale_lab = make_state(lims=(6.0, 200.0), pak=(6.2, 0.1))
+    quality = lambda rec: next(s for s in rec.trace if s.agent == "агент качества")  # noqa: E731
+
+    assert "источник: поточный анализатор ПАК" in quality(build_system().run(stale_lab)).summary
+
+    with_q21 = make_state(lims=(6.0, 200.0), pak=(6.2, 0.1))
+    with_q21.quality["q21_sulfur_ppm"] = Measurement(value=6.4, unit="мг/кг",
+                                                     source=Source.PAK, age_hours=0.1)
+    assert "источник: поточный анализатор Q21" in quality(build_system().run(with_q21)).summary
+
+    fresh_lab = make_state(lims=(6.0, 1.0), pak=(6.2, 0.1))
+    assert "источник: лаборатория" in quality(build_system().run(fresh_lab)).summary

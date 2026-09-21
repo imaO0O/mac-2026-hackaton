@@ -160,6 +160,26 @@ def test_architecture_metrics_count_misses_and_effort():
     assert out["отказов"] == 1
 
 
+def test_ablation_stubs_answer_everything_the_orchestrator_asks():
+    """Заглушки сравнения архитектур подменяют агентов в том же оркестраторе.
+    Оркестратор начал спрашивать у агента новое — заглушка обязана уметь это же,
+    иначе сравнение падает только в пересборке, через часы счёта."""
+    import re
+    from pathlib import Path
+
+    from nefte.agents import orchestrator
+    from scripts.compare_architectures import NoReliability, RuleOptimizer
+
+    source = Path(orchestrator.__file__).read_text(encoding="utf-8")
+    for attr, stub in (("reliability", NoReliability), ("optimizer", RuleOptimizer)):
+        asked = set(re.findall(rf"self\.{attr}\.(\w+)", source))
+        assert asked, attr
+        instance_attrs = {"surrogate", "bounds"} if stub is RuleOptimizer else set()
+        missing = {name for name in asked
+                   if not hasattr(stub, name) and name not in instance_attrs}
+        assert not missing, f"{stub.__name__} не умеет: {sorted(missing)}"
+
+
 def test_single_agent_rule_is_threshold_only():
     """Одноагентная конфигурация обязана быть именно тривиальной, иначе сравнение
     перестаёт быть сравнением с базой."""

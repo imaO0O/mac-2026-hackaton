@@ -177,6 +177,17 @@ def main() -> int:
                     help="переопределить reliability.dp_factor (перепад Р-202 в тяжести)")
     ap.add_argument("--catalyst-reset", choices=("outage_48h", "catalyst_log"), default=None,
                     help="переопределить reliability.catalyst_reset")
+    ap.add_argument("--severity-veto", choices=("all", "raise_only"), default=None,
+                    help="переопределить reliability.severity_veto: что вычёркивает "
+                         "высокая тяжесть режима")
+    ap.add_argument("--t95-estimate", choices=("last", "last_plus_sigma"), default=None,
+                    help="переопределить quality.t95_estimate: уровень Т95 для "
+                         "жёсткого ограничения")
+    # Любой период, а не только разбиение: эксперты «на тесте задают период» (18.09)
+    ap.add_argument("--from", dest="date_from", default=None,
+                    help="начало периода, например 2026-04-14; заменяет --split")
+    ap.add_argument("--to", dest="date_to", default=None,
+                    help="конец периода, например 2026-04-28")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -193,15 +204,21 @@ def main() -> int:
     if args.repeat_risk_increase is not None:
         cfg = {**cfg, "limits": {**cfg["limits"],
                                  "repeat_min_risk_increase": float(args.repeat_risk_increase)}}
-    for key in ("catalyst_factor", "catalyst_reset", "dp_factor"):
+    for key in ("catalyst_factor", "catalyst_reset", "dp_factor", "severity_veto"):
         if getattr(args, key) is not None:
             cfg = {**cfg, "reliability": {**(cfg.get("reliability") or {}),
                                           key: getattr(args, key)}}
     if args.aging_bounds is not None:
         cfg = {**cfg, "optimization": {**cfg["optimization"],
                                        "aging_bounds": args.aging_bounds == "on"}}
+    if args.t95_estimate is not None:
+        cfg = {**cfg, "quality": {**cfg["quality"], "t95_estimate": args.t95_estimate}}
     limit_mgkg = cfg["spec"]["product_sulfur_mgkg"]["max"]
     lo, hi = cfg["split"][args.split]
+    if (args.date_from is None) != (args.date_to is None):
+        ap.error("--from и --to задаются вместе")
+    if args.date_from is not None:
+        lo, hi = args.date_from, args.date_to
 
     sb = StateBuilder(cfg)
     system = build_system(sb, cfg, model_kind=args.model, seq_horizon=args.seq_horizon,
@@ -373,7 +390,13 @@ def main() -> int:
         tag = "_".join(x for x in (tag, f"dp_{args.dp_factor}") if x)
     if args.aging_bounds is not None:
         tag = "_".join(x for x in (tag, f"aging_{args.aging_bounds}") if x)
+    if args.severity_veto is not None:
+        tag = "_".join(x for x in (tag, f"veto_{args.severity_veto}") if x)
+    if args.t95_estimate is not None:
+        tag = "_".join(x for x in (tag, f"t95_{args.t95_estimate}") if x)
     stem = "test_period" if args.split == "test" else "val_period"
+    if args.date_from is not None:
+        stem = f"period_{args.date_from}_{args.date_to}"
     report_path = (REPORT.with_name(f"{stem}.json") if not tag
                    else REPORT.with_name(f"{stem}_{tag}.json"))
     report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -760,9 +760,14 @@ class Orchestrator:
 
         sulfur = q.predictions.get("product_sulfur_mgkg")
         t95 = q.predictions.get("product_t95_c")
+        # Класс источника по ТЗ (ЛИМС → ПАК → ВАК) и конкретный прибор: «pak» в
+        # трассе читался как файловый ряд ПАК, хотя с 20.09 это Q21.
+        source = {"lims": "лаборатория", "vak": "расчёт ВАК", "none": "нет"}.get(
+            q.source.value,
+            "поточный анализатор " + ("Q21" if operational_q21 and q21 is not None else "ПАК"))
         steps.append(TraceStep(
             agent="агент качества",
-            summary=(f"источник {q.source.value}; прогноз серы "
+            summary=(f"источник: {source}; прогноз серы "
                      + ("нет" if sulfur is None else f"{sulfur:.2f} мг/кг")
                      + f", риск {q.spec_risk.get('product_sulfur_mgkg', 0.0):.0%}; "
                      + ("" if t95 is None else f"Т95 {t95:.1f} °C; ")
