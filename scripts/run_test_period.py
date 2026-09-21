@@ -171,6 +171,8 @@ def main() -> int:
                     help="повтор действия до проявления прошлого — только при росте риска")
     ap.add_argument("--catalyst-factor", choices=("age", "activity"), default=None,
                     help="переопределить reliability.catalyst_factor")
+    ap.add_argument("--aging-bounds", choices=("on", "off"), default=None,
+                    help="поправка верхней границы температур на старение катализатора")
     ap.add_argument("--dp-factor", choices=("off", "level", "growth"), default=None,
                     help="переопределить reliability.dp_factor (перепад Р-202 в тяжести)")
     ap.add_argument("--catalyst-reset", choices=("outage_48h", "catalyst_log"), default=None,
@@ -195,6 +197,9 @@ def main() -> int:
         if getattr(args, key) is not None:
             cfg = {**cfg, "reliability": {**(cfg.get("reliability") or {}),
                                           key: getattr(args, key)}}
+    if args.aging_bounds is not None:
+        cfg = {**cfg, "optimization": {**cfg["optimization"],
+                                       "aging_bounds": args.aging_bounds == "on"}}
     limit_mgkg = cfg["spec"]["product_sulfur_mgkg"]["max"]
     lo, hi = cfg["split"][args.split]
 
@@ -366,6 +371,8 @@ def main() -> int:
         tag = "_".join(x for x in (tag, f"reset_{args.catalyst_reset}") if x)
     if args.dp_factor is not None:
         tag = "_".join(x for x in (tag, f"dp_{args.dp_factor}") if x)
+    if args.aging_bounds is not None:
+        tag = "_".join(x for x in (tag, f"aging_{args.aging_bounds}") if x)
     stem = "test_period" if args.split == "test" else "val_period"
     report_path = (REPORT.with_name(f"{stem}.json") if not tag
                    else REPORT.with_name(f"{stem}_{tag}.json"))
