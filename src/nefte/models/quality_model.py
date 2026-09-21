@@ -648,6 +648,10 @@ class SulfurModel:
                 (pd.Timestamp(state.ts) - idx[pos]).total_seconds() / 3600.0)
         return row
 
+    def row_for(self, state: ProcessState) -> pd.DataFrame | None:
+        """Та же строка признаков, что пошла в прогноз, — для разбора причины."""
+        return self._row_for(state)
+
     def predict_with_sigma(self, state: ProcessState) -> tuple[float, float]:
         """Интерфейс для ``QualityAgent``: ``(среднее, σ)`` на момент состояния."""
         row = self._row_for(state)

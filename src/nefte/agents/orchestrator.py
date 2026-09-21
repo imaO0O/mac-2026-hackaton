@@ -20,6 +20,12 @@ from typing import Callable
 import pandas as pd
 
 from nefte.agents.blending import BlendingAgent, tank_rescue
+from nefte.agents.outlook import TRANSITION_C, already_moving, next_lab
+from nefte.agents.outlook import aging_drift, out_of_band
+from nefte.reliability_panel import load_catalyst_report
+from nefte.agents.outlook import sentence as outlook_sentence
+from nefte.agents.outlook import tonnes_at_risk
+from nefte.models.attribution import cause_from_groups, cause_sentence
 from nefte.agents.optimizer import OptimizerAgent
 from nefte.agents.quality import QualityAgent, fuse_sulfur
 from nefte.agents.reliability import ReliabilityAgent
@@ -833,12 +839,116 @@ class Orchestrator:
             rec.explanation = (rec.explanation + " Гасить превышение в резервуаре нечем: "
                                + str(rescue.get("почему", "")) + ".").strip()
 
+    def _attach_cause(self, rec: Recommendation, q: QualityAssessment) -> None:
+        """Почему прогноз такой — строкой, но только когда причина необычна.
+
+        Вклады уже посчитаны агентом качества (`q.drivers`), второй раз считать их
+        нельзя: разбор обязан объяснять ТОТ ЖЕ прогноз, который ушёл в решение.
+        """
+        if not q.drivers:
+            return
+        cause = cause_from_groups(q.drivers)
+        if not cause:
+            return
+        cause["строка"] = cause_sentence(cause, PRACTICE_RESPONSE_PPM)
+        rec.cause = cause
+
+    def _attach_analyzer_gap(self, rec: Recommendation, state: ProcessState) -> None:
+        """Приборы живы, но показывают разное — это третий вид недостоверности.
+
+        Пока поточный анализатор был один, недостоверность ловилась залипанием и
+        кодом неисправности. Приборов два, и при расхождении выше порога
+        оперативное значение врёт втрое сильнее (reports/analyzer_disagreement.json).
+        В ОТКАЗ это не идёт: правило приёмки выполнилось лишь на одном пороге сетки
+        из четырёх, а так выглядит шум. Оператору сказать обязаны.
+        """
+        threshold = float((self.cfg.get("quality") or {}).get(
+            "analyzer_disagreement_mgkg", 2.0))
+        pak = state.quality.get("pak_sulfur_ppm")
+        q21 = state.quality.get("q21_sulfur_ppm")
+        if pak is None or q21 is None or pak.value is None or q21.value is None:
+            return
+        gap = abs(float(q21.value) - float(pak.value))
+        if gap < threshold:
+            return
+        rec.analyzer_gap = {
+            "расхождение, мг/кг": round(gap, 1),
+            "пак, мг/кг": round(float(pak.value), 1),
+            "q21, мг/кг": round(float(q21.value), 1),
+            "строка": (f"поточные анализаторы расходятся на {gap:.1f} мг/кг "
+                       f"(ПАК {float(pak.value):.1f}, Q21 {float(q21.value):.1f}); "
+                       f"при таком расхождении оперативное значение на истории "
+                       f"ошибалось втрое сильнее обычного — решение принято по "
+                       f"прогнозу, а не по прибору"),
+        }
+
+    def _attach_bounds_note(self, rec: Recommendation, state: ProcessState) -> None:
+        """Режим вне рабочего диапазона — назвать тег и путь возврата.
+
+        Измерено (`scripts/check_out_of_bounds.py`): при выходе больше шага цикла
+        тег выпадает из рассмотрения оптимизатора, и в 278 моментах теста система
+        отвечает «нет допустимых вариантов». Это правда, но не та, которая нужна
+        оператору: вернуть режим в диапазон — его работа, и он должен знать, по
+        какому тегу и за сколько шагов.
+        """
+        model = getattr(self.quality, "model", None)
+        # тем же измерителем, что и «режим уже едет», но с порогом перехода
+        transition = (already_moving(model, state.ts, TRANSITION_C)
+                      if model is not None else None)
+        # скорость дезактивации — измерение участника 2; нет отчёта — нет и
+        # поправки, и строка честно говорит только про выход за диапазон
+        report = load_catalyst_report(ROOT) or {}
+        # средняя скорость по циклам, а не скорость текущего цикла: сдвиг считается на
+        # длинном плече разницы возрастов, и нужна долгосрочная скорость (участник 2:
+        # прямая проверка по T5 дала 0.87 °C/мес против 0.85 по нормированной)
+        rate = (report.get("скорость_дезактивации") or {}).get("°C/мес")
+        spans = [float(c["NWABT в конце, °C"]) - float(c["NWABT в начале, °C"])
+                 for c in report.get("циклы", [])
+                 if c.get("наблюдается с начала") and c.get("завершён")
+                 and c.get("NWABT в конце, °C") is not None]
+        reliability_cfg = self.cfg.get("reliability") or {}
+        aging = aging_drift(state.ts,
+                            (self.cfg.get("split") or {}).get("train", [None, None])[1],
+                            rate, reliability_cfg.get("catalyst_changes") or [],
+                            cap_c=max(spans) if spans else None)
+        note = out_of_band(state, getattr(self.optimizer, "bounds", {}) or {},
+                           self.cfg["limits"]["max_step_per_cycle"], transition, aging)
+        if note:
+            rec.out_of_band = note
+
+    def _attach_outlook(self, rec: Recommendation, state: ProcessState,
+                        q: QualityAssessment) -> None:
+        """Когда анализ, что он покажет, сколько тонн и не едет ли режим сам."""
+        block: dict = {}
+        lab = next_lab(state, q)
+        if lab:
+            block["следующий анализ"] = lab
+        throughput = (rec.blend.throughput_tph if rec.blend is not None else None)
+        tonnes = tonnes_at_risk(lab["через, ч"] if lab else None, throughput)
+        if tonnes:
+            block["тонн под риском"] = tonnes
+        model = getattr(self.quality, "model", None)
+        step_c = float(self.cfg["limits"]["max_step_per_cycle"]["temperature_c"])
+        moving = already_moving(model, state.ts, step_c) if model is not None else None
+        if moving:
+            block["режим уже едет"] = moving
+        if not block:
+            return
+        block["строка"] = outlook_sentence(block)
+        rec.outlook = block
+
     def _finish(self, rec: Recommendation, state, q, r,
                 blend: bool = True, rule: str = "", optimized: bool = False
                 ) -> Recommendation:
         if blend:
             self._attach_blend(rec, state, q)
             self._attach_tank_rescue(rec, state, q)
+            self._attach_cause(rec, q)
+        # достоверность и «что дальше» нужны и при отказе: именно там оператор
+        # спрашивает, почему система молчит и когда станет понятнее
+        self._attach_analyzer_gap(rec, state)
+        self._attach_bounds_note(rec, state)
+        self._attach_outlook(rec, state, q)
         rec.trace = self._trace(rec, state, q, r, rule, optimized)
         if self.log_runs:
             RUNS_DIR.mkdir(parents=True, exist_ok=True)

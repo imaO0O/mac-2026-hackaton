@@ -115,6 +115,10 @@ def test_git_output_in_russian_does_not_break_the_check(module):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     defined = {node.name for node in ast.walk(tree)
                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    # Правка вне функций (импорт, константа) — законный ответ инструмента, и он
+    # называет её этим псевдоименем. Тест упал ровно на этом, когда в quality.py
+    # добавился импорт: мусор из кодировки выглядел бы иначе.
+    defined.add("<верхний уровень модуля>")
     assert names <= defined, (
         f"разбор диффа вернул то, чего в файле нет: {sorted(names - defined)} — "
         "проверьте кодировку вызова git")

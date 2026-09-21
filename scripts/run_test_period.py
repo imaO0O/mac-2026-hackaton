@@ -223,6 +223,9 @@ def main() -> int:
             "ts": str(ts),
             "исход": rec.outcome(),
             "риск": None if risk is None else round(float(risk), 4),
+            # уверенность — то число, что печатается в карточке; без неё проверка
+            # «значит ли уверенность что-нибудь» считала агента отдельным проходом
+            "уверенность": round(float(rec.confidence), 3),
             "причина отказа": abstain_kind(rec) if rec.abstained else None,
             "risk_class": rec.state_summary.get("risk_class"),
             "источник": rec.state_summary.get("sulfur_source"),

@@ -230,6 +230,20 @@ class Recommendation(BaseModel):
     # резервуар с запасом. Заполняется только когда продукт за пределом —
     # по факту или по прогнозу (docs/BLENDING.md, практика установки).
     tank_rescue: dict[str, float | str | bool] | None = None
+    # Разбор причины прогноза — только когда она НЕОБЫЧНА: обычно ведёт сырьё с
+    # АВТ (81 % решений на тесте, reports/risk_attribution.json), и постоянная
+    # строка «виновато сырьё» стала бы фоном, который перестают читать.
+    cause: dict | None = None
+    # Расхождение двух поточных анализаторов серы: пометка достоверности. На
+    # решение НЕ влияет — правило приёмки выполнено лишь на одном пороге сетки
+    # из четырёх (reports/disagreement_decisions.json), и это признак шума.
+    analyzer_gap: dict | None = None
+    # Что дальше: когда придёт анализ, что он покажет, сколько тонн за этим стоит
+    # и не едет ли режим уже сам (docs/CARD.md, src/nefte/agents/outlook.py).
+    outlook: dict | None = None
+    # Уставки вне рабочего диапазона и путь возврата в норму. Диапазон у нас —
+    # ДОПУЩЕНИЕ (квантили обучения), и карточка обязана это говорить.
+    out_of_band: dict | None = None
     abstained: bool = False
     abstain_reason: str = ""
     trace: list[TraceStep] = Field(default_factory=list,
@@ -277,6 +291,14 @@ class Recommendation(BaseModel):
                 f"  Уверенность: {self.confidence:.2f}\n"
                 f"  Почему: {self.explanation}"
             )
+        if self.analyzer_gap:
+            text += "\n  Достоверность: " + str(self.analyzer_gap.get("строка", ""))
+        if self.cause:
+            text += "\n  Разбор причины: " + str(self.cause.get("строка", ""))
+        if self.out_of_band:
+            text += "\n  Возврат в норму: " + str(self.out_of_band.get("строка", ""))
+        if self.outlook:
+            text += "\n  Что дальше: " + str(self.outlook.get("строка", ""))
         if self.blend is not None:
             shares = ", ".join(f"{name} {share * 100:.1f} %"
                                for name, share in self.blend.fractions.items() if share > 0)

@@ -177,6 +177,29 @@ run $PY scripts/check_offspec_followup.py
 run $PY scripts/compare_decision_curves.py
 run $PY scripts/check_headline_intervals.py
 
+# карточка и доверие к ней (20–21.09): правило каждой проверки записано до счёта
+# в её докстринге; решения ни одна из них не меняет
+run $PY scripts/check_risk_attribution.py
+run $PY scripts/check_analyzer_disagreement.py
+run $PY scripts/check_next_lab.py
+run $PY scripts/check_tonnes_at_risk.py
+run $PY scripts/check_self_audit.py
+run $PY scripts/check_confidence_means_something.py
+run $PY scripts/check_shock_sensitivity.py
+run $PY scripts/check_t95_source.py
+run $PY scripts/check_t95_combo.py
+run $PY scripts/check_out_of_bounds.py
+# читают прогоны по валидации и тесту — поэтому здесь, в самом конце
+run $PY scripts/check_disagreement_decisions.py
+run $PY scripts/check_action_plan.py
+run $PY scripts/check_already_moving.py
+run $PY scripts/check_damping_screen.py
+run $PY scripts/check_refusal_quality.py
+run $PY scripts/check_early_warning.py
+run $PY scripts/check_economic_ranking.py
+run $PY scripts/check_intervention_episodes.py
+run $PY scripts/check_system_vs_analyzer.py
+
 echo "########## $(date +%H:%M) готово ##########"
 if [ ${#FAILED[@]} -gt 0 ]; then
   echo "не удалось:"; printf '  %s\n' "${FAILED[@]}"; exit 1

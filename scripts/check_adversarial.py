@@ -42,6 +42,8 @@ REPORT = ROOT / "reports" / "adversarial.json"
 # Теги реакторного блока: именно по ним оптимизатор двигает режим. Если в них
 # пришла заглушка, рекомендовать по ним что-либо нельзя.
 KEY_TAGS = ["T5", "T6", "T11"]
+# оба поточных анализатора серы: ряд из файла ПАК и тег Q21 телеметрии
+ANALYZER_KEYS = ("pak_sulfur_ppm", "q21_sulfur_ppm")
 
 
 # --------------------------------------------------------------------------- #
@@ -60,12 +62,19 @@ def damage(state: ProcessState, cfg: dict, *, drop_pak: bool = False,
     """
     s = state.model_copy(deep=True)
 
-    if drop_pak:
-        s.quality.pop("pak_sulfur_ppm", None)
-    pak = s.quality.get("pak_sulfur_ppm")
-    if freeze_pak and pak is not None:
-        pak.is_frozen = True
-        pak.comment = "сигнал не менялся дольше порога"
+    # «ПАК» в сценариях — это поточный анализатор вообще, а их два: ряд из файла и
+    # тег Q21 телеметрии, и оперативным выбран Q21 (`quality.analyzer_source`).
+    # Раньше ломался только ряд из файла: сценарий «нет ни ЛИМС, ни ПАК» не
+    # выполнялся, потому что система честно работала по живому Q21, а три других
+    # сценария с ПАК проходили вхолостую — ломали не тот прибор, которым она
+    # пользуется. Поломка применяется к обоим.
+    for key in ANALYZER_KEYS:
+        if drop_pak:
+            s.quality.pop(key, None)
+        analyzer = s.quality.get(key)
+        if freeze_pak and analyzer is not None:
+            analyzer.is_frozen = True
+            analyzer.comment = "сигнал не менялся дольше порога"
 
     if drop_lims:
         s.quality.pop("lims_sulfur_mgkg", None)
@@ -91,6 +100,10 @@ def damage(state: ProcessState, cfg: dict, *, drop_pak: bool = False,
         s.data_quality.frozen_tags = sorted(set(s.data_quality.frozen_tags) | {"pak_sulfur"})
         s.data_quality.notes.append("Поточный анализатор серы заморожен.")
     s.data_quality.stale_sources = [k for k, m in s.quality.items() if m.is_stale]
+    # правило пригодности — то же, что в рабочем конвейере, а он смотрит на
+    # зависание РЯДА ИЗ ФАЙЛА ПАК (`pipeline.StateBuilder.build`), даже когда
+    # оперативным выбран Q21; расхождение разобрано в docs/PLAN.md
+    pak = s.quality.get("pak_sulfur_ppm")
     s.data_quality.usable = is_state_usable(
         s.data_quality.missing_share,
         bool(pak is not None and pak.is_frozen),

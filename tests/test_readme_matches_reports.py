@@ -102,6 +102,18 @@ def weaker_physics_interventions() -> list[float]:
     return [min(counts), max(counts)]
 
 
+def kinetic_variant(letter: str) -> dict:
+    """Вариант кинетики из отчёта по букве: «A: первый порядок…», «D: порядок 1.5»."""
+    variants = report("kinetic_strength.json")["варианты"]
+    return next(v for name, v in variants.items() if name.startswith(letter + ":"))
+
+
+def shock(name: str) -> dict:
+    """Строка отчёта о чувствительности прогноза к возмущению сценария."""
+    rows = report("shock_sensitivity.json")["возмущения"]
+    return next(row for row in rows if row["возмущение"] == name)
+
+
 def first_order_response() -> float:
     rows = report("kinetic_order.json")["отклик_на_градус"]
     return next(r for r in rows if r["порядок"] == 1.0)["Δ серы на +1 °C, %"]
@@ -160,8 +172,19 @@ README_CLAIMS = [
      lambda: [report("reliability_metrics.json")["downtime"]["explained_%"]]),
     ("прогноз на 2 часа у бустинга не работает (ROC-AUC {})",
      lambda: [report("quality_metrics_h2.json")["splits"]["test"]["model"]["roc_auc"]]),
-    ("Кинетика первого порядка даёт −{} % серы на градус",
-     lambda: [-first_order_response()]),
+    ("названного диапазона; первый порядок давал {} — выше практики",
+     lambda: [kinetic_variant("A")["обещанное снижение, мг/кг на градус"]]),
+    ("кинетика — порядок 1.5, это {} мг/кг на градус",
+     lambda: [kinetic_variant("D")["обещанное снижение, мг/кг на градус"]]),
+    ("назвал {}–{} мг/кг на градус",
+     lambda: report("kinetic_strength.json")["практика_заказчика_мг_кг_на_градус"]),
+    ("средние за 6–144 ч ({} % решений на тесте)",
+     lambda: [100 * report("risk_attribution.json")["выборки"]["test"]
+              ["как часто группа ведущая без измерений серы"]["сырьё с АВТ"]]),
+    ("утяжеления сырья на +5 °C всего {} мг/кг",
+     lambda: [shock("утяжеление сырья +5 °C")["сдвиг прогноза, мг/кг"]]),
+    ("+10 мг/кг к ней двигают прогноз на {}",
+     lambda: [shock("сера сырья +10 мг/кг")["сдвиг прогноза, мг/кг"]]),
     ("замкнутый контур делает {}–{} вмешательств вместо {}",
      lambda: weaker_physics_interventions() + [simulation()["вмешательств"]]),
 ]

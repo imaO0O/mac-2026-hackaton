@@ -316,6 +316,45 @@ def main() -> None:
                 st.markdown(f"- {item}")
             st.markdown(f"**Уверенность:** {rec.confidence:.2f}")
             st.markdown(f"**Почему:** {rec.explanation}")
+            cause = getattr(rec, "cause", None)
+            if cause:
+                st.markdown(f"**Разбор причины:** {cause.get('строка', '')}")
+                st.caption("Вклады по группам каналов, мг/кг: " + ", ".join(
+                    f"{name} {value:+.2f}"
+                    for name, value in (cause.get("вклады по группам") or {}).items()))
+
+    band = getattr(rec, "out_of_band", None)
+    if band:
+        # при пуске и останове это не нарушение, а работа технолога
+        (st.info if band.get("переход") else st.warning)(
+            f"**Возврат в норму.** {band.get('строка', '')}")
+        st.dataframe(pd.DataFrame(band.get("теги") or []),
+                     hide_index=True, use_container_width=True)
+
+    outlook = getattr(rec, "outlook", None)
+    if outlook:
+        st.subheader("Что дальше")
+        lab_block = outlook.get("следующий анализ") or {}
+        cols = st.columns(3)
+        if lab_block:
+            low, high = lab_block["диапазон, мг/кг"]
+            cols[0].metric("Следующий анализ через",
+                           f"{lab_block['через, ч']:g} ч",
+                           "задерживается" if lab_block["задерживается"] else None)
+            cols[1].metric("Ожидаемый диапазон, мг/кг", f"{low:g}–{high:g}",
+                           help="попадание 8 раз из 10 — измерено на обучении, "
+                                "проверено на валидации и тесте")
+        tonnes = outlook.get("тонн под риском")
+        if tonnes:
+            cols[2].metric("Под риском до анализа, т", f"{tonnes:g}",
+                           help="расход товарного потока × часы до анализа: объём, "
+                                "который будет сделан до контрольного факта")
+        moving = outlook.get("режим уже едет")
+        if moving:
+            st.warning(f"Режим уже идёт {moving['куда']} на "
+                       f"{abs(moving['ход, °C']):g} °C за последние "
+                       f"{moving['окно, ч']:g} ч — часть эффекта ещё в пути, "
+                       f"не складывайте воздействия.")
 
     trace_block(rec)
     ask_block(cfg, rec)
@@ -329,6 +368,12 @@ def main() -> None:
     with right:
         dq = state.data_quality
         st.metric("Пропусков в срезе", f"{dq.missing_share:.1%}")
+        gap = getattr(rec, "analyzer_gap", None)
+        if gap:
+            st.warning(f"Расхождение анализаторов {gap['расхождение, мг/кг']:g} мг/кг "
+                       f"(ПАК {gap['пак, мг/кг']:g}, Q21 {gap['q21, мг/кг']:g}): при "
+                       f"таком расхождении оперативное значение на истории ошибалось "
+                       f"втрое сильнее обычного.")
         if dq.notes:
             for note in dq.notes:
                 st.markdown(f"- {note}")

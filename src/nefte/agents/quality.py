@@ -23,6 +23,7 @@ from nefte.agents.schemas import (
     Source,
 )
 from nefte.config import load_config
+from nefte.models.attribution import grouped_contributions
 
 # Разброс между лабораторией и поточным анализатором на исторических парах:
 # MAE 1.70 мг/кг, смещение -0.26. Используется как априорная σ базовой модели.
@@ -405,9 +406,22 @@ class QualityAgent:
                     f"взят из последнего анализа{age_text}, за это время он уезжает "
                     f"на {sigma_t95:.1f} °C.")
 
+        # Разбор прогноза по группам каналов. Поле `drivers` контракта было
+        # объявлено с первого дня и НЕ заполнялось ни разу: объяснение жило в
+        # тексте, а в структуре его не было. Теперь в нём вклады по группам —
+        # ровно те, из которых сложился показанный прогноз.
+        drivers: dict[str, float] = {}
+        if self.model is not None and hasattr(self.model, "row_for"):
+            row = self.model.row_for(state)
+            parts_by_group = grouped_contributions(self.model, row)
+            if parts_by_group is not None:
+                drivers = {str(name): round(float(value), 3)
+                           for name, value in parts_by_group[0].items()}
+
         return QualityAssessment(
             ts=state.ts,
             source=source,
+            drivers=drivers,
             predictions=predictions,
             intervals=intervals,
             spec_risk=risks,
