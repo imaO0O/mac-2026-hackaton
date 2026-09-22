@@ -25,7 +25,8 @@ from nefte.agents.schemas import (
     QualityAssessment,
     ReliabilityAssessment,
 )
-from nefte.config import load_config
+from nefte.agents.outlook import aging_drift
+from nefte.config import ROOT, load_config
 from nefte.models.regime import implied_t6, T6_RESPONSE
 from nefte.models.vak import point_evaluator
 
@@ -271,6 +272,11 @@ class OptimizerAgent:
         # и это честно видно по тому, что критерий перестаёт различать варианты.
         self.reliability_agent = reliability_agent
         self.bounds = bounds                 # модельные диапазоны (допущение!)
+        # Поправка верхней границы температур на старение катализатора — за
+        # выключателем optimization.aging_bounds (docs/PLAN.md, правило до счёта).
+        # Кэш: скорость дезактивации и размах цикла читаются из отчёта ресурса один
+        # раз, дальше это арифметика на каждый момент.
+        self._aging_cache: tuple[float | None, float | None] | None = None
         self.surrogate = surrogate
         # Пессимистичная кинетика для проверки гарантии. Отклик серы на уставки не
         # измерен, а принят: первый порядок даёт −22 % на градус при литературных
@@ -329,10 +335,43 @@ class OptimizerAgent:
             return reliability.severity_index
         return float(agent.severity_for(state, moves))
 
+    def _aging_rate_and_cap(self) -> tuple[float | None, float | None]:
+        """Скорость дезактивации и размах цикла из отчёта ресурса — как в карточке."""
+        if self._aging_cache is None:
+            from nefte.reliability_panel import load_catalyst_report
+            report = load_catalyst_report(ROOT) or {}
+            rate = (report.get("скорость_дезактивации") or {}).get("°C/мес")
+            spans = [float(c["NWABT в конце, °C"]) - float(c["NWABT в начале, °C"])
+                     for c in report.get("циклы", [])
+                     if c.get("наблюдается с начала") and c.get("завершён")
+                     and c.get("NWABT в конце, °C") is not None]
+            self._aging_cache = (rate, max(spans) if spans else None)
+        return self._aging_cache
+
+    def aging_shift(self, ts) -> float:
+        """На сколько °C поднять верхнюю границу температур: 0, если выключено.
+
+        Диапазон уставок снят с обучающего периода, где катализатору было 14.4 мес.
+        На старшем катализаторе та же сера требует более высокой температуры, и
+        устаревшая граница запрещает подъём там, где он нужен: T5 выходит за верх
+        больше чем на 2 °C в 11.1 % моментов до замены 23.04.2026 и в 0 % после
+        (docs/PLAN.md). Поправка — скорость дезактивации × разница ВОЗРАСТА
+        катализатора (журнал замен), только вверх и не больше размаха цикла.
+        """
+        if not (self.cfg.get("optimization") or {}).get("aging_bounds"):
+            return 0.0
+        rate, cap = self._aging_rate_and_cap()
+        reliability_cfg = self.cfg.get("reliability") or {}
+        train_end = (self.cfg.get("split") or {}).get("train", [None, None])[1]
+        drift = aging_drift(ts, train_end, rate,
+                            reliability_cfg.get("catalyst_changes") or [], cap_c=cap)
+        return float(drift["°C"]) if drift else 0.0
+
     def _effective_bounds(self, state: ProcessState,
                           reliability: ReliabilityAssessment) -> dict[str, tuple[float, float]]:
         """Пересечение модельного диапазона, ограничения агента надёжности и шага."""
         steps = self.cfg["limits"]["max_step_per_cycle"]
+        shift = self.aging_shift(state.ts)
         out: dict[str, tuple[float, float]] = {}
         for tag, (lo, hi) in self.bounds.items():
             cur = state.telemetry_ht.get(tag, state.telemetry_avt.get(tag))
@@ -340,6 +379,8 @@ class OptimizerAgent:
                 continue
             step = steps["temperature_c"] if tag.startswith("T") else (
                 steps["pressure_mpa"] if tag.startswith("P") else abs(cur) * steps["flow_rel"])
+            # старение двигает только ВЕРХ и только температуры: нужда измерена вверх
+            hi = hi + shift if tag.startswith("T") else hi
             lo_e, hi_e = max(lo, cur - step), min(hi, cur + step)
             if tag in reliability.constraints:
                 r_lo, r_hi = reliability.constraints[tag]

@@ -173,6 +173,10 @@ run $PY scripts/check_catalyst_factor.py
 run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --dp-factor off
 run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --dp-factor growth
 run $PY scripts/check_dp_growth.py
+# поправка верхней границы температур на старение катализатора — правило приёмки
+run $PY scripts/run_test_period.py --split val --every 4h --tag step4h --aging-bounds off
+run $PY scripts/run_test_period.py --split val --every 4h --tag step4h --aging-bounds on
+run $PY scripts/check_aging_bounds.py
 run $PY scripts/check_offspec_followup.py
 run $PY scripts/compare_decision_curves.py
 run $PY scripts/check_headline_intervals.py
