@@ -46,6 +46,11 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         cfg["paths"]["source_dir"] = env
     if env := os.getenv("NEFTE_DATA_DIR"):
         cfg["paths"]["data_dir"] = env
+    # Относительный путь — от корня решения, а не от текущей папки: по умолчанию
+    # данные лежат в data/ рядом с кодом, и проверяющему хватает положить их туда.
+    for key in ("source_dir", "data_dir"):
+        if not Path(cfg["paths"][key]).is_absolute():
+            cfg["paths"][key] = str(ROOT / cfg["paths"][key])
     return cfg
 
 

@@ -30,5 +30,7 @@ plotly>=5.22
 pytest>=8.0
 ruff>=0.4
 
-# --- презентация: только scripts/make_presentation.py, системе не нужна ---
+# --- презентация и страницы HTML для архива (scripts/make_presentation.py,
+#     scripts/make_html_docs.py); системе не нужны ---
 python-pptx==1.0.2
+markdown>=3.6

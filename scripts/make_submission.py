@@ -1,11 +1,19 @@
 """Собрать архив решения для отправки и проверить его на вменяемость.
 
-    python scripts/make_submission.py                 # архив кода, ~3 МБ — письмом
+    python scripts/make_submission.py --email         # один архив в письмо, ~17 МБ
+    python scripts/make_submission.py                 # архив кода, ~3 МБ
     python scripts/make_submission.py --data          # данные и модели — ссылкой
     python scripts/make_submission.py --out D:/oil/neftekod.zip --no-reports
 
 Архивов два, потому что организаторы просили приложить данные (сессия 18.09,
 docs/DATA_NOTES.md §5в), а в письмо сто мегабайт не влезают.
+
+**Архив для письма (`--email`).** Всё сразу, если облака нет: код с документами и
+отчётами, README и документы страницами HTML (открываются в браузере, как на
+GitHub), обученные модели и выданные файлы — кроме одного: телеметрия `data.rar`
+(100 МБ) в лимит вложений не помещается. Это файл самих организаторов; в
+`data/ДАННЫЕ.txt` — его размер и SHA-256, чтобы было видно, что нужен ровно он.
+Сборка падает, если архив больше лимита письма.
 
 **Архив кода.** Код (`src`, `scripts`, `app`, `tests`), конфигурация, документация с
 презентацией, README, образец `.env` и отчёты `reports/*.json` — всё, чем
@@ -90,17 +98,19 @@ def collect(with_reports: bool) -> list[Path]:
     return picked
 
 
-def verify(archive: Path, with_reports: bool) -> None:
+def verify(archive: Path, with_reports: bool, payload: bool = False) -> None:
+    """``payload`` — архив для письма: модели и выданные файлы в нём положены намеренно."""
     with zipfile.ZipFile(archive) as zf:
         names = set(zf.namelist())
         broken = zf.testzip()
         assert broken is None, f"битый файл в архиве: {broken}"
         for name in REQUIRED:
             assert name in names, f"в архиве нет {name}"
-        leaked = [n for n in names
-                  if n.startswith(("data/", "models/", ".venv/", ".reproduce/"))
+        allowed = ("data/", "models/") if payload else ()
+        leaked = [n for n in names if not n.startswith(allowed) and (
+                  n.startswith(("data/", "models/", ".venv/", ".reproduce/"))
                   or n.endswith((".cbm", ".pt", ".parquet"))
-                  or (n.endswith(".csv") and not n.startswith("configs/"))]
+                  or (n.endswith(".csv") and not n.startswith("configs/")))]
         assert not leaked, f"в архив попало лишнее: {leaked[:5]}"
         readme = zf.read("README.md").decode("utf-8")
         assert README_MARK in readme, "в README нет раздела для быстрой проверки"
@@ -168,15 +178,94 @@ def build_data(out: Path) -> int:
     return 0
 
 
+EMAIL_LIMIT_MB = 24          # вложения почты: 25 МБ у Gmail и Mail.ru, 30 у Яндекса
+BIG_FILE_MB = 20             # выданный файл крупнее этого в письмо не кладётся
+
+
+def sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def email_data_readme(kept: list[Path], skipped: list[Path]) -> str:
+    lines = ["Данные к решению «Нефтекод»", "",
+             "Здесь выданные организаторами файлы без изменений. Решение ищет их в этой",
+             "папке по умолчанию (другое место — через .env, образец .env.example).", "",
+             "Лежат здесь:"]
+    lines += [f"  {p.name}" for p in kept]
+    if skipped:
+        lines += ["", "Не поместились в письмо — положите сюда свой экземпляр:"]
+        for path in skipped:
+            lines += [f"  {path.name}  ({path.stat().st_size:,} байт)".replace(",", " "),
+                      f"    SHA-256 {sha256(path)}"]
+        lines += ["", "Для распаковки data.rar нужен WinRAR или 7-Zip."]
+    lines += ["", "Дальше — README.html (или README.md), раздел «Запуск»:",
+              "  python scripts/prepare_data.py",
+              '  python scripts/run_cycle.py --ts "2026-03-05 00:00"', ""]
+    return "\n".join(lines)
+
+
+def build_email(out: Path) -> int:
+    import tempfile
+
+    sys.path.insert(0, str(ROOT))
+    from nefte.config import load_config, source_dir
+    from scripts.make_html_docs import build as build_html
+
+    files = [(path, path.relative_to(ROOT).as_posix()) for path in collect(True)]
+    kept, skipped = [], []
+    for name in load_config()["paths"]["files"].values():
+        path = source_dir() / name
+        if not path.is_file():
+            continue                      # csv в files — кэш, а не выдача
+        (skipped if path.stat().st_size > BIG_FILE_MB * 1e6 else kept).append(path)
+    files += [(path, f"data/{path.name}") for path in kept]
+    files += [(path, path.relative_to(ROOT).as_posix())
+              for path in sorted((ROOT / "models").rglob("*"))
+              if path.is_file() and "__pycache__" not in path.parts]
+    tmp = out.with_suffix(".part")
+    with tempfile.TemporaryDirectory() as pages, \
+            zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for page in build_html(Path(pages)):
+            zf.write(page, page.relative_to(pages).as_posix())
+        zf.writestr("data/ДАННЫЕ.txt", email_data_readme(kept, skipped))
+        for path, name in files:
+            kind = zipfile.ZIP_STORED if path.suffix in (".rar", ".xlsx") else zipfile.ZIP_DEFLATED
+            zf.write(path, name, compress_type=kind)
+    verify(tmp, with_reports=True, payload=True)
+    with zipfile.ZipFile(tmp) as zf:
+        names = set(zf.namelist())
+        assert not any(n.startswith("data/cache/") for n in names), "в архив попал кэш данных"
+        assert "README.html" in names, "нет README.html"
+        assert any(n.startswith("models/sulfur_h0/") for n in names), "нет рабочей модели"
+    size = tmp.stat().st_size / 1e6
+    assert size <= EMAIL_LIMIT_MB, f"архив {size:.1f} МБ не влезет в письмо ({EMAIL_LIMIT_MB} МБ)"
+    tmp.replace(out)
+    print(f"архив для письма: {out} — {size:.1f} МБ, файлов {len(names)}")
+    print("  выданные файлы: " + ", ".join(p.name for p in kept))
+    if skipped:
+        print("  не вошли (положить в data/): " + ", ".join(p.name for p in skipped))
+    return 0
+
+
 def main() -> int:
     use_utf8_console()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--email", action="store_true",
+                        help="один архив в письмо: код, страницы HTML, модели, выданные файлы")
     parser.add_argument("--data", action="store_true",
                         help="архив выданных данных и обученных моделей вместо кода")
     parser.add_argument("--no-reports", action="store_true",
                         help="без reports/*.json (архив меньше, доказательств нет)")
     args = parser.parse_args()
+    if args.email:
+        return build_email(args.out or ROOT.parent / "neftekod.zip")
     if args.data:
         return build_data(args.out or ROOT.parent / "neftekod_data.zip")
     args.out = args.out or ROOT.parent / "neftekod_submission.zip"
