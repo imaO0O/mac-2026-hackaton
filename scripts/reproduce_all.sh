@@ -119,9 +119,6 @@ lane_val () {
   # берётся из базового прогона lock4, здесь — только противоположный ему
   run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --severity-veto all
   run $PY scripts/run_test_period.py --split val --every 1h --tag step1h --t95-estimate last
-  for m in off on; do
-    run $PY scripts/run_test_period.py --split val --every 4h --tag step4h --aging-bounds "$m"
-  done
   if [ ${#FAILED[@]} -gt 0 ]; then printf 'не удалось: %s\n' "${FAILED[@]}"; fi
 }
 LOG_DIR_MAIN=$LOG_DIR
@@ -211,11 +208,11 @@ run $PY scripts/check_early_warning.py
 run $PY scripts/check_economic_ranking.py
 run $PY scripts/check_intervention_episodes.py
 run $PY scripts/check_system_vs_analyzer.py
-# вердикты решений 21.09: вето тяжести, уровень Т95 в ограничении, границы на старение
+# вердикты решений 21.09: вето тяжести и уровень Т95 в ограничении (границы на
+# старение — выше, прогоны и проверка участника 2)
 run $PY scripts/run_test_period.py --every 1h --tag step1h --severity-veto all
 run $PY scripts/check_severity_veto.py
 run $PY scripts/check_t95_conservative.py
-run $PY scripts/check_aging_bounds.py
 # где данные неисправны и что система делала по периоду — документ из отчётов
 run $PY scripts/list_data_periods.py
 run $PY scripts/summarize_period.py
