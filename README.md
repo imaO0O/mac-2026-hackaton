@@ -218,6 +218,7 @@ streamlit run app/dashboard.py              # дашборд: сцены защ�
 | [docs/DATA_PERIODS.md](docs/DATA_PERIODS.md) | где данные неисправны: с какого по какое, почему и что делает система |
 | [docs/HARD_CHECKS.md](docs/HARD_CHECKS.md) | «злые» случаи, прогон по тесту, имитация замкнутого контура, сравнение архитектур |
 | [docs/QUALITY_AGENT.md](docs/QUALITY_AGENT.md), [docs/RELIABILITY_AGENT.md](docs/RELIABILITY_AGENT.md), [docs/OPTIMIZER_AGENT.md](docs/OPTIMIZER_AGENT.md), [docs/BLENDING.md](docs/BLENDING.md) | агенты по отдельности: как устроены и что измерено |
+| [docs/CATALYST_FACTOR.md](docs/CATALYST_FACTOR.md), [docs/AGING_BOUNDS.md](docs/AGING_BOUNDS.md), [docs/SHELVES.md](docs/SHELVES.md) | надёжность подробно: износ катализатора в тяжести режима, поправка границ на старение, «полки» в телеметрии — каждая с правилом приёмки и вердиктом |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | что нужно интегратору: точка стыковки, закрытый контур, что придётся доделать |
 | [docs/FINDINGS.md](docs/FINDINGS.md) | все команды, структура кода, журнал находок по каждому агенту |
 | [docs/DEFENSE_QUALITY.md](docs/DEFENSE_QUALITY.md) | что говорить на защите и чего не говорить |
