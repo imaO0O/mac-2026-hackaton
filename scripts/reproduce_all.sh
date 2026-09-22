@@ -71,6 +71,8 @@ fi
 # 4. разбор данных
 run $PY scripts/backtest_reliability.py
 run $PY scripts/check_tag_meaning.py
+# полки в телеметрии: неисправность прибора или ровный режим (правило до счёта)
+run $PY scripts/check_shelves.py
 run $PY scripts/check_avt_formulas.py
 run $PY scripts/check_avt_schemes.py
 run $PY scripts/check_vak_against_lims.py
