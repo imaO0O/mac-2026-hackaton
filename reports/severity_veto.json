@@ -18,12 +18,12 @@
   "условие: рост вклада в Т95 не больше, °C": 0.5,
   "прогоны": {
     "val": {
-      "all": "val_period_step1h_lock4.json",
-      "raise_only": "val_period_step1h_veto_raise_only.json"
+      "all": "val_period_step1h_veto_all.json",
+      "raise_only": "val_period_step1h_lock4.json"
     },
     "test": {
-      "all": "test_period_step1h.json",
-      "raise_only": "test_period_step1h_veto_raise_only.json"
+      "all": "test_period_step1h_veto_all.json",
+      "raise_only": "test_period_step1h.json"
     }
   },
   "валидация": {

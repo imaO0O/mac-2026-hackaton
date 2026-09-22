@@ -41,7 +41,9 @@ from nefte.utils import use_utf8_console  # noqa: E402
 # Что кладём в архив: каталоги целиком и отдельные файлы из корня.
 TREES = ("src", "scripts", "app", "tests", "configs", "docs")
 FILES = ("README.md", "requirements.txt", "pyproject.toml", "pytest.ini",
-         "setup.cfg", ".gitattributes", ".env.example")
+         "setup.cfg", ".gitattributes", ".gitignore", ".env.example",
+         # без него дашборд отправляет статистику использования в сеть
+         ".streamlit/config.toml", ".github/workflows/tests.yml")
 REPORTS = "reports"
 
 # Что не кладём никогда: кэши, окружение, выданные данные и обученные модели.
@@ -58,9 +60,16 @@ REQUIRED = ("README.md", "configs/config.yaml", "scripts/reproduce_all.sh",
 README_MARK = "За пять минут"
 
 
+# Таблицы в configs/ — не данные, а конфигурация: официальные формулы ВАК и
+# таблица тегов. Правило «*.csv — это данные» их задевало (сквозная проверка 22.09).
+KEEP_DIRS = ("configs",)
+
+
 def wanted(path: Path) -> bool:
     if any(part in SKIP_DIRS for part in path.parts):
         return False
+    if path.parts and path.parts[0] in KEEP_DIRS:
+        return True
     return not any(fnmatch.fnmatch(path.name, pattern) for pattern in SKIP_GLOBS)
 
 
@@ -90,7 +99,8 @@ def verify(archive: Path, with_reports: bool) -> None:
             assert name in names, f"в архиве нет {name}"
         leaked = [n for n in names
                   if n.startswith(("data/", "models/", ".venv/", ".reproduce/"))
-                  or n.endswith((".cbm", ".pt", ".csv", ".parquet"))]
+                  or n.endswith((".cbm", ".pt", ".parquet"))
+                  or (n.endswith(".csv") and not n.startswith("configs/"))]
         assert not leaked, f"в архив попало лишнее: {leaked[:5]}"
         readme = zf.read("README.md").decode("utf-8")
         assert README_MARK in readme, "в README нет раздела для быстрой проверки"
@@ -111,7 +121,8 @@ DATA_README = """Данные и модели к решению «Нефтеко
 data/    выданные файлы организаторов без изменений
 models/  обученные модели (можно пересобрать, см. README решения)
 
-1. Распакуйте рядом с кодом решения; папку models/ положите в корень решения.
+1. Распакуйте рядом с кодом решения проводником Windows или 7-Zip (имена файлов
+   на кириллице; консольный unzip их портит); папку models/ положите в корень решения.
 2. В .env решения (образец — .env.example) укажите:
      NEFTE_SOURCE_DIR=<путь к распакованной папке data>
      NEFTE_DATA_DIR=<любая папка для кэша, вне облачной синхронизации>

@@ -111,6 +111,7 @@
       "настройки": {
         "catalyst_factor": "age",
         "dp_factor": "level",
+        "severity_veto": "raise_only",
         "catalyst_reset": "catalyst_log",
         "catalyst_changes": [
           "2024-04-17 15:00",
@@ -143,6 +144,7 @@
       "настройки": {
         "catalyst_factor": "age",
         "dp_factor": "level",
+        "severity_veto": "raise_only",
         "catalyst_reset": "catalyst_log",
         "catalyst_changes": [
           "2024-04-17 15:00",
@@ -175,6 +177,7 @@
       "настройки": {
         "catalyst_factor": "age",
         "dp_factor": "level",
+        "severity_veto": "raise_only",
         "catalyst_reset": "catalyst_log",
         "catalyst_changes": [
           "2024-04-17 15:00",

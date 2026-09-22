@@ -19,12 +19,12 @@
     "2025-12-15"
   ],
   "прогоны": {
-    "last": "val_period_step1h_lock4.json",
-    "last_plus_sigma": "val_period_step1h_t95_last_plus_sigma.json"
+    "last": "val_period_step1h_t95_last.json",
+    "last_plus_sigma": "val_period_step1h_lock4.json"
   },
   "вмешательств на валидации": {
-    "last": 536,
-    "last_plus_sigma": 536
+    "last": 543,
+    "last_plus_sigma": 543
   },
   "имитация": {
     "last": {

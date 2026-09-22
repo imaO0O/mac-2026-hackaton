@@ -148,6 +148,20 @@ def hourly_misses() -> dict:
             / max(int(over.sum()), 1)}
 
 
+def refusal(group: str, key: str) -> float:
+    """Строка проверки отказов на тесте (`scripts/check_refusal_quality.py`)."""
+    return report("refusal_quality.json")["выборки"]["тест"][group][key]
+
+
+def refusal_share(group: str) -> float:
+    return 100 * refusal(group, "превышений за 24 ч")
+
+
+def refusal_ratio() -> float:
+    key = "ошибка оперативного значения, мг/кг"
+    return refusal("отказ: данные недостоверны", key) / refusal("с решением", key)
+
+
 def first_order_response() -> float:
     rows = report("kinetic_order.json")["отклик_на_градус"]
     return next(r for r in rows if r["порядок"] == 1.0)["Δ серы на +1 °C, %"]
@@ -227,6 +241,11 @@ README_CLAIMS = [
      lambda: [shock("сера сырья +10 мг/кг")["сдвиг прогноза, мг/кг"]]),
     # «делает 3–3 вмешательств вместо 3» — так читался диапазон, когда края
     # совпали; верхний край и сравнение читаются при любых числах
+    ("расходится с лабораторией в {} раза сильнее, чем в моментах с решением",
+     lambda: [refusal_ratio()]),
+    ("Превышений в них {} % против {} % — на {} п.п.",
+     lambda: [refusal_share("отказ: данные недостоверны"), refusal_share("с решением"),
+              refusal_share("отказ: данные недостоверны") - refusal_share("с решением")]),
     ("замкнутый контур делает не больше {} вмешательств (при принятом отклике — {})",
      lambda: [max(weaker_physics_interventions()), simulation()["вмешательств"]]),
 ]
@@ -248,6 +267,18 @@ DOC_CLAIMS = {
          lambda: [100 * event_window()["перед_превышением"]]),
         ("превышение система реагирует в {} % случаев (окно −2 … +4 ч от отбора)",
          lambda: [100 * event_window()["перед_превышением"]]),
+    ],
+    "docs/CARD.md": [
+        *[(f"| {label} | {{}} % | {{}} % | {{}} мг/кг |",
+           (lambda g=group: [100 * refusal(g, "доля моментов"), refusal_share(g),
+                             refusal(g, "ошибка оперативного значения, мг/кг")]))
+          for label, group in (("с решением", "с решением"),
+                               ("отказ: нет допустимых вариантов", "отказ: нет допустимых вариантов"),
+                               ("отказ: данные недостоверны", "отказ: данные недостоверны"))],
+        ("в {} раза сильнее, чем в моментах с решением", lambda: [refusal_ratio()]),
+        ("Сейчас {} % против {} %, разница {} п.п.",
+         lambda: [refusal_share("отказ: данные недостоверны"), refusal_share("с решением"),
+                  refusal_share("отказ: данные недостоверны") - refusal_share("с решением")]),
     ],
     "docs/HARD_CHECKS.md": [
         ("Из {} «пропусков» при часовом шаге {} — такие. Если действие в силе засчитывать "

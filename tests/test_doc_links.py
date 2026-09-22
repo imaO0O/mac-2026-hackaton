@@ -113,3 +113,23 @@ def test_every_link_ships_in_the_submission_archive():
             if not ok:
                 missing.append(f"{document.name} → {target}")
     assert not missing, "не попадут в архив: " + "; ".join(sorted(set(missing)))
+
+
+def test_archive_ships_everything_git_tracks():
+    """Архив кода — это репозиторий без данных, моделей и журналов прогонов.
+    22.09 сквозная проверка нашла, что он терял .streamlit/config.toml и
+    configs/*.csv: всё, что отслеживает git, обязано в нём быть."""
+    import subprocess
+    import sys
+
+    if not (ROOT / ".git").exists():
+        pytest.skip("не репозиторий — проверять не с чем")
+    sys.path.insert(0, str(ROOT))
+    from scripts.make_submission import collect
+
+    shipped = {p.relative_to(ROOT).as_posix() for p in collect(with_reports=True)}
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True, encoding="utf-8").stdout.split("\n")
+    missing = [name for name in tracked if name and name not in shipped
+               and not name.startswith("reports/runs/") and not name.endswith(".gitkeep")]
+    assert not missing, "не попадут в архив: " + ", ".join(missing)
