@@ -80,9 +80,16 @@ def test_reliability_constraints_shrink_search_space():
 
 
 def test_inadmissible_regime_rejects_everything():
-    """Запрет агента надёжности нельзя перевесить хорошим прогнозом качества."""
+    """Запрет агента надёжности нельзя перевесить хорошим прогнозом качества.
+
+    Так ведёт себя режим ``severity_veto: all``. С 21.09 по умолчанию стоит
+    ``raise_only``: вычёркивается то, что греет или утяжеляет режим, а шаг к
+    безопасности остаётся (test_raise_only_never_proposes_heating_on_inadmissible_regime).
+    """
     state, quality, reliability = _assessments(admissible=False)
-    agent = _agent()
+    agent = OptimizerAgent(
+        bounds=BOUNDS, cfg=_cfg("reliability", "severity_veto", "all"),
+        surrogate=linear_surrogate({"T5": -0.5, "T11": -0.5, "F26": 0.01}))
     assert agent.propose(state, quality, reliability) == []
     assert "недопустим" in agent.rejection_summary()
 
@@ -219,3 +226,102 @@ def test_ramp_rate_is_bounded_by_step_and_interval_together():
     limits = load_config()["limits"]
     rate = limits["max_step_per_cycle"]["temperature_c"] / limits["min_hours_between_actions"]
     assert rate == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------- #
+# переключатели решений 21.09: вето тяжести и консервативная Т95
+# --------------------------------------------------------------------------- #
+
+def _cfg(section: str, key: str, value: str) -> dict:
+    cfg = load_config()
+    return {**cfg, section: {**cfg[section], key: value}}
+
+
+def _move(deltas: dict[str, float], severity: float):
+    from nefte.agents.schemas import Candidate
+
+    return Candidate(id="v", moves={t: 370.0 + d for t, d in deltas.items()},
+                     deltas=deltas, severity_index=severity)
+
+
+def test_severity_veto_all_strikes_every_variant():
+    """Прежнее поведение: высокий класс тяжести вычёркивает всё, даже шаг назад."""
+    _, _, reliability = _assessments(severity=0.8, admissible=False)
+    agent = OptimizerAgent(bounds=BOUNDS, surrogate=linear_surrogate({"T5": -0.5}),
+                           cfg=_cfg("reliability", "severity_veto", "all"))
+    assert agent._severity_vetoes(_move({"T5": -1.0}, 0.7), reliability)
+    assert agent._severity_vetoes(_move({"F26": -10.0}, 0.75), reliability)
+
+
+def test_severity_veto_raise_only_keeps_steps_toward_safety():
+    """Кандидат 21.09: вычёркивается только то, что тяжесть повышает или греет."""
+    _, _, reliability = _assessments(severity=0.8, admissible=False)
+    agent = OptimizerAgent(bounds=BOUNDS, surrogate=linear_surrogate({"T5": -0.5}),
+                           cfg=_cfg("reliability", "severity_veto", "raise_only"))
+    assert not agent._severity_vetoes(_move({"T5": -1.0}, 0.7), reliability)
+    assert not agent._severity_vetoes(_move({"F26": -10.0}, 0.8), reliability)
+    assert agent._severity_vetoes(_move({"F26": 10.0}, 0.85), reliability)
+    # подъём температуры запрещён, даже если тяжесть по расчёту не выросла
+    assert agent._severity_vetoes(_move({"T5": 0.5}, 0.7), reliability)
+
+
+def test_raise_only_never_proposes_heating_on_inadmissible_regime():
+    """Условие 4 правила приёмки — на уровне оптимизатора: при недопустимом режиме
+    ни один предложенный вариант не поднимает температуру."""
+    state, quality, reliability = _assessments(severity=0.8, admissible=False)
+    agent = OptimizerAgent(bounds=BOUNDS,
+                           surrogate=linear_surrogate({"T5": -0.5, "T11": -0.5, "F26": 0.01}),
+                           cfg=_cfg("reliability", "severity_veto", "raise_only"))
+    proposed = agent.propose(state, quality, reliability)
+    assert proposed, "шаг к безопасности должен остаться"
+    for c in proposed:
+        assert all(d <= 1e-6 for t, d in c.deltas.items() if t.startswith("T")), c.deltas
+
+
+def _t95_state(age_hours: float):
+    from nefte.agents.schemas import Measurement, Source
+
+    state = make_state()
+    state.quality["lims_t95_c"] = Measurement(value=352.0, unit="°C", source=Source.LIMS,
+                                              age_hours=age_hours)
+    return state
+
+
+def test_t95_shift_is_zero_for_last_and_sigma_for_upper_bound():
+    from nefte.agents.quality import t95_sigma
+
+    state = _t95_state(age_hours=40.0)
+    last = OptimizerAgent(bounds=BOUNDS, surrogate=linear_surrogate({"T5": -0.5}),
+                          cfg=_cfg("quality", "t95_estimate", "last"))
+    upper = OptimizerAgent(bounds=BOUNDS, surrogate=linear_surrogate({"T5": -0.5}),
+                           cfg=_cfg("quality", "t95_estimate", "last_plus_sigma"))
+    assert last._t95_shift(state) == 0.0
+    assert upper._t95_shift(state) == pytest.approx(t95_sigma(40.0))
+    assert upper._t95_shift(state) > 0
+
+
+def test_upper_bound_t95_strikes_heating_that_the_last_analysis_allows():
+    """Т95 варианта ниже предела, но ближе σ: по последнему анализу вариант
+    допустим, по верхней границе доверия — нет. Сдвиг только в проверке:
+    прогноз Т95 в варианте остаётся прежним."""
+    from nefte.agents.quality import t95_sigma
+
+    state = _t95_state(age_hours=40.0)
+    _, quality, reliability = _assessments()
+    limit = load_config()["spec"]["t95_c"]["max"]
+    sigma = t95_sigma(40.0)
+
+    def t95_fn(_state, moves):          # текущий режим далеко, подъём T5 — вплотную
+        return limit - 0.5 * sigma if moves.get("T5", 370.0) > 370.0 + 1e-6 \
+            else limit - 3.0 * sigma
+
+    def violated(mode: str) -> bool:
+        agent = OptimizerAgent(bounds=BOUNDS, surrogate=linear_surrogate({"T5": -0.5}),
+                               cfg=_cfg("quality", "t95_estimate", mode), t95_fn=t95_fn)
+        heat = _move({"T5": 1.0}, 0.3)
+        agent.evaluate(state, [heat], quality, reliability)
+        assert heat.predicted_quality["product_t95_c"] == pytest.approx(limit - 0.5 * sigma)
+        return any("Т95" in v for v in heat.violations)
+
+    assert not violated("last")
+    assert violated("last_plus_sigma")

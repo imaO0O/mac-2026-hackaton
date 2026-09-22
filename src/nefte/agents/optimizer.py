@@ -335,6 +335,52 @@ class OptimizerAgent:
             return reliability.severity_index
         return float(agent.severity_for(state, moves))
 
+    def _t95_shift(self, state: ProcessState) -> float:
+        """Поправка уровня Т95 для проверки жёсткого ограничения, °C.
+
+        ``quality.t95_estimate: last`` — уровень из последнего анализа, как было.
+        ``last_plus_sigma`` — верхняя граница доверия к нему: плюс σ ухода показателя
+        за время с отбора пробы (та же σ, что у риска Т95). Проверено 21.09
+        (scripts/check_t95_combo.py): такая граница ловит 64 % превышений Т95 на
+        валидации и 80 % на тесте против 36 % и 0 % у последнего анализа, ценой
+        21.8 % ложных против 5.3 %. «Ложное» здесь — не остановка, а сужение набора
+        вариантов, поэтому решение принимается по прогонам (docs/PLAN.md, «Т95»).
+        """
+        mode = str((self.cfg.get("quality") or {}).get("t95_estimate", "last"))
+        if mode != "last_plus_sigma":
+            return 0.0
+        from nefte.agents.quality import t95_sigma
+
+        lab = state.quality.get("lims_t95_c")
+        return float(t95_sigma(lab.age_hours if lab is not None else None))
+
+    def _severity_vetoes(self, candidate: Candidate,
+                         reliability: ReliabilityAssessment) -> bool:
+        """Вычёркивает ли высокая тяжесть режима ЭТОТ вариант.
+
+        ``reliability.severity_veto: all`` — прежнее поведение: при высоком классе
+        тяжести вычёркивается всё. Найдено 21.09 (docs/PLAN.md, «Конец цикла
+        катализатора»): в конце цикла тяжесть выше порога держит износ катализатора,
+        уставками его не изменить, и система неделями отвечала «нет допустимых
+        вариантов» — 752 момента теста из 763 таких отказов, медиана риска 0.117 при
+        пороге 0.17. Агент надёжности при этом сам пишет «повышение температур
+        запрещено, снижение разрешено».
+
+        ``raise_only`` — вычёркиваются только варианты, которые тяжесть ПОВЫШАЮТ или
+        поднимают температуру; остальные — шаг к безопасности или удержание. Запрет
+        на подъём температур дублирует ограничения агента надёжности намеренно:
+        правило приёмки требует, чтобы при высокой тяжести ни одно действие
+        температуру не поднимало, и это держится здесь, а не только снаружи.
+        """
+        mode = str((self.cfg.get("reliability") or {}).get("severity_veto", "all"))
+        if mode != "raise_only":
+            return True
+        raises_severity = (candidate.severity_index is not None
+                           and candidate.severity_index > reliability.severity_index + 1e-9)
+        raises_temperature = any(delta > 1e-6 for tag, delta in candidate.deltas.items()
+                                 if tag.startswith("T"))
+        return raises_severity or raises_temperature
+
     def _aging_rate_and_cap(self) -> tuple[float | None, float | None]:
         """Скорость дезактивации и размах цикла из отчёта ресурса — как в карточке."""
         if self._aging_cache is None:
@@ -482,6 +528,7 @@ class OptimizerAgent:
         # запрещать варианты по этому признаку бессмысленно — тогда важно лишь то,
         # что вариант не делает хуже.
         t95_now = self.t95_fn(state, {}) if self.t95_fn else None
+        t95_shift = self._t95_shift(state)
 
         for c in cands:
             pred = self.surrogate(state, c.moves)
@@ -497,7 +544,12 @@ class OptimizerAgent:
             if t95 is not None:
                 pred["product_t95_c"] = float(t95)
                 worse = t95_now is not None and t95 > t95_now + 1e-9
-                if t95 > t95_limit and (t95_now is None or t95_now <= t95_limit or worse):
+                # Консервативная граница — только в ПРОВЕРКЕ ограничения: в прогноз и
+                # риск Т95 её класть нельзя, риск уже считается с этой σ.
+                t95_check = t95 + t95_shift
+                t95_now_check = None if t95_now is None else t95_now + t95_shift
+                if t95_check > t95_limit and (t95_now_check is None
+                                              or t95_now_check <= t95_limit or worse):
                     violations.append(
                         f"Т95 {t95:.1f} °C выходит за {t95_limit} — вариант чинит серу "
                         f"за счёт другого обязательного показателя")
@@ -517,7 +569,11 @@ class OptimizerAgent:
                     violations.append(
                         f"сера {sulfur:.2f} + запас {margin:.2f} мг/кг выходит за {limit} "
                         f"и вариант не лучше бездействия")
-            if not reliability.admissible:
+            # Тяжесть режима У ЭТОГО варианта, а не у текущего: иначе критерий
+            # severity в свёртке и на фронте Парето вырождается в константу. Считается
+            # здесь, до вето: вето должно видеть, куда вариант ведёт тяжесть.
+            c.severity_index = self._severity_for(state, reliability, c.moves)
+            if not reliability.admissible and self._severity_vetoes(c, reliability):
                 violations.append("режим признан недопустимым агентом надёжности")
 
             c.guaranteed = bool(guaranteed)
@@ -542,9 +598,6 @@ class OptimizerAgent:
                     float(t95), t95_meas.age_hours if t95_meas else None, t95_limit)
             c.throughput = self.throughput_fn(state, c.moves)
             c.energy_proxy = self.energy_fn(state, c.moves)
-            # Тяжесть режима У ЭТОГО варианта, а не у текущего: иначе критерий
-            # severity в свёртке и на фронте Парето вырождается в константу.
-            c.severity_index = self._severity_for(state, reliability, c.moves)
             c.violations = violations
             c.feasible = not violations
 
