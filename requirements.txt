@@ -29,3 +29,6 @@ plotly>=5.22
 # --- dev ---
 pytest>=8.0
 ruff>=0.4
+
+# --- презентация: только scripts/make_presentation.py, системе не нужна ---
+python-pptx==1.0.2

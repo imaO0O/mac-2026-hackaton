@@ -1,15 +1,23 @@
 """Собрать архив решения для отправки и проверить его на вменяемость.
 
-    python scripts/make_submission.py
+    python scripts/make_submission.py                 # архив кода, ~3 МБ — письмом
+    python scripts/make_submission.py --data          # данные и модели — ссылкой
     python scripts/make_submission.py --out D:/oil/neftekod.zip --no-reports
 
-Что входит: код (`src`, `scripts`, `app`, `tests`), конфигурация, документация,
-README и отчёты `reports/*.json` — то есть всё, чем подтверждён каждый вывод.
+Архивов два, потому что организаторы просили приложить данные (сессия 18.09,
+docs/DATA_NOTES.md §5в), а в письмо сто мегабайт не влезают.
 
-Чего НЕТ и почему: выданных данных (их нельзя распространять), обученных моделей и
-кэшей (они воспроизводятся из данных одной командой, а в архиве были бы сотнями
-мегабайт ничем не проверяемых двоичных файлов). Отчёты при этом входят: без них
-проверяющему пришлось бы верить на слово или ждать многочасовой пересборки.
+**Архив кода.** Код (`src`, `scripts`, `app`, `tests`), конфигурация, документация с
+презентацией, README, образец `.env` и отчёты `reports/*.json` — всё, чем
+подтверждён каждый вывод. Отчёты входят: без них проверяющему пришлось бы верить на
+слово или ждать многочасовой пересборки.
+
+**Архив данных (`--data`).** Выданные файлы организаторов без изменений — ровно те,
+что читает код (`configs/config.yaml → paths.files`), — и обученные модели
+`models/`: с ними карточка и дашборд запускаются сразу, без обучения. Модели можно и
+пересобрать: `python scripts/train_quality.py --horizon 0` или
+`bash scripts/reproduce_all.sh`. Кэши (распакованные csv, parquet) не входят — их
+делает `python scripts/prepare_data.py`.
 
 Проверка после сборки — не формальность. Архив открывается заново и проверяется:
 на месте ли точки входа, не утекли ли данные или модели, читается ли README, и
@@ -33,7 +41,7 @@ from nefte.utils import use_utf8_console  # noqa: E402
 # Что кладём в архив: каталоги целиком и отдельные файлы из корня.
 TREES = ("src", "scripts", "app", "tests", "configs", "docs")
 FILES = ("README.md", "requirements.txt", "pyproject.toml", "pytest.ini",
-         "setup.cfg", ".gitattributes")
+         "setup.cfg", ".gitattributes", ".env.example")
 REPORTS = "reports"
 
 # Что не кладём никогда: кэши, окружение, выданные данные и обученные модели.
@@ -47,7 +55,7 @@ REQUIRED = ("README.md", "configs/config.yaml", "scripts/reproduce_all.sh",
             "scripts/run_cycle.py", "src/nefte/agents/orchestrator.py",
             "app/dashboard.py")
 # Раздел README, ради которого он вообще читается первым.
-README_MARK = "пятнадцать минут"
+README_MARK = "За пять минут"
 
 
 def wanted(path: Path) -> bool:
@@ -97,14 +105,70 @@ def verify(archive: Path, with_reports: bool) -> None:
     print(f"проверка архива пройдена: {len(names)} файлов")
 
 
+# Как пользоваться архивом данных — кладётся в сам архив.
+DATA_README = """Данные и модели к решению «Нефтекод»
+
+data/    выданные файлы организаторов без изменений
+models/  обученные модели (можно пересобрать, см. README решения)
+
+1. Распакуйте рядом с кодом решения; папку models/ положите в корень решения.
+2. В .env решения (образец — .env.example) укажите:
+     NEFTE_SOURCE_DIR=<путь к распакованной папке data>
+     NEFTE_DATA_DIR=<любая папка для кэша, вне облачной синхронизации>
+3. python scripts/prepare_data.py   — распаковка и кэш, один раз
+4. python scripts/run_cycle.py --ts "2026-03-05 00:00"
+"""
+
+
+def collect_data() -> list[tuple[Path, str]]:
+    """Выданные файлы, которые читает код, и модели: (путь, имя в архиве)."""
+    from nefte.config import load_config, source_dir
+
+    picked = []
+    for key, name in load_config()["paths"]["files"].items():
+        path = source_dir() / name
+        if path.is_file():               # csv в files — это кэш в data_dir, не выдача
+            picked.append((path, f"data/{name}"))
+    assert picked, f"в {source_dir()} нет выданных файлов — проверьте NEFTE_SOURCE_DIR"
+    for path in sorted((ROOT / "models").rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            picked.append((path, path.relative_to(ROOT).as_posix()))
+    return picked
+
+
+def build_data(out: Path) -> int:
+    files = collect_data()
+    tmp = out.with_suffix(".part")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        zf.writestr("ДАННЫЕ.txt", DATA_README)
+        for path, name in files:
+            # rar и xlsx уже сжаты — повторное сжатие только тратит время
+            kind = zipfile.ZIP_STORED if path.suffix in (".rar", ".xlsx") else zipfile.ZIP_DEFLATED
+            zf.write(path, name, compress_type=kind)
+    with zipfile.ZipFile(tmp) as zf:
+        assert zf.testzip() is None, "битый файл в архиве данных"
+        names = set(zf.namelist())
+        assert any(n.startswith("data/") for n in names), "нет данных"
+        assert any(n.startswith("models/sulfur_h0/") for n in names), "нет рабочей модели"
+    tmp.replace(out)
+    data = sum(1 for _, n in files if n.startswith("data/"))
+    print(f"архив данных: {out} — {out.stat().st_size / 1e6:.1f} МБ; "
+          f"выданных файлов {data}, файлов моделей {len(files) - data}")
+    return 0
+
+
 def main() -> int:
     use_utf8_console()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path,
-                        default=ROOT.parent / "neftekod_submission.zip")
+    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--data", action="store_true",
+                        help="архив выданных данных и обученных моделей вместо кода")
     parser.add_argument("--no-reports", action="store_true",
                         help="без reports/*.json (архив меньше, доказательств нет)")
     args = parser.parse_args()
+    if args.data:
+        return build_data(args.out or ROOT.parent / "neftekod_data.zip")
+    args.out = args.out or ROOT.parent / "neftekod_submission.zip"
 
     with_reports = not args.no_reports
     files = collect(with_reports)
@@ -124,8 +188,8 @@ def main() -> int:
     print(f"\nархив: {args.out} — {size:.1f} МБ, файлов {len(files)}")
     for name, count in sorted(by_tree.items(), key=lambda kv: -kv[1]):
         print(f"  {name:12s} {count}")
-    print("\nчто НЕ входит: выданные данные и обученные модели — "
-          "воспроизводятся командой bash scripts/reproduce_all.sh")
+    print("\nданные и модели — отдельным архивом: "
+          "python scripts/make_submission.py --data")
     return 0
 
 

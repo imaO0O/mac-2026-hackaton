@@ -108,10 +108,44 @@ def kinetic_variant(letter: str) -> dict:
     return next(v for name, v in variants.items() if name.startswith(letter + ":"))
 
 
+def confidence_ratio(sample: str) -> float:
+    """Во сколько раз ошибка при уверенности ниже 0.7 больше, чем от 0.7."""
+    block = report("confidence_meaning.json")["выборки"][sample]
+    return block["ошибка при уверенности ниже 0.7"] / block["ошибка при уверенности от 0.7"]
+
+
 def shock(name: str) -> dict:
     """Строка отчёта о чувствительности прогноза к возмущению сценария."""
     rows = report("shock_sensitivity.json")["возмущения"]
     return next(row for row in rows if row["возмущение"] == name)
+
+
+def hourly_misses() -> dict:
+    """Пропуски по моментам на часовом прогоне и сколько из них — при действии в силе.
+
+    Пропуск — превышение за 24 ч при исходе «держим режим» (как в сравнении
+    архитектур). «В силе» — меньше запрета частых воздействий после последнего
+    действия: новое вмешательство в эти часы запрещено, а прежнее ещё работает.
+    """
+    import pandas as pd
+
+    data = report("test_period_step1h.json")
+    lock = float(data["summary"]["запрет частых воздействий, ч"])
+    frame = pd.DataFrame(data["rows"])
+    frame["ts"] = pd.to_datetime(frame["ts"])
+    frame = frame.sort_values("ts")
+    column = "превышение за 24 ч"
+    known = frame[column].notna()
+    over = frame[column].where(known, False).astype(bool) & known
+    act = frame["исход"].eq("меняем уставки")
+    since = (frame["ts"] - frame["ts"].where(act).ffill()).dt.total_seconds() / 3600
+    missed = over & frame["исход"].eq("держим режим")
+    in_force = missed & since.lt(lock) & ~act
+    return {"превышений": int(over.sum()), "пропусков": int(missed.sum()),
+            "в силе": int(in_force.sum()),
+            "доля": 100 * missed.sum() / max(int(over.sum()), 1),
+            "доля без действующих": 100 * (missed.sum() - in_force.sum())
+            / max(int(over.sum()), 1)}
 
 
 def first_order_response() -> float:
@@ -131,6 +165,10 @@ CLAIMS = [
      lambda: [min(seq_h0("roc_auc")), max(seq_h0("roc_auc")), split0("model")["roc_auc"],
               min(seq_h0("coverage_80")), max(seq_h0("coverage_80")),
               split0("model")["coverage_80"]]),
+    ("до публикации результата реагирует на {} % проб с превышением против {} % нормальных",
+     lambda: [100 * event_window()["перед_превышением"], 100 * event_window()["перед_нормой"]]),
+    ("при реальной частоте раз в час у той же системы {} %",
+     lambda: [hourly_misses()["доля"]]),
     ("{}–{} против {}, то есть лучшая из сетей (GRU-48) даёт {} — ничья",
      lambda: [min(seq_h0("MAE")), max(seq_h0("MAE")), split0("model")["MAE"],
               min(seq_h0("MAE"))]),
@@ -183,11 +221,43 @@ README_CLAIMS = [
               ["как часто группа ведущая без измерений серы"]["сырьё с АВТ"]]),
     ("утяжеления сырья на +5 °C всего {} мг/кг",
      lambda: [shock("утяжеление сырья +5 °C")["сдвиг прогноза, мг/кг"]]),
+    ("ошибка прогноза в {}–{} раза больше",
+     lambda: [confidence_ratio("валидация"), confidence_ratio("тест")]),
     ("+10 мг/кг к ней двигают прогноз на {}",
      lambda: [shock("сера сырья +10 мг/кг")["сдвиг прогноза, мг/кг"]]),
-    ("замкнутый контур делает {}–{} вмешательств вместо {}",
-     lambda: weaker_physics_interventions() + [simulation()["вмешательств"]]),
+    # «делает 3–3 вмешательств вместо 3» — так читался диапазон, когда края
+    # совпали; верхний край и сравнение читаются при любых числах
+    ("замкнутый контур делает не больше {} вмешательств (при принятом отклике — {})",
+     lambda: [max(weaker_physics_interventions()), simulation()["вмешательств"]]),
 ]
+
+# Остальные документы, где числа стоят в тексте. Шпаргалка к защите — то, что
+# произносят вслух: 21.09 в ней нашлись «83 %» и «312 из 672» от прошлых сборок.
+DOC_CLAIMS = {
+    "docs/DEFENSE_QUALITY.md": [
+        ("Не «пропускает {} %»", working_miss),
+        ("вмешивается перед {} % проб с превышением и перед {} % нормальных",
+         lambda: [100 * event_window()["перед_превышением"],
+                  100 * event_window()["перед_нормой"]]),
+        ("Если спросят про {} %: это мера по моментам с суточным окном вперёд, при шаге "
+         "12 часов; при реальном шаге в час та же мера даёт {} %, и {} из этих «пропусков»",
+         lambda: working_miss() + [hourly_misses()["доля"], hourly_misses()["в силе"]]),
+        ("«система пропускает {} % превышений» | мера зависит от шага ({} % при шаге 1 ч)",
+         lambda: working_miss() + [hourly_misses()["доля"]]),
+        ("реагирует на {} % проб с превышением в окне −2 … +4 ч",
+         lambda: [100 * event_window()["перед_превышением"]]),
+        ("превышение система реагирует в {} % случаев (окно −2 … +4 ч от отбора)",
+         lambda: [100 * event_window()["перед_превышением"]]),
+    ],
+    "docs/HARD_CHECKS.md": [
+        ("Из {} «пропусков» при часовом шаге {} — такие. Если действие в силе засчитывать "
+         "как реакцию, пропусков {} %",
+         lambda: [hourly_misses()["пропусков"], hourly_misses()["в силе"],
+                  hourly_misses()["доля без действующих"]]),
+    ],
+}
+DOC_CLAIM_CASES = [(doc, template, expected) for doc, claims in DOC_CLAIMS.items()
+                   for template, expected in claims]
 
 NUM = r"([-+−]?\d+(?:[.,]\d+)?)"
 
@@ -221,3 +291,9 @@ def test_findings_claim_matches_reports(template, expected):
                          ids=[c[0][:40] for c in README_CLAIMS])
 def test_readme_claim_matches_reports(template, expected):
     _check(document("README.md"), "README", template, expected)
+
+
+@pytest.mark.parametrize("doc,template,expected", DOC_CLAIM_CASES,
+                         ids=[f"{c[0].split('/')[-1]}:{c[1][:30]}" for c in DOC_CLAIM_CASES])
+def test_doc_claim_matches_reports(doc, template, expected):
+    _check(document(doc), doc, template, expected)
