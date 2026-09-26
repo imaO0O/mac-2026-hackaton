@@ -277,17 +277,21 @@ def flow_strip(rec, unit_down: bool = False) -> None:
         else:
             color = gray
         short = text if len(text) <= 150 else text[:147].rsplit(" ", 1)[0] + "…"
-        # 140 px — меньше слова «оркестратор» не ужать: на ноутбуке 1366 px блоки
-        # переносятся на вторую строку, а не рвут слова и не уходят за правый край.
-        boxes.append(f"<div style='flex:1 1 140px;min-width:140px;border-radius:8px;"
+        boxes.append(f"<div style='flex:1 1 0;min-width:0;border-radius:8px;"
                      f"padding:8px 10px;background:{color};color:#fff'>"
                      f"<div style='font-weight:700;font-size:0.95rem'>{name}</div>"
                      f"<div style='font-size:0.8rem;line-height:1.3;opacity:.95'>{short}</div>"
                      f"</div>")
     arrow = "<div style='align-self:center;font-size:1.4rem;color:#8a93a3'>→</div>"
+    # Стрелка — в одной обёртке со СЛЕДУЮЩИМ блоком: при переносе на узком экране
+    # она уходит во вторую строку и ведёт в неё, а не висит в конце первой.
+    # 140 px — меньше слова «оркестратор» не ужать: на ноутбуке 1366 px блоки
+    # переносятся на вторую строку, а не рвут слова и не уходят за правый край.
+    items = [f"<div style='display:flex;flex:1 1 140px;min-width:140px'>{boxes[0]}</div>"]
+    items += [f"<div style='display:flex;gap:6px;flex:1 1 162px;min-width:162px'>"
+              f"{arrow}{box}</div>" for box in boxes[1:]]
     st.markdown("<div style='display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;"
-                "margin:4px 0 12px'>"
-                + arrow.join(boxes) + "</div>", unsafe_allow_html=True)
+                "margin:4px 0 12px'>" + "".join(items) + "</div>", unsafe_allow_html=True)
 
 
 def short_name(name: str) -> str:
@@ -606,9 +610,12 @@ def main() -> None:
                                  cfg["spec"].get("cetane_number", {}).get("min", 51.0))
     if len(cetane):
         value, when = float(cetane.iloc[-1]), cetane.index[-1]
-        c6.metric("ЦЧ ГО ДТ", f"{value:.1f}",
-                  f"{blend_grade.get('name', 'товарное')} ≥ {cetane_min:g}, анализ {when:%d.%m}",
-                  delta_color="inverse" if value < cetane_min else "off", delta_arrow="off")
+        # Марка — в подсказку: полная подпись «ДТ летнее товарное ≥ 51, анализ …»
+        # не помещалась в колонку и обрезалась многоточием.
+        c6.metric("ЦЧ ГО ДТ", f"{value:.1f}", f"норма ≥ {cetane_min:g}",
+                  delta_color="inverse" if value < cetane_min else "off", delta_arrow="off",
+                  help=f"{blend_grade.get('name', 'товарная марка')}: цетановое число "
+                       f"не ниже {cetane_min:g}. Последний анализ — {when:%d.%m.%Y}.")
     else:
         c6.metric("ЦЧ ГО ДТ", "—")
 
