@@ -166,14 +166,18 @@ def pareto_chart(candidates, chosen=None, hold=None, limit: float | None = None)
                       annotation_text=f"предел {limit:g}", annotation_position="bottom right")
         # Правее предела точки допустимы только как «лучше, чем ничего не делать» и
         # без гарантии запаса. Без подписи это читалось как «допустимо превышение».
-        right = max([point(c)[0] for c in candidates if point(c)[0] is not None]
-                    + ([point(hold)[0]] if hold is not None and point(hold)[0] else []),
-                    default=limit)
+        xs_all = ([point(c)[0] for c in candidates if point(c)[0] is not None]
+                  + ([point(hold)[0]] if hold is not None and point(hold)[0] else []))
+        right = max(xs_all + [limit])
+        left = min(xs_all + [limit])
+        pad = (right - left) * 0.04 or 0.05
+        # Ось — ровно по точкам: иначе справа от затенения оставалась пустая полоса.
+        fig.update_xaxes(range=[left - pad, right + pad])
         if right > limit:
-            fig.add_vrect(x0=limit, x1=right + (right - limit) * 0.15 + 0.01,
+            fig.add_vrect(x0=limit, x1=right + pad,
                           fillcolor="#B03A2E", opacity=0.07, line_width=0,
-                          annotation_text="выше предела: только лучше бездействия",
-                          annotation_position="top left",
+                          annotation_text="только лучше бездействия",
+                          annotation_position="top right",
                           annotation_font=dict(size=11, color="#B03A2E"))
     fig.update_layout(height=360, margin=dict(l=10, r=10, t=50, b=10),
                       xaxis_title="прогноз серы, мг/кг", yaxis_title="выпуск, т/ч",
