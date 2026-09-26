@@ -92,9 +92,16 @@ def quality_chart(sb: StateBuilder, lab: pd.Series, ts: pd.Timestamp,
                              mode="markers", marker=dict(color="#1F2A44", size=10,
                                                          symbol="diamond",
                                                          line=dict(color="#FFFFFF", width=1.5))))
+    # Подпись предела — слева на подложке: справа её перекрывали свежие точки.
     fig.add_hline(y=limit, line_dash="dash", line_color="#E45756",
-                  annotation_text=f"предел {limit} мг/кг")
+                  annotation_text=f"предел {limit:g} мг/кг", annotation_position="top left",
+                  annotation_bgcolor="rgba(255,255,255,0.85)")
+    # Подпись «сейчас» отдельной аннотацией: у add_vline на оси дат она падает.
     fig.add_vline(x=ts, line_color="#54A24B")
+    fig.add_annotation(x=ts, y=1, yref="paper", text="сейчас", showarrow=False,
+                       yanchor="bottom", font=dict(color="#2E7D4F"))
+    # Даты по-русски числами: plotly по умолчанию пишет «Feb 20».
+    fig.update_xaxes(tickformat="%d.%m", hoverformat="%d.%m.%Y %H:%M")
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10),
                       yaxis_title="сера, мг/кг", legend=dict(orientation="h"))
     return fig
@@ -250,7 +257,15 @@ def severity_block(section: dict) -> None:
         rows = section["факторы"]
         if rows:
             frame = pd.DataFrame(rows).set_index("название")
-            st.bar_chart(frame["вклад"])
+            # Горизонтальные столбцы: у вертикальных названия факторов обрезались
+            # («износ катализат…») и читались только наклонив голову.
+            order = frame["вклад"].sort_values()
+            fig = go.Figure(go.Bar(x=order.values, y=order.index, orientation="h",
+                                   marker_color="#1F4E8C", text=[f"{v:.2f}" for v in order],
+                                   textposition="outside", cliponaxis=False))
+            fig.update_layout(height=60 + 42 * len(order), margin=dict(l=10, r=40, t=10, b=10),
+                              xaxis_title="вклад в индекс тяжести")
+            st.plotly_chart(fig, width="stretch")
             st.dataframe(frame[["значение", "вес", "вклад"]], width="stretch")
     if section["сужение границ"]:
         limits = ", ".join(f"{tag} ∈ [{lo:g}, {hi:g}]"
