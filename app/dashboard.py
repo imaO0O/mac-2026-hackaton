@@ -100,24 +100,42 @@ def quality_chart(sb: StateBuilder, lab: pd.Series, ts: pd.Timestamp,
     return fig
 
 
-def pareto_chart(candidates) -> go.Figure:
-    """Фронт Парето: запас по качеству против тяжести режима."""
+def pareto_chart(candidates, chosen=None, hold=None, limit: float | None = None) -> go.Figure:
+    """Все допустимые варианты: сера против выпуска, фронт Парето, выбор и бездействие.
+
+    Раньше здесь были только три альтернативы и выбранный вариант — четыре точки,
+    по которым размен «качество ↔ выпуск» не виден. Теперь видно всё поле, из
+    которого оптимизатор выбирал, и где на нём оказалось «ничего не делать».
+    """
+    def point(c):
+        return c.predicted_quality.get("product_sulfur_mgkg"), c.throughput
+
     fig = go.Figure()
     front = [c for c in candidates if c.pareto_rank == 0]
     rest = [c for c in candidates if c.pareto_rank != 0]
-    for group, name, color, size in ((rest, "варианты", "#B0B0B0", 6),
-                                     (front, "фронт Парето", "#4C78A8", 10)):
+    for group, name, color, size in ((rest, "допустимые варианты", "#B8BEC8", 7),
+                                     (front, "фронт Парето", "#1F4E8C", 10)):
         if not group:
             continue
+        xs, ys = zip(*(point(c) for c in group))
         fig.add_trace(go.Scatter(
-            x=[c.predicted_quality.get("product_sulfur_mgkg") for c in group],
-            y=[c.throughput for c in group], mode="markers", name=name,
-            marker=dict(color=color, size=size),
+            x=xs, y=ys, mode="markers", name=name, marker=dict(color=color, size=size),
             text=[c.id for c in group],
             hovertemplate="%{text}<br>сера %{x:.2f}<br>выпуск %{y:.1f}<extra></extra>"))
-    fig.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10),
+    for cand, name, color, symbol in ((hold, "ничего не делать", "#111827", "x"),
+                                      (chosen, "выбрано", "#D9822B", "star")):
+        if cand is None or point(cand)[0] is None:
+            continue
+        x, y = point(cand)
+        fig.add_trace(go.Scatter(x=[x], y=[y], mode="markers", name=name,
+                                 marker=dict(color=color, size=18, symbol=symbol,
+                                             line=dict(color="#FFFFFF", width=1.5))))
+    if limit is not None:
+        fig.add_vline(x=limit, line_dash="dash", line_color="#B03A2E",
+                      annotation_text=f"предел {limit:g}", annotation_position="bottom right")
+    fig.update_layout(height=360, margin=dict(l=10, r=10, t=50, b=10),
                       xaxis_title="прогноз серы, мг/кг", yaxis_title="выпуск, т/ч",
-                      legend=dict(orientation="h"))
+                      legend=dict(orientation="h", y=1.12, x=0))
     return fig
 
 
@@ -555,8 +573,10 @@ def main() -> None:
     # ---------- альтернативы ------------------------------------------- #
     if rec.alternatives:
         st.subheader("Альтернативы и фронт Парето")
-        left, right = st.columns([2, 3])
+        left, right = st.columns([1, 1])
         with left:
+            st.caption("Три различающиеся альтернативы — оператор видит, чем платит "
+                       "за каждую.")
             st.dataframe(pd.DataFrame([
                 {"вариант": c.id,
                  "сера": round(c.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
@@ -577,8 +597,15 @@ def main() -> None:
                  "с запасом": "да" if c.guaranteed else "нет"}
                 for c in rec.alternatives]), hide_index=True, width="stretch")
         with right:
-            st.plotly_chart(pareto_chart(rec.alternatives + ([rec.action] if rec.action else [])),
-                            width="stretch")
+            # Все допустимые варианты пересчитываются тем же оптимизатором (доли
+            # секунды): решение не меняется, это только картинка поля выбора.
+            try:
+                field = system.optimizer.propose(state, q, r)
+            except Exception:                               # noqa: BLE001
+                field = rec.alternatives
+            hold = system.optimizer.last_hold()
+            st.plotly_chart(pareto_chart(field or rec.alternatives, chosen=rec.action,
+                                         hold=hold, limit=limit), width="stretch")
 
     with st.expander("Полный ответ агентов (JSON)"):
         st.json({"quality": q.model_dump(mode="json"),
