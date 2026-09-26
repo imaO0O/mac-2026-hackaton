@@ -5,3 +5,12 @@ gatherUsageStats = false
 
 [server]
 headless = true
+
+# Светлая тема: дашборд показывают на проекторе, а в тёмной теме лабораторные
+# точки на графике серы терялись на фоне.
+[theme]
+base = "light"
+
+# Без кнопки Deploy: это локальный прототип в закрытом контуре.
+[client]
+toolbarMode = "minimal"

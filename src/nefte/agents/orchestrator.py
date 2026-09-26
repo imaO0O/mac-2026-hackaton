@@ -40,6 +40,8 @@ from nefte.agents.schemas import (
 from nefte.config import ROOT, load_config
 
 RUNS_DIR = ROOT / "reports" / "runs"
+# Классы тяжести в трассе решения — по-русски, как в карточке и на дашборде.
+CLASS_RU = {"low": "мягкий", "medium": "средний", "high": "тяжёлый"}
 
 
 # Применённый сдвиг меньше этой доли разрешённого шага не возвращаем: гоняться за
@@ -777,8 +779,18 @@ class Orchestrator:
 
         steps.append(TraceStep(
             agent="агент надёжности",
-            summary=(f"тяжесть режима {r.severity_index:.2f} ({r.risk_class}); режим "
-                     + ("допустим" if r.admissible else "НЕДОПУСТИМ")
+            # «НЕДОПУСТИМ» читалось как «запрещено всё», а с вето тяжести
+            # (reliability.severity_veto: raise_only) при тяжёлом режиме запрещено
+            # только то, что греет или утяжеляет его; класс — по-русски, как в карточке.
+            summary=(f"тяжесть режима {r.severity_index:.2f} "
+                     f"({CLASS_RU.get(r.risk_class, r.risk_class)}); "
+                     + ("режим допустим" if r.admissible else
+                        "установка стоит: режим не оценивается"
+                        if self.reliability.is_unit_down(state) else
+                        "тяжёлый режим: греть и утяжелять нельзя"
+                        if str((self.cfg.get("reliability") or {}).get(
+                            "severity_veto", "all")) == "raise_only"
+                        else "режим НЕДОПУСТИМ")
                      + ("; ограничил " + ", ".join(sorted(r.constraints)) if r.constraints
                         else "")),
             details={"факторы": dict(r.factors), "ограничения": {
