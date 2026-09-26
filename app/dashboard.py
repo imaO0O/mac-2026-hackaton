@@ -169,6 +169,11 @@ def load_cetane() -> pd.Series:
     return lims_series("Гидроочистка|2|CetaneNumber").sort_index()
 
 
+def readable(summary: str) -> str:
+    """Служебный идентификатор варианта «hold» — словами, как его зовёт оператор."""
+    return summary.replace("лучший — hold", "лучший — ничего не менять")
+
+
 def flow_strip(rec) -> None:
     """Путь решения одной полосой: пять шагов агентов цветными блоками.
 
@@ -179,9 +184,12 @@ def flow_strip(rec) -> None:
     """
     green, amber, red, blue, gray = "#2E7D4F", "#D9822B", "#B03A2E", "#1F4E8C", "#5B6472"
     outcome = rec.outcome()
+    # Держим режим, но показатель уже вне спецификации (сцена «Т95 за пределом») —
+    # жёлтым, как и плашка над карточкой: зелёный здесь читался бы «всё хорошо».
+    off_spec = "ЗА ПРЕДЕЛОМ" in rec.problem or "ВНЕ СПЕЦИФИКАЦИИ" in rec.problem
     boxes = []
     for step in rec.trace:
-        text = step.summary
+        text = readable(step.summary)
         name = step.agent
         if name == "срез состояния":
             color = red if "непригоден" in text else green
@@ -189,7 +197,8 @@ def flow_strip(rec) -> None:
             color = (red if "НЕДОПУСТИМ" in text else gray if "установка стоит" in text else
                      amber if "тяжёлый режим" in text or "ограничил" in text else green)
         elif name == "оркестратор":
-            color = red if outcome == "отказ" else blue if outcome == "меняем уставки" else green
+            color = (red if outcome == "отказ" else blue if outcome == "меняем уставки" else
+                     amber if off_spec else green)
         else:
             color = gray
         short = text if len(text) <= 150 else text[:147].rsplit(" ", 1)[0] + "…"
@@ -209,7 +218,7 @@ def trace_block(rec) -> None:
     for number, step in enumerate(rec.trace, start=1):
         left, right = st.columns([1, 4])
         left.markdown(f"**{number}. {step.agent}**")
-        right.markdown(step.summary)
+        right.markdown(readable(step.summary))
         if step.details:
             with right.expander("подробности"):
                 st.json(step.details, expanded=False)
