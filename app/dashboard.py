@@ -47,6 +47,23 @@ CLASS_RU = {"low": "мягкий", "medium": "средний", "high": "тяжё
 st.markdown("<style>[data-testid='stSidebar']{min-width:430px !important;"
             "width:430px !important}</style>", unsafe_allow_html=True)
 
+# Шапка и плашка решения. Главный вопрос оператора — «что делать сейчас», и ответ на
+# него должен читаться с другого конца пульта, раньше любых таблиц.
+st.markdown("""<style>
+.nk-top{display:flex;align-items:baseline;gap:14px;margin:-8px 0 10px}
+.nk-brand{font-size:1.9rem;font-weight:800;color:#1F2A44}
+.nk-line{font-size:1rem;color:#6B7280}
+.nk-dec{border-radius:12px;padding:16px 22px;margin:6px 0 16px;color:#fff}
+.nk-dec .k{font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;opacity:.85}
+.nk-dec .h{font-size:1.75rem;font-weight:800;line-height:1.25;margin:4px 0 6px}
+.nk-dec .s{font-size:1rem;opacity:.95}
+.nk-dec .c{margin-top:10px;display:flex;flex-wrap:wrap;gap:8px}
+.nk-dec .c span{background:rgba(255,255,255,.18);border-radius:999px;padding:3px 12px;
+ font-size:.9rem}
+.nk-act{background:#1F4E8C}.nk-hold{background:#2E7D4F}.nk-watch{background:#C0701F}
+.nk-stop{background:#B03A2E}.nk-down{background:#5B6472}
+</style>""", unsafe_allow_html=True)
+
 
 @st.cache_resource(show_spinner="Загрузка данных и модели…")
 def load_system():
@@ -233,7 +250,7 @@ def flow_strip(rec) -> None:
         else:
             color = gray
         short = text if len(text) <= 150 else text[:147].rsplit(" ", 1)[0] + "…"
-        boxes.append(f"<div style='flex:1 1 0;min-width:150px;border-radius:8px;"
+        boxes.append(f"<div style='flex:1 1 0;min-width:0;border-radius:8px;"
                      f"padding:8px 10px;background:{color};color:#fff'>"
                      f"<div style='font-weight:700;font-size:0.95rem'>{name}</div>"
                      f"<div style='font-size:0.8rem;line-height:1.3;opacity:.95'>{short}</div>"
@@ -243,17 +260,102 @@ def flow_strip(rec) -> None:
                 + arrow.join(boxes) + "</div>", unsafe_allow_html=True)
 
 
-def trace_block(rec) -> None:
-    """Цикл решения по шагам: какой агент что вернул и какое правило сработало.
+def short_name(name: str) -> str:
+    """«Р-201: температура ГСС на выходе» → «Температура ГСС на выходе Р-201»."""
+    name = re.sub(r"\s*\([^)]*\)", "", name).strip()
+    if ":" in name:
+        where, what = name.split(":", 1)
+        name = f"{what.strip()} {where.strip()}"
+    return name[:1].upper() + name[1:]
 
-    Полоса решения наверху говорит то же коротко; подробный журнал нужен при
-    разборе, поэтому он свёрнут и не отодвигает график и тяжесть режима вниз.
+
+def decision_banner(rec, *, ts, cfg, system, state, q, unit_down: bool) -> None:
+    """Ответ системы одной плашкой: что делать, чего ждать и насколько верить.
+
+    Цвет — тот же язык, что в полосе решения: синий — действие, зелёный — держим,
+    янтарный — держим, но показатель вне спецификации, красный — совета нет, серый —
+    установка стоит. Числа берутся из той же рекомендации, что и карточка ниже.
     """
-    with st.expander("Подробно: что ответил каждый агент"):
-        trace_rows(rec)
+    moves = {t: d for t, d in (rec.action.deltas if rec.action else {}).items()
+             if abs(d) > 1e-6}
+    outlook = getattr(rec, "outlook", None) or {}
+    lab = outlook.get("следующий анализ") or {}
+    when = f"{pd.Timestamp(ts):%d.%m.%Y %H:%M}"
+    chips: list[str] = []
+    if lab.get("задерживается"):
+        chips.append("анализ просрочен")
+    elif lab.get("через, ч") is not None:
+        chips.append(f"анализ через {lab['через, ч']:g} ч")
+
+    if rec.abstained:
+        kind = "down" if unit_down else "stop"
+        head = ("Совета нет: установка остановлена" if unit_down else
+                "Совета нет: данным сейчас нельзя верить"
+                if (not state.data_quality.usable or q.confidence < system.min_confidence)
+                else "Совета нет: ни один вариант не проходит ограничения")
+        sentences = re.split(r"(?<=[.!?])\s+", readable(rec.abstain_reason or ""))
+        # Причины, а не служебная арифметика уверенности: её видно в карточке ниже.
+        sub = " ".join([x for x in sentences if not x.startswith("Уверенность")][:2])
+    elif moves:
+        kind = "act"
+        names = tag_names(cfg)
+        step = cfg["limits"]["max_step_per_cycle"]
+
+        def share(tag: str) -> float:
+            before = rec.action.moves[tag] - moves[tag]
+            allowed = (step["temperature_c"] if tag.startswith("T") else
+                       step["pressure_mpa"] if tag.startswith("P") else
+                       abs(before) * step["flow_rel"])
+            return abs(moves[tag]) / allowed if allowed else 0.0
+
+        main_tag = max(moves, key=share)
+        name, unit = names.get(main_tag, (main_tag, ""))
+        d = moves[main_tag]
+        before, after = rec.action.moves[main_tag] - d, rec.action.moves[main_tag]
+        digits = 3 if abs(d) < 0.01 else 2
+        head = (f"{short_name(name)}: {before:.{digits}f} → {after:.{digits}f} {unit}"
+                .strip())
+        rest = [f"{t} {moves[t]:+.2f}" for t in sorted(moves, key=share, reverse=True)
+                if t != main_tag]
+        sub = (f"Главный рычаг — {main_tag} ({d:+.{digits}f} {unit}, "
+               f"{share(main_tag):.0%} допустимого шага).")
+        if rest:
+            sub += " Остальные правки мелкие: " + ", ".join(rest) + "."
+        effect = rec.expected_effect or {}
+        now = q.predictions.get("product_sulfur_mgkg")
+        new = effect.get("product_sulfur_mgkg") or effect.get("сера, мг/кг")
+        if isinstance(now, (int, float)) and isinstance(new, (int, float)):
+            chips.insert(0, f"сера {now:.2f} → {new:.2f} мг/кг")
+        out = effect.get("throughput_change_pct") or effect.get("выпуск, %")
+        if isinstance(out, (int, float)):
+            chips.insert(1, f"выпуск {out:+.2f} %")
+        conf = f"уверенность {rec.confidence:.2f}"
+        if not rec.action.guaranteed:
+            conf += " — нужен контрольный анализ"
+        chips.append(conf)
+    else:
+        off_spec = "ЗА ПРЕДЕЛОМ" in rec.problem or "ВНЕ СПЕЦИФИКАЦИИ" in rec.problem
+        kind = "watch" if off_spec else "hold"
+        head = ("Режим по сере не менять — Т95 выше предела, решение за технологом"
+                if off_spec and "Т95" in rec.problem else
+                "Режим по сере не менять — но показатель вне спецификации" if off_spec
+                else "Режим не менять")
+        sub = rec.problem
+        chips.append(f"уверенность {rec.confidence:.2f}")
+    kicker = {"act": "совет оператору", "hold": "решение системы", "watch": "внимание технологу",
+              "stop": "отказ с причиной", "down": "отказ с причиной"}[kind]
+    chip_html = "".join(f"<span>{c}</span>" for c in chips)
+    st.markdown(f"<div class='nk-dec nk-{kind}'><div class='k'>{when} · {kicker}</div>"
+                f"<div class='h'>{head}</div><div class='s'>{sub}</div>"
+                f"<div class='c'>{chip_html}</div></div>", unsafe_allow_html=True)
 
 
 def trace_rows(rec) -> None:
+    """Цикл решения по шагам: какой агент что вернул и какое правило сработало.
+
+    Полоса решения наверху говорит то же коротко; подробный журнал нужен при
+    разборе, поэтому он живёт на отдельной вкладке.
+    """
     for number, step in enumerate(rec.trace, start=1):
         left, right = st.columns([1, 4])
         left.markdown(f"**{number}. {step.agent}**")
@@ -373,7 +475,9 @@ def main() -> None:
     limit = cfg["spec"]["product_sulfur_mgkg"]["max"]
     lab = load_lab(cfg["quality"]["target"]["lims_source"])
 
-    st.title("МАС «Нефтекод»: АВТ → гидроочистка → блендинг")
+    st.markdown("<div class='nk-top'><div class='nk-brand'>МАС «Нефтекод»</div>"
+                "<div class='nk-line'>советчик оператора · АВТ → гидроочистка 24-2000 → "
+                "смешение ДТ</div></div>", unsafe_allow_html=True)
 
     with st.sidebar:
         st.header("Момент времени")
@@ -397,10 +501,9 @@ def main() -> None:
                                 max_value=sb.ht.index[-1].date())
             hour = st.slider("Час", 0, 23, 0)
             ts = pd.Timestamp(day) + pd.Timedelta(hours=hour)
+        if point:
+            st.info(f"**Что показывает сцена.** {readable(point)}")
         st.caption("Данные и модель кэшируются, пересчёт занимает доли секунды.")
-
-    if point:
-        st.info(f"**Что показывает сцена.** {point}")
 
     state = sb.build(pd.Timestamp(ts))
     # Лимит частоты воздействий — состояние оркестратора, и осмыслен он только в
@@ -411,6 +514,10 @@ def main() -> None:
     rec = system.run(state)
     q = system.quality.assess(state)
     r = system.reliability.assess(state)
+
+    # ---------- решение одной плашкой ------------------------------------ #
+    decision_banner(rec, ts=ts, cfg=cfg, system=system, state=state, q=q,
+                    unit_down=system.reliability.is_unit_down(state))
 
     # ---------- строка состояния -------------------------------------- #
     c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -428,9 +535,12 @@ def main() -> None:
     # противоречие. Решение системы от этого не меняется — только подписи.
     unit_down = system.reliability.is_unit_down(state)
     risk = q.spec_risk.get("product_sulfur_mgkg", 0) if q.spec_risk else None
-    c1.metric(f"{label} (поточный), мг/кг",
+    c1.metric(f"Прибор {label}, мг/кг",
               f"{pak.value:.2f}" if pak and pak.value else "—",
-              "завис" if pak and pak.is_frozen else None, delta_color="inverse",
+              "завис" if pak and pak.is_frozen else
+              (f"возраст {pak.age_hours:.0f} ч" if pak and pak.age_hours is not None
+               else None),
+              delta_color="inverse" if pak and pak.is_frozen else "off",
               delta_arrow="off")
     c2.metric("ЛИМС, мг/кг", f"{lims.value:.2f}" if lims and lims.value else "—",
               f"возраст {lims.age_hours:.0f} ч" if lims and lims.age_hours else None,
@@ -478,260 +588,276 @@ def main() -> None:
                "синий — предлагаем действие. Решение принимает оператор.")
     flow_strip(rec)
 
-    # ---------- рекомендация ------------------------------------------ #
-    st.subheader("Рекомендация оператору")
-    if rec.abstained:
-        st.error(f"**Рекомендации нет.** {readable(rec.abstain_reason)}")
-    else:
-        moves = {t: d for t, d in (rec.action.deltas if rec.action else {}).items()
-                 if abs(d) > 1e-6}
-        # Зелёная плашка — только когда всё в норме: «Т95 ЗА ПРЕДЕЛОМ» или «ФАКТ ВНЕ
-        # СПЕЦИФИКАЦИИ» при удержании режима читались в зелёном как «всё хорошо».
-        off_spec = "ЗА ПРЕДЕЛОМ" in rec.problem or "ВНЕ СПЕЦИФИКАЦИИ" in rec.problem
-        box = (st.warning if off_spec else st.success) if not moves else (
-            st.warning if rec.action and not rec.action.guaranteed else st.info)
-        box(f"**{rec.problem}**")
-
-        # Действие — на всю ширину: в левой колонке 2/5 числа таблицы уходили за
-        # край экрана ноутбука, оставались только названия параметров.
-        st.markdown("**Действие**")
-        if moves:
-            # точность — та, при которой ход виден: давление двигается на
-            # тысячные МПа, и при двух знаках «Δ 0» читалось как «не трогать»
-            def digits(delta: float) -> int:
-                return 3 if abs(delta) < 0.01 else 2
-            # Оператору нужно не «T5», а что это и в чём, и какой из шагов
-            # главный: +0.12 °C рядом с −6.63 м³/ч — не равные по смыслу правки.
-            # Размер шага — в долях разрешённого за цикл (limits.max_step_per_cycle).
-            names = tag_names(cfg)
-            step = cfg["limits"]["max_step_per_cycle"]
-
-            def share(tag: str, delta: float, before: float) -> str:
-                allowed = (step["temperature_c"] if tag.startswith("T") else
-                           step["pressure_mpa"] if tag.startswith("P") else
-                           abs(before) * step["flow_rel"])
-                return f"{abs(delta) / allowed:.0%}" if allowed else "—"
-
-            rows = []
-            for t, d in sorted(moves.items(), key=lambda kv: -abs(kv[1]) / max(
-                    1e-9, (step["temperature_c"] if kv[0].startswith("T") else
-                           step["pressure_mpa"] if kv[0].startswith("P") else
-                           abs(rec.action.moves[kv[0]] - kv[1]) * step["flow_rel"]))):
-                name, unit = names.get(t, (t, ""))
-                before = rec.action.moves[t] - d
-                rows.append({"параметр": f"{t} — {name}" + (f", {unit}" if unit else ""),
-                             "сейчас": f"{before:.{digits(d)}f}",
-                             "рекомендуется": f"{rec.action.moves[t]:.{digits(d)}f}",
-                             "Δ": f"{d:+.{digits(d)}f}",
-                             "от допустимого шага": share(t, d, before)})
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-            st.caption("Сверху — главный рычаг совета. «От допустимого шага» — доля "
-                       "изменения, разрешённого за один цикл.")
+    # Детали — по вкладкам: на одной ленте разделы шли друг за другом одинаковыми
+    # блоками, и до графика или тяжести режима приходилось долго листать.
+    tabs = st.tabs(["Совет и проверки", "Варианты", "Качество и данные",
+                    "Режим и катализатор", "Смешение", "Журнал агентов"])
+    with tabs[0]:
+        # ---------- рекомендация ------------------------------------------ #
+        st.subheader("Рекомендация оператору")
+        if rec.abstained:
+            st.error(f"**Рекомендации нет.** {readable(rec.abstain_reason)}")
         else:
-            st.write("Изменение уставок не требуется.")
-        left, right = st.columns([2, 3])
-        with left:
+            moves = {t: d for t, d in (rec.action.deltas if rec.action else {}).items()
+                     if abs(d) > 1e-6}
+            # Зелёная плашка — только когда всё в норме: «Т95 ЗА ПРЕДЕЛОМ» или «ФАКТ ВНЕ
+            # СПЕЦИФИКАЦИИ» при удержании режима читались в зелёном как «всё хорошо».
+            off_spec = "ЗА ПРЕДЕЛОМ" in rec.problem or "ВНЕ СПЕЦИФИКАЦИИ" in rec.problem
+            box = (st.warning if off_spec else st.success) if not moves else (
+                st.warning if rec.action and not rec.action.guaranteed else st.info)
+            box(f"**{rec.problem}**")
+
+            # Действие — на всю ширину: в левой колонке 2/5 числа таблицы уходили за
+            # край экрана ноутбука, оставались только названия параметров.
+            st.markdown("**Действие**")
             if moves:
-                st.markdown("**Ожидаемый эффект**")
-                st.write(effect_text(rec.expected_effect))
+                # точность — та, при которой ход виден: давление двигается на
+                # тысячные МПа, и при двух знаках «Δ 0» читалось как «не трогать»
+                def digits(delta: float) -> int:
+                    return 3 if abs(delta) < 0.01 else 2
+                # Оператору нужно не «T5», а что это и в чём, и какой из шагов
+                # главный: +0.12 °C рядом с −6.63 м³/ч — не равные по смыслу правки.
+                # Размер шага — в долях разрешённого за цикл (limits.max_step_per_cycle).
+                names = tag_names(cfg)
+                step = cfg["limits"]["max_step_per_cycle"]
+
+                def share(tag: str, delta: float, before: float) -> str:
+                    allowed = (step["temperature_c"] if tag.startswith("T") else
+                               step["pressure_mpa"] if tag.startswith("P") else
+                               abs(before) * step["flow_rel"])
+                    return f"{abs(delta) / allowed:.0%}" if allowed else "—"
+
+                rows = []
+                for t, d in sorted(moves.items(), key=lambda kv: -abs(kv[1]) / max(
+                        1e-9, (step["temperature_c"] if kv[0].startswith("T") else
+                               step["pressure_mpa"] if kv[0].startswith("P") else
+                               abs(rec.action.moves[kv[0]] - kv[1]) * step["flow_rel"]))):
+                    name, unit = names.get(t, (t, ""))
+                    before = rec.action.moves[t] - d
+                    rows.append({"параметр": f"{t} — {name}" + (f", {unit}" if unit else ""),
+                                 "сейчас": f"{before:.{digits(d)}f}",
+                                 "рекомендуется": f"{rec.action.moves[t]:.{digits(d)}f}",
+                                 "Δ": f"{d:+.{digits(d)}f}",
+                                 "от допустимого шага": share(t, d, before)})
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                st.caption("Сверху — главный рычаг совета. «От допустимого шага» — доля "
+                           "изменения, разрешённого за один цикл.")
             else:
-                # Без действия «+0.00 к бездействию, выпуск +0.00 %» — шум: оператору
-                # нужно, что будет при текущем режиме.
-                st.markdown("**Если ничего не менять**")
-                st.write(re.sub(r",\s*(выпуск|энергия) [+-]0\.00 %", "", re.sub(
-                    r"\s*\([+-]0\.00[^)]*\)", "", effect_text(rec.expected_effect))))
-            st.markdown(f"**Уверенность:** {rec.confidence:.2f}")
-        with right:
-            st.markdown("**Проверенные ограничения**")
-            for item in rec.checked_constraints:
-                st.markdown(f"- {item}")
-            st.markdown(f"**Почему:** {readable(rec.explanation)}")
-            cause = getattr(rec, "cause", None)
-            if cause:
-                st.markdown(f"**Разбор причины:** {cause.get('строка', '')}")
-                st.caption("Вклады по группам каналов, мг/кг: " + ", ".join(
-                    f"{name} {value:+.2f}"
-                    for name, value in (cause.get("вклады по группам") or {}).items()))
+                st.write("Изменение уставок не требуется.")
+            left, right = st.columns([2, 3])
+            with left:
+                if moves:
+                    st.markdown("**Ожидаемый эффект**")
+                    st.write(effect_text(rec.expected_effect))
+                else:
+                    # Без действия «+0.00 к бездействию, выпуск +0.00 %» — шум: оператору
+                    # нужно, что будет при текущем режиме.
+                    st.markdown("**Если ничего не менять**")
+                    st.write(re.sub(r",\s*(выпуск|энергия) [+-]0\.00 %", "", re.sub(
+                        r"\s*\([+-]0\.00[^)]*\)", "", effect_text(rec.expected_effect))))
+                st.markdown(f"**Уверенность:** {rec.confidence:.2f}")
+            with right:
+                st.markdown("**Проверенные ограничения**")
+                for item in rec.checked_constraints:
+                    st.markdown(f"- {item}")
+                st.markdown(f"**Почему:** {readable(rec.explanation)}")
+                cause = getattr(rec, "cause", None)
+                if cause:
+                    st.markdown(f"**Разбор причины:** {cause.get('строка', '')}")
+                    st.caption("Вклады по группам каналов, мг/кг: " + ", ".join(
+                        f"{name} {value:+.2f}"
+                        for name, value in (cause.get("вклады по группам") or {}).items()))
 
-    band = getattr(rec, "out_of_band", None)
-    if band:
-        # при пуске и останове это не нарушение, а работа технолога
-        (st.info if band.get("переход") else st.warning)(
-            f"**Возврат в норму.** {band.get('строка', '')}")
-        st.dataframe(pd.DataFrame(band.get("теги") or []),
-                     hide_index=True, width="stretch")
+        band = getattr(rec, "out_of_band", None)
+        if band:
+            # при пуске и останове это не нарушение, а работа технолога
+            (st.info if band.get("переход") else st.warning)(
+                f"**Возврат в норму.** {band.get('строка', '')}")
+            st.dataframe(pd.DataFrame(band.get("теги") or []),
+                         hide_index=True, width="stretch")
 
-    outlook = getattr(rec, "outlook", None)
-    if outlook:
-        st.subheader("Что дальше")
-        lab_block = outlook.get("следующий анализ") or {}
-        cols = st.columns(3)
-        if lab_block.get("задерживается"):
-            # «через 0 ч — задерживается» читалось как ошибка: анализ уже должен был
-            # прийти, и оператору нужно именно это.
-            cols[0].metric("Следующий анализ", "просрочен", "ждём контрольный анализ",
-                           delta_color="inverse", delta_arrow="off")
-        elif lab_block:
-            cols[0].metric("Следующий анализ через", f"{lab_block['через, ч']:g} ч")
-        if lab_block:
-            # На непригодном срезе карточка диапазон не обещает: он опирался бы на
-            # данные, которым система только что отказалась верить. Дашборд
-            # падал здесь с KeyError — ровно в сцене «недостоверные данные».
-            if "диапазон, мг/кг" in lab_block:
-                low, high = lab_block["диапазон, мг/кг"]
-                cols[1].metric("Ожидаемый диапазон, мг/кг", f"{low:g}–{high:g}",
-                               help="попадание 8 раз из 10 — измерено на обучении, "
-                                    "проверено на валидации и тесте")
-            else:
-                cols[1].metric("Ожидаемый диапазон, мг/кг", "не обещаем",
-                               help="данным сейчас верить нельзя — диапазон опирался "
-                                    "бы на них; ждём контрольный анализ")
-        tonnes = outlook.get("тонн под риском")
-        if tonnes:
-            cols[2].metric("Продукта до анализа, т", f"{tonnes:g}",
-                           help="расход товарного потока × часы до анализа: объём, "
-                                "который будет сделан до контрольного факта")
-        moving = outlook.get("режим уже едет")
-        if moving:
-            st.warning(f"Режим уже идёт {moving['куда']} на "
-                       f"{abs(moving['ход, °C']):g} °C за последние "
-                       f"{moving['окно, ч']:g} ч — часть эффекта ещё в пути, "
-                       f"не складывайте воздействия.")
+        outlook = getattr(rec, "outlook", None)
+        if outlook:
+            st.subheader("Что дальше")
+            lab_block = outlook.get("следующий анализ") or {}
+            cols = st.columns(3)
+            if lab_block.get("задерживается"):
+                # «через 0 ч — задерживается» читалось как ошибка: анализ уже должен был
+                # прийти, и оператору нужно именно это.
+                cols[0].metric("Следующий анализ", "просрочен", "ждём контрольный анализ",
+                               delta_color="inverse", delta_arrow="off")
+            elif lab_block:
+                cols[0].metric("Следующий анализ через", f"{lab_block['через, ч']:g} ч")
+            if lab_block:
+                # На непригодном срезе карточка диапазон не обещает: он опирался бы на
+                # данные, которым система только что отказалась верить. Дашборд
+                # падал здесь с KeyError — ровно в сцене «недостоверные данные».
+                if "диапазон, мг/кг" in lab_block:
+                    low, high = lab_block["диапазон, мг/кг"]
+                    cols[1].metric("Ожидаемый диапазон, мг/кг", f"{low:g}–{high:g}",
+                                   help="попадание 8 раз из 10 — измерено на обучении, "
+                                        "проверено на валидации и тесте")
+                else:
+                    cols[1].metric("Ожидаемый диапазон, мг/кг", "не обещаем",
+                                   help="данным сейчас верить нельзя — диапазон опирался "
+                                        "бы на них; ждём контрольный анализ")
+            tonnes = outlook.get("тонн под риском")
+            if tonnes:
+                cols[2].metric("Продукта до анализа, т", f"{tonnes:g}",
+                               help="расход товарного потока × часы до анализа: объём, "
+                                    "который будет сделан до контрольного факта")
+            moving = outlook.get("режим уже едет")
+            if moving:
+                st.warning(f"Режим уже идёт {moving['куда']} на "
+                           f"{abs(moving['ход, °C']):g} °C за последние "
+                           f"{moving['окно, ч']:g} ч — часть эффекта ещё в пути, "
+                           f"не складывайте воздействия.")
 
-    trace_block(rec)
-    ask_block(cfg, rec)
-
-    # ---------- данные и достоверность --------------------------------- #
-    st.subheader("Качество продукта и достоверность данных")
-    left, right = st.columns([3, 2])
-    with left:
-        st.plotly_chart(quality_chart(sb, lab, pd.Timestamp(ts), limit),
-                        width="stretch")
-    with right:
-        dq = state.data_quality
-        st.metric("Пропусков в срезе", f"{dq.missing_share:.1%}")
-        gap = getattr(rec, "analyzer_gap", None)
-        if gap:
-            st.warning(f"Расхождение анализаторов {gap['расхождение, мг/кг']:g} мг/кг "
-                       f"(ПАК {gap['пак, мг/кг']:g}, Q21 {gap['q21, мг/кг']:g}): при "
-                       f"таком расхождении оперативное значение на истории ошибалось "
-                       f"втрое сильнее обычного.")
-        if dq.notes:
-            for note in dq.notes:
-                st.markdown(f"- {note}")
-        else:
-            st.markdown("Замечаний к данным нет.")
-    # ---------- надёжность: из чего сложилась тяжесть режима ------------ #
-    panel = reliability_panel(r, load_catalyst_report(ROOT), ts,
-                              basis=catalyst_basis(system.reliability),
-                              dp=dp_mode(system.reliability))
-    severity_block(panel["тяжесть"])
-    catalyst_block(panel["катализатор"])
-
-    # ---------- партия с превышением: гашение в резервуаре --------------- #
-    if rec.tank_rescue:
-        st.subheader("Партия с превышением: что примет резервуар")
-        rescue = rec.tank_rescue
-        cols = st.columns(3)
-        cols[0].metric("Сера партии, мг/кг", f"{rescue['сера партии, мг/кг']:g}")
-        cols[1].metric("Доля партии", f"{rescue['доля партии']:.0%}"
-                       if rescue["возможно"] else "—")
-        cols[2].metric("Тонн резервуара на тонну партии",
-                       f"{rescue.get('на тонну партии нужно тонн резервуара', '—')}")
-        st.caption(
-            f"Практика установки: партию гасят топливом с запасом по сере "
-            f"(резервуар {rescue['сера резервуара, мг/кг']:g} мг/кг — ДОПУЩЕНИЕ, "
-            f"данных по паркам в пакете нет). Цель смеси "
-            f"{rescue['целевая сера смеси, мг/кг']:g} мг/кг. Это операция товарного "
-            "парка, а не замена правке режима.")
-        if not rescue["возможно"]:
-            st.warning(str(rescue.get("почему", "")))
-
-    # ---------- смешение ----------------------------------------------- #
-    if rec.blend is not None:
-        st.subheader("Смешение товарного ДТ")
-        left, right = st.columns([2, 3])
-        with left:
+    with tabs[1]:
+        # ---------- альтернативы ------------------------------------------- #
+        if rec.alternatives:
+            st.subheader("Альтернативы и фронт Парето")
+            # Таблица и поле выбора друг под другом: с описанием вариантов словами в
+            # половине ширины не помещались выпуск, энергия и Т95.
+            st.caption("Три различающиеся альтернативы — оператор видит, чем платит "
+                       "за каждую. Риск варианта — после изменения режима; риск в шапке "
+                       "карточки — у текущего режима.")
             st.dataframe(pd.DataFrame([
-                {"компонент": name, "доля, %": round(share * 100, 2)}
-                for name, share in rec.blend.fractions.items()]),
-                hide_index=True, width="stretch")
-            st.markdown(f"**Сумма долей:** {rec.blend.fractions_sum() * 100:.1f} % "
-                        f"(жёсткое требование ТЗ)")
-            st.markdown(f"**Выпуск смеси:** {rec.blend.throughput_tph:.1f} т/ч")
-            if rec.blend.cetane_improver_pct > 0:
-                # Присадка дороже топлива в 100 раз, поэтому её доза и её цена —
-                # не деталь рецептуры, а отдельное экономическое решение.
-                st.markdown(
-                    f"**Цетаноповышающая присадка:** "
-                    f"{rec.blend.cetane_improver_pct:.3f} % массы — минимальная доза "
-                    f"под норматив. Стоит {rec.blend.improver_cost_share * 100:.1f} % "
-                    f"цены тонны, поэтому чистая ценность "
-                    f"**{rec.blend.net_value_tph:.1f} т/ч** при выпуске "
-                    f"{rec.blend.throughput_tph:.1f}.")
-            cetane = rec.blend.properties.get("cetane_number")
-            if cetane is not None:
-                st.markdown(f"**Цетановое число смеси:** {cetane:.1f}")
+                {"что меняем": describe_moves(c),
+                 "сера": round(c.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
+                 # риск и тяжесть режима у каждого варианта СВОИ — именно между
+                 # ними и выбирает технолог
+                 # «риск варианта», а не просто «риск»: в шапке рекомендации риск
+                 # текущего режима считает калиброванный классификатор, путать их нельзя
+                 "риск варианта": f"{c.spec_risk.get('product_sulfur_mgkg', float('nan')):.0%}",
+                 "тяжесть": round(c.severity_index or 0, 3),
+                 # Т95 — второй обязательный показатель. Без неё оператор видит
+                 # только половину размена: вариант с лучшей серой может быть
+                 # хуже по разгонке, и выбирать вслепую он не должен.
+                 "Т95": (None if c.predicted_quality.get("product_t95_c") is None
+                         else round(c.predicted_quality["product_t95_c"], 1)),
+                 "выпуск": round(c.throughput or 0, 1),
+                 "энергия": round(c.energy_proxy or 0, 1),
+                 "с запасом": "да" if c.guaranteed else "нет"}
+                for c in rec.alternatives]), hide_index=True, width="stretch")
+            # Все допустимые варианты пересчитываются тем же оптимизатором (доли
+            # секунды): решение не меняется, это только картинка поля выбора.
+            try:
+                field = system.optimizer.propose(state, q, r)
+            except Exception:                               # noqa: BLE001
+                field = rec.alternatives
+            hold = system.optimizer.last_hold()
+            st.plotly_chart(pareto_chart(field or rec.alternatives, chosen=rec.action,
+                                         hold=hold, limit=limit), width="stretch")
+        else:
+            st.info("Сравнивать нечего: в этот момент система не предлагает изменений "
+                    "режима.")
+
+    with tabs[2]:
+        # ---------- данные и достоверность --------------------------------- #
+        st.subheader("Качество продукта и достоверность данных")
+        left, right = st.columns([3, 2])
+        with left:
+            st.plotly_chart(quality_chart(sb, lab, pd.Timestamp(ts), limit),
+                            width="stretch")
         with right:
-            basis = rec.blend.basis_sulfur_mgkg
-            if basis is not None:
-                st.markdown(f"Рецептура посчитана на **прогнозной** сере "
-                            f"{basis:.2f} мг/кг — то есть для того режима, который "
-                            f"рекомендован, а не для прошедшего.")
-            if rec.blend.feasible:
-                st.success("Рецептура проходит жёсткие проверки.")
+            dq = state.data_quality
+            st.metric("Пропусков в срезе", f"{dq.missing_share:.1%}")
+            gap = getattr(rec, "analyzer_gap", None)
+            if gap:
+                st.warning(f"Расхождение анализаторов {gap['расхождение, мг/кг']:g} мг/кг "
+                           f"(ПАК {gap['пак, мг/кг']:g}, Q21 {gap['q21, мг/кг']:g}): при "
+                           f"таком расхождении оперативное значение на истории ошибалось "
+                           f"втрое сильнее обычного.")
+            if dq.notes:
+                for note in dq.notes:
+                    st.markdown(f"- {note}")
             else:
-                st.error("Допустимой рецептуры нет: " + "; ".join(rec.blend.violations))
-            if rec.blend.uncertified:
-                # «Не посчитали» — это не «годно». Показываем отдельно от нарушений:
-                # там система знает, что плохо, здесь — что не знает вовсе.
-                st.warning("Не подтверждено по обязательным показателям: "
-                           + ", ".join(rec.blend.uncertified)
-                           + ". Анализов у компонентов нет — годной рецептуру "
-                             "называть нельзя, пока их не сделают.")
-            for note in rec.blend.notes:
-                st.markdown(f"- {readable(note)}")
+                st.markdown("Замечаний к данным нет.")
 
-    # ---------- альтернативы ------------------------------------------- #
-    if rec.alternatives:
-        st.subheader("Альтернативы и фронт Парето")
-        # Таблица и поле выбора друг под другом: с описанием вариантов словами в
-        # половине ширины не помещались выпуск, энергия и Т95.
-        st.caption("Три различающиеся альтернативы — оператор видит, чем платит "
-                   "за каждую. Риск варианта — после изменения режима; риск в шапке "
-                   "карточки — у текущего режима.")
-        st.dataframe(pd.DataFrame([
-            {"что меняем": describe_moves(c),
-             "сера": round(c.predicted_quality.get("product_sulfur_mgkg", float("nan")), 2),
-             # риск и тяжесть режима у каждого варианта СВОИ — именно между
-             # ними и выбирает технолог
-             # «риск варианта», а не просто «риск»: в шапке рекомендации риск
-             # текущего режима считает калиброванный классификатор, путать их нельзя
-             "риск варианта": f"{c.spec_risk.get('product_sulfur_mgkg', float('nan')):.0%}",
-             "тяжесть": round(c.severity_index or 0, 3),
-             # Т95 — второй обязательный показатель. Без неё оператор видит
-             # только половину размена: вариант с лучшей серой может быть
-             # хуже по разгонке, и выбирать вслепую он не должен.
-             "Т95": (None if c.predicted_quality.get("product_t95_c") is None
-                     else round(c.predicted_quality["product_t95_c"], 1)),
-             "выпуск": round(c.throughput or 0, 1),
-             "энергия": round(c.energy_proxy or 0, 1),
-             "с запасом": "да" if c.guaranteed else "нет"}
-            for c in rec.alternatives]), hide_index=True, width="stretch")
-        # Все допустимые варианты пересчитываются тем же оптимизатором (доли
-        # секунды): решение не меняется, это только картинка поля выбора.
-        try:
-            field = system.optimizer.propose(state, q, r)
-        except Exception:                               # noqa: BLE001
-            field = rec.alternatives
-        hold = system.optimizer.last_hold()
-        st.plotly_chart(pareto_chart(field or rec.alternatives, chosen=rec.action,
-                                     hold=hold, limit=limit), width="stretch")
+    with tabs[3]:
+        # ---------- надёжность: из чего сложилась тяжесть режима ------------ #
+        panel = reliability_panel(r, load_catalyst_report(ROOT), ts,
+                                  basis=catalyst_basis(system.reliability),
+                                  dp=dp_mode(system.reliability))
+        severity_block(panel["тяжесть"])
+        catalyst_block(panel["катализатор"])
 
-    with st.expander("Полный ответ агентов (JSON)"):
-        st.json({"quality": q.model_dump(mode="json"),
-                 "reliability": r.model_dump(mode="json"),
-                 "recommendation": rec.model_dump(mode="json")})
+    with tabs[4]:
+        # ---------- партия с превышением: гашение в резервуаре --------------- #
+        if rec.tank_rescue:
+            st.subheader("Партия с превышением: что примет резервуар")
+            rescue = rec.tank_rescue
+            cols = st.columns(3)
+            cols[0].metric("Сера партии, мг/кг", f"{rescue['сера партии, мг/кг']:g}")
+            cols[1].metric("Доля партии", f"{rescue['доля партии']:.0%}"
+                           if rescue["возможно"] else "—")
+            cols[2].metric("Тонн резервуара на тонну партии",
+                           f"{rescue.get('на тонну партии нужно тонн резервуара', '—')}")
+            st.caption(
+                f"Практика установки: партию гасят топливом с запасом по сере "
+                f"(резервуар {rescue['сера резервуара, мг/кг']:g} мг/кг — ДОПУЩЕНИЕ, "
+                f"данных по паркам в пакете нет). Цель смеси "
+                f"{rescue['целевая сера смеси, мг/кг']:g} мг/кг. Это операция товарного "
+                "парка, а не замена правке режима.")
+            if not rescue["возможно"]:
+                st.warning(str(rescue.get("почему", "")))
+
+        # ---------- смешение ----------------------------------------------- #
+        if rec.blend is not None:
+            st.subheader("Смешение товарного ДТ")
+            left, right = st.columns([2, 3])
+            with left:
+                st.dataframe(pd.DataFrame([
+                    {"компонент": name, "доля, %": round(share * 100, 2)}
+                    for name, share in rec.blend.fractions.items()]),
+                    hide_index=True, width="stretch")
+                st.markdown(f"**Сумма долей:** {rec.blend.fractions_sum() * 100:.1f} % "
+                            f"(жёсткое требование ТЗ)")
+                st.markdown(f"**Выпуск смеси:** {rec.blend.throughput_tph:.1f} т/ч")
+                if rec.blend.cetane_improver_pct > 0:
+                    # Присадка дороже топлива в 100 раз, поэтому её доза и её цена —
+                    # не деталь рецептуры, а отдельное экономическое решение.
+                    st.markdown(
+                        f"**Цетаноповышающая присадка:** "
+                        f"{rec.blend.cetane_improver_pct:.3f} % массы — минимальная доза "
+                        f"под норматив. Стоит {rec.blend.improver_cost_share * 100:.1f} % "
+                        f"цены тонны, поэтому чистая ценность "
+                        f"**{rec.blend.net_value_tph:.1f} т/ч** при выпуске "
+                        f"{rec.blend.throughput_tph:.1f}.")
+                cetane = rec.blend.properties.get("cetane_number")
+                if cetane is not None:
+                    st.markdown(f"**Цетановое число смеси:** {cetane:.1f}")
+            with right:
+                basis = rec.blend.basis_sulfur_mgkg
+                if basis is not None:
+                    st.markdown(f"Рецептура посчитана на **прогнозной** сере "
+                                f"{basis:.2f} мг/кг — то есть для того режима, который "
+                                f"рекомендован, а не для прошедшего.")
+                if rec.blend.feasible:
+                    st.success("Рецептура проходит жёсткие проверки.")
+                else:
+                    st.error("Допустимой рецептуры нет: " + "; ".join(rec.blend.violations))
+                if rec.blend.uncertified:
+                    # «Не посчитали» — это не «годно». Показываем отдельно от нарушений:
+                    # там система знает, что плохо, здесь — что не знает вовсе.
+                    st.warning("Не подтверждено по обязательным показателям: "
+                               + ", ".join(rec.blend.uncertified)
+                               + ". Анализов у компонентов нет — годной рецептуру "
+                                 "называть нельзя, пока их не сделают.")
+                for note in rec.blend.notes:
+                    st.markdown(f"- {readable(note)}")
+        if rec.blend is None:
+            st.info("Смешение не считалось: совета в этот момент нет.")
+
+    with tabs[5]:
+        st.subheader("Цикл решения: кто что сказал")
+        trace_rows(rec)
+        ask_block(cfg, rec)
+        with st.expander("Полный ответ агентов (JSON)"):
+            st.json({"quality": q.model_dump(mode="json"),
+                     "reliability": r.model_dump(mode="json"),
+                     "recommendation": rec.model_dump(mode="json")})
 
 
 if __name__ == "__main__":
