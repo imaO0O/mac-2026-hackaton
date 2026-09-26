@@ -23,7 +23,7 @@ shap>=0.45
 statsmodels>=0.14
 
 # --- app / demo ---
-streamlit>=1.35
+streamlit>=1.52
 plotly>=5.22
 
 # --- dev ---

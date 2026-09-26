@@ -44,8 +44,10 @@ st.set_page_config(page_title="МАС «Нефтекод»", layout="wide")
 CLASS_RU = {"low": "мягкий", "medium": "средний", "high": "тяжёлый"}
 
 # Боковая панель шире: названия сцен защиты длинные и обрезались на середине.
-st.markdown("<style>[data-testid='stSidebar']{min-width:430px !important;"
-            "width:430px !important}</style>", unsafe_allow_html=True)
+# Ширина — только у раскрытой панели: иначе свёрнутая оставляла полосу 130 px с
+# обрывками текста, а основная область не расширялась.
+st.markdown("<style>[data-testid='stSidebar'][aria-expanded='true']{min-width:430px "
+            "!important;width:430px !important}</style>", unsafe_allow_html=True)
 
 # Шапка и плашка решения. Главный вопрос оператора — «что делать сейчас», и ответ на
 # него должен читаться с другого конца пульта, раньше любых таблиц.
@@ -147,7 +149,10 @@ def pareto_chart(candidates, chosen=None, hold=None, limit: float | None = None)
         fig.add_trace(go.Scatter(
             x=xs, y=ys, mode="markers", name=name, marker=dict(color=color, size=size),
             text=[describe_moves(c) for c in group],
-            hovertemplate="%{text}<br>сера %{x:.2f}<br>выпуск %{y:.1f}<extra></extra>"))
+            customdata=["с гарантией запаса" if c.guaranteed else "без гарантии запаса"
+                        for c in group],
+            hovertemplate=("%{text}<br>сера %{x:.2f}<br>выпуск %{y:.1f}<br>%{customdata}"
+                           "<extra></extra>")))
     for cand, name, color, symbol in ((hold, "ничего не делать", "#111827", "x"),
                                       (chosen, "выбрано", "#D9822B", "star")):
         if cand is None or point(cand)[0] is None:
@@ -159,6 +164,17 @@ def pareto_chart(candidates, chosen=None, hold=None, limit: float | None = None)
     if limit is not None:
         fig.add_vline(x=limit, line_dash="dash", line_color="#B03A2E",
                       annotation_text=f"предел {limit:g}", annotation_position="bottom right")
+        # Правее предела точки допустимы только как «лучше, чем ничего не делать» и
+        # без гарантии запаса. Без подписи это читалось как «допустимо превышение».
+        right = max([point(c)[0] for c in candidates if point(c)[0] is not None]
+                    + ([point(hold)[0]] if hold is not None and point(hold)[0] else []),
+                    default=limit)
+        if right > limit:
+            fig.add_vrect(x0=limit, x1=right + (right - limit) * 0.15 + 0.01,
+                          fillcolor="#B03A2E", opacity=0.07, line_width=0,
+                          annotation_text="выше предела: только лучше бездействия",
+                          annotation_position="top left",
+                          annotation_font=dict(size=11, color="#B03A2E"))
     fig.update_layout(height=360, margin=dict(l=10, r=10, t=50, b=10),
                       xaxis_title="прогноз серы, мг/кг", yaxis_title="выпуск, т/ч",
                       legend=dict(orientation="h", y=1.12, x=0))
@@ -222,7 +238,7 @@ def describe_moves(c) -> str:
     return ", ".join(parts) if parts else "ничего не менять"
 
 
-def flow_strip(rec) -> None:
+def flow_strip(rec, unit_down: bool = False) -> None:
     """Путь решения одной полосой: пять шагов агентов цветными блоками.
 
     Подробная трасса ниже отвечает на «что именно сказал каждый», а инженеру ЦУП
@@ -232,6 +248,11 @@ def flow_strip(rec) -> None:
     """
     green, amber, red, blue, gray = "#2E7D4F", "#D9822B", "#B03A2E", "#1F4E8C", "#5B6472"
     outcome = rec.outcome()
+    # На остановленной установке агенты качества и надёжности всё равно считают — это
+    # их журнал. Но «прогноз 9.23, риск 36 %» и «тяжесть 0.00 (мягкий)» в полосе
+    # противоречили строке состояния, где прогноз и тяжесть скрыты: продукта нет.
+    stopped = {"агент качества": "установка стоит: качество продукта не оценивается",
+               "агент надёжности": "установка стоит: тяжесть режима не оценивается"}
     # Держим режим, но показатель уже вне спецификации (сцена «Т95 за пределом») —
     # жёлтым, как и плашка над карточкой: зелёный здесь читался бы «всё хорошо».
     off_spec = "ЗА ПРЕДЕЛОМ" in rec.problem or "ВНЕ СПЕЦИФИКАЦИИ" in rec.problem
@@ -239,6 +260,8 @@ def flow_strip(rec) -> None:
     for step in rec.trace:
         text = readable(step.summary)
         name = step.agent
+        if unit_down and name in stopped:
+            text = stopped[name]
         if name == "срез состояния":
             color = red if "непригоден" in text else green
         elif name == "агент надёжности":
@@ -250,13 +273,16 @@ def flow_strip(rec) -> None:
         else:
             color = gray
         short = text if len(text) <= 150 else text[:147].rsplit(" ", 1)[0] + "…"
-        boxes.append(f"<div style='flex:1 1 0;min-width:0;border-radius:8px;"
+        # 140 px — меньше слова «оркестратор» не ужать: на ноутбуке 1366 px блоки
+        # переносятся на вторую строку, а не рвут слова и не уходят за правый край.
+        boxes.append(f"<div style='flex:1 1 140px;min-width:140px;border-radius:8px;"
                      f"padding:8px 10px;background:{color};color:#fff'>"
                      f"<div style='font-weight:700;font-size:0.95rem'>{name}</div>"
                      f"<div style='font-size:0.8rem;line-height:1.3;opacity:.95'>{short}</div>"
                      f"</div>")
     arrow = "<div style='align-self:center;font-size:1.4rem;color:#8a93a3'>→</div>"
-    st.markdown("<div style='display:flex;gap:6px;align-items:stretch;margin:4px 0 12px'>"
+    st.markdown("<div style='display:flex;flex-wrap:wrap;gap:6px;align-items:stretch;"
+                "margin:4px 0 12px'>"
                 + arrow.join(boxes) + "</div>", unsafe_allow_html=True)
 
 
@@ -586,7 +612,7 @@ def main() -> None:
     st.subheader("Как система пришла к решению")
     st.caption("Зелёный — всё в порядке · жёлтый — агент ограничил · красный — стоп · "
                "синий — предлагаем действие. Решение принимает оператор.")
-    flow_strip(rec)
+    flow_strip(rec, unit_down=unit_down)
 
     # Детали — по вкладкам: на одной ленте разделы шли друг за другом одинаковыми
     # блоками, и до графика или тяжести режима приходилось долго листать.
@@ -749,6 +775,10 @@ def main() -> None:
             hold = system.optimizer.last_hold()
             st.plotly_chart(pareto_chart(field or rec.alternatives, chosen=rec.action,
                                          hold=hold, limit=limit), width="stretch")
+            st.caption("Правее красной линии прогноз серы выше предела. Такой вариант "
+                       "допустим, только если он лучше, чем ничего не делать (✕), и идёт "
+                       "с пометкой «без гарантии» и пониженной уверенностью. Варианты с "
+                       "гарантией запаса всегда стоят выше в выборе.")
         else:
             st.info("Сравнивать нечего: в этот момент система не предлагает изменений "
                     "режима.")
@@ -780,7 +810,11 @@ def main() -> None:
         panel = reliability_panel(r, load_catalyst_report(ROOT), ts,
                                   basis=catalyst_basis(system.reliability),
                                   dp=dp_mode(system.reliability))
-        severity_block(panel["тяжесть"])
+        if unit_down:
+            st.info("Установка стоит: тяжесть режима не оценивается — реактор холодный, "
+                    "расхода сырья нет.")
+        else:
+            severity_block(panel["тяжесть"])
         catalyst_block(panel["катализатор"])
 
     with tabs[4]:
